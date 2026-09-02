@@ -1,0 +1,49 @@
+{
+  "name": "wp-migrate-core",
+  "version": "0.1.0-demo",
+  "description": "A deliberately limited CLI prototype for turning WordPress WXR content into an Astro migration handoff and repair report.",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "bin": {
+    "wp-migrate-core": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "fixtures/demo-wordpress.xml"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/**/*.test.js",
+    "demo": "npm run build && node dist/src/cli.js demo",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lame13/wp-migrate-core.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lame13/wp-migrate-core/issues"
+  },
+  "homepage": "https://github.com/lame13/wp-migrate-core#readme",
+  "publishConfig": {
+    "access": "public",
+    "tag": "demo"
+  }
+}

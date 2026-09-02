@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0"
+  xmlns:content="http://purl.org/rss/1.0/modules/content/"
+  xmlns:wp="http://wordpress.org/export/1.2/"
+  xmlns:dc="http://purl.org/dc/elements/1.1/"
+  xmlns:excerpt="http://wordpress.org/export/1.2/excerpt/">
+  <channel>
+    <title>Bright Path Plumbing</title>
+    <link>https://brightpath.example</link>
+    <description>Demo migration fixture</description>
+    <wp:base_site_url>https://brightpath.example</wp:base_site_url>
+    <wp:base_blog_url>https://brightpath.example</wp:base_blog_url>
+
+    <item>
+      <title>Home</title>
+      <link>https://brightpath.example/</link>
+      <dc:creator><![CDATA[niko]]></dc:creator>
+      <content:encoded><![CDATA[
+<!-- wp:group {"layout":{"type":"constrained"}} -->
+<div class="wp-block-group">
+  <!-- wp:heading {"level":1} --><h1>Plumbing without the runaround</h1><!-- /wp:heading -->
+  <!-- wp:paragraph --><p>Clear prices, scheduled arrivals and repairs that last.</p><!-- /wp:paragraph -->
+  <!-- wp:buttons --><div class="wp-block-buttons"><!-- wp:button --><div class="wp-block-button"><a class="wp-block-button__link" href="/contact/">Request a quote</a></div><!-- /wp:button --></div><!-- /wp:buttons -->
+</div>
+<!-- /wp:group -->
+<!-- wp:latest-posts {"postsToShow":3,"displayPostDate":true} /-->
+      ]]></content:encoded>
+      <excerpt:encoded><![CDATA[Local plumbing services.]]></excerpt:encoded>
+      <wp:post_id>10</wp:post_id>
+      <wp:post_date>2026-06-01 09:00:00</wp:post_date>
+      <wp:post_name>home</wp:post_name>
+      <wp:status>publish</wp:status>
+      <wp:post_type>page</wp:post_type>
+    </item>
+
+    <item>
+      <title>Services</title>
+      <link>https://brightpath.example/services/</link>
+      <dc:creator><![CDATA[niko]]></dc:creator>
+      <content:encoded><![CDATA[]]></content:encoded>
+      <wp:post_id>11</wp:post_id>
+      <wp:post_date>2026-06-02 09:00:00</wp:post_date>
+      <wp:post_name>services</wp:post_name>
+      <wp:status>publish</wp:status>
+      <wp:post_type>page</wp:post_type>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_elementor_edit_mode]]></wp:meta_key>
+        <wp:meta_value><![CDATA[builder]]></wp:meta_value>
+      </wp:postmeta>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_elementor_data]]></wp:meta_key>
+        <wp:meta_value><![CDATA[[
+          {
+            "id":"hero01",
+            "elType":"container",
+            "settings":{"content_width":"boxed","padding":{"unit":"px","top":"72","right":"24","bottom":"72","left":"24"}},
+            "elements":[
+              {"id":"h001","elType":"widget","widgetType":"heading","settings":{"title":"Repairs, installations and maintenance","header_size":"h1"},"elements":[]},
+              {"id":"t001","elType":"widget","widgetType":"text-editor","settings":{"editor":"<p>Residential plumbing handled by licensed technicians.</p>"},"elements":[]},
+              {"id":"b001","elType":"widget","widgetType":"button","settings":{"text":"Request a quote","link":{"url":"/contact/"}},"elements":[]}
+            ]
+          },
+          {
+            "id":"services01",
+            "elType":"container",
+            "settings":{"flex_direction":"row"},
+            "elements":[
+              {"id":"i001","elType":"widget","widgetType":"image","settings":{"image":{"url":"https://brightpath.example/wp-content/uploads/2026/05/repair.jpg","id":301},"image_size":"large"},"elements":[]},
+              {"id":"p001","elType":"widget","widgetType":"posts","settings":{"posts_per_page":3,"orderby":"menu_order"},"elements":[]},
+              {"id":"x001","elType":"widget","widgetType":"essential-addons-testimonial-slider","settings":{"autoplay":"yes"},"elements":[]}
+            ]
+          }
+        ]]]></wp:meta_value>
+      </wp:postmeta>
+    </item>
+
+    <item>
+      <title>Contact</title>
+      <link>https://brightpath.example/contact/</link>
+      <dc:creator><![CDATA[niko]]></dc:creator>
+      <content:encoded><![CDATA[
+<!-- wp:heading --><h2>Request a quote</h2><!-- /wp:heading -->
+<!-- wp:paragraph --><p>Tell us what needs attention.</p><!-- /wp:paragraph -->
+[gravityform id="4" title="false" description="false"]
+      ]]></content:encoded>
+      <wp:post_id>12</wp:post_id>
+      <wp:post_date>2026-06-03 09:00:00</wp:post_date>
+      <wp:post_name>contact</wp:post_name>
+      <wp:status>publish</wp:status>
+      <wp:post_type>page</wp:post_type>
+    </item>
+
+    <item>
+      <title>How to stop a leaking tap</title>
+      <link>https://brightpath.example/guides/stop-a-leaking-tap/</link>
+      <dc:creator><![CDATA[niko]]></dc:creator>
+      <category domain="category" nicename="guides"><![CDATA[Guides]]></category>
+      <content:encoded><![CDATA[
+<!-- wp:heading --><h2>Find the shut-off valve</h2><!-- /wp:heading -->
+<!-- wp:paragraph --><p>Turn off the local valve before removing the tap handle.</p><!-- /wp:paragraph -->
+<!-- wp:image {"id":302,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="https://brightpath.example/wp-content/uploads/2026/05/tap.jpg" alt="Tap handle removed" /></figure><!-- /wp:image -->
+<!-- wp:quote --><blockquote class="wp-block-quote"><p>Do not force a seized valve.</p></blockquote><!-- /wp:quote -->
+      ]]></content:encoded>
+      <wp:post_id>20</wp:post_id>
+      <wp:post_date>2026-06-04 09:00:00</wp:post_date>
+      <wp:post_name>stop-a-leaking-tap</wp:post_name>
+      <wp:status>publish</wp:status>
+      <wp:post_type>post</wp:post_type>
+    </item>
+  </channel>
+</rss>

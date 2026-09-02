@@ -1,0 +1,12 @@
+node_modules/
+dist/
+wp-migrate-core-demo/
+*.tgz
+migration-plan/
+new-site/
+migration-report.html
+.env
+.env.*
+!.env.example
+.DS_Store
+npm-debug.log*
