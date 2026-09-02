@@ -1,7 +1,17 @@
 {
   "name": "wp-migrate-core",
   "version": "0.1.0-demo",
-  "description": "A deliberately limited CLI prototype for turning WordPress WXR content into an Astro migration handoff and repair report.",
+  "description": "Turn a WordPress WXR export into an Astro handoff, with a repair queue for the parts that still need a human.",
+  "keywords": [
+    "wordpress",
+    "wordpress-migration",
+    "wxr",
+    "astro",
+    "elementor",
+    "gutenberg",
+    "cli",
+    "typescript"
+  ],
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
@@ -41,7 +51,7 @@
   "bugs": {
     "url": "https://github.com/lame13/wp-migrate-core/issues"
   },
-  "homepage": "https://github.com/lame13/wp-migrate-core#readme",
+  "homepage": "https://indexlane.dev",
   "publishConfig": {
     "access": "public",
     "tag": "demo"
