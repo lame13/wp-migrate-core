@@ -56,6 +56,8 @@ export type MigrationIssueSeverity = "warning" | "blocker";
 export type MigrationIssueCode =
   | "WXR_NO_ITEMS"
   | "WXR_ITEM_MISSING_ID"
+  | "WXR_ITEM_INVALID_ID"
+  | "WXR_ITEM_DUPLICATE_ID"
   | "GUTENBERG_UNCLOSED_BLOCK"
   | "GUTENBERG_UNMATCHED_CLOSE"
   | "GUTENBERG_INVALID_ATTRIBUTES"

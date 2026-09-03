@@ -1,6 +1,6 @@
 # wp-migrate-core
 
-`wp-migrate-core` is an intentionally limited, local CLI prototype for inspecting a WordPress WXR export and creating an Astro migration handoff. Version `0.1.0-demo` is published under npm's `demo` tag.
+`wp-migrate-core` is an intentionally limited, local CLI prototype for inspecting a WordPress WXR export and creating an Astro migration handoff. Version `0.1.1` uses npm's `demo` tag.
 
 It can help expose what must be rebuilt. It does not produce a finished or production-ready WordPress replacement.
 
@@ -29,9 +29,9 @@ wp-migrate-core report <export.xml> [--out migration-report.html]
 wp-migrate-core demo [--out wp-migrate-core-demo]
 ```
 
-`inspect` writes `migration-plan.json` and a local repair report. `convert` writes an Astro-shaped project plus its migration manifest and repair report. `report` writes only the repair report. `demo` runs both inspection and conversion against the bundled fixture.
+`inspect` validates the WXR file before writing. It creates `migration-plan.json` and a local repair report as a pair in a new output directory: if either output cannot be created, it leaves neither newly created file behind and never overwrites an existing `--out` path. `convert` writes an Astro-shaped project plus its migration manifest and repair report. `report` writes only the repair report. `demo` runs both inspection and conversion against the bundled fixture.
 
-The `astro` target is the only enabled target in `0.1.0-demo`. `next` and `nuxt` are registered as planned targets and deliberately fail when selected.
+The `astro` target is the only enabled target. `next` and `nuxt` are registered as planned targets and deliberately fail when selected.
 
 ## What the demo handles
 
@@ -40,6 +40,7 @@ The `astro` target is the only enabled target in `0.1.0-demo`. `next` and `nuxt`
 - A bounded subset of serialized Gutenberg core blocks.
 - Elementor `_elementor_data` in WXR post metadata, including simple containers, headings, text, images, buttons, dividers, and spacers.
 - An explicit repair queue for dynamic Gutenberg blocks, unsupported shortcodes, Elementor forms and queries, and unknown Elementor widgets.
+- Items with missing, invalid, or duplicate `wp:post_id` values are skipped and added to the repair report. Correct the export before relying on the handoff.
 
 Each detected construct is marked as `native`, `legacy-html`, `manual`, or `blocked`. Unsupported behavior stays visible in the generated output and repair queue; it is not counted as a successful conversion.
 

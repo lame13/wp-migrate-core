@@ -16,6 +16,6 @@ export const targetAvailability = {
 export function assertTargetEnabled(target: OutputTarget): void {
   const availability = targetAvailability[target];
   if (!availability.enabled) {
-    throw new Error(`${availability.label} is planned but disabled in 0.1.0-demo. Use --target astro.`);
+    throw new Error(`${availability.label} is planned but not available in this release. Use --target astro.`);
   }
 }

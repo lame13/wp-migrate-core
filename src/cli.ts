@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { lstat, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertTargetEnabled, targetAvailability } from "./adapters.js";
 import { parseWxr } from "./core.js";
@@ -23,7 +23,7 @@ interface CliOptions {
 }
 
 function usage(): string {
-  return `WP Migrate Core 0.1.0-demo
+  return `WP Migrate Core 0.1.1
 
 Usage:
   wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro]
@@ -32,9 +32,9 @@ Usage:
   wp-migrate-core demo [--out wp-migrate-core-demo]
 
 Targets:
-  astro  implemented in 0.1.0-demo
-  next   not implemented in 0.1.0-demo
-  nuxt   not implemented in 0.1.0-demo
+  astro  implemented
+  next   planned, not implemented
+  nuxt   planned, not implemented
 
 This is a deliberately incomplete demonstration. It does not modify WordPress.`;
 }
@@ -156,20 +156,13 @@ function isNodeErrorCode(error: unknown, code: string): boolean {
 
 function outputExistsError(outputPath: string): Error {
   return new Error(
-    `Refusing to overwrite existing output: ${outputPath}. Choose a different --out path or remove the existing file intentionally.`
+    `Refusing to overwrite existing output: ${outputPath}. Choose a different --out path or remove the existing path intentionally.`
   );
 }
 
-async function ensureInspectionDirectory(directory: string): Promise<void> {
-  try {
-    const details = await stat(directory);
-    if (!details.isDirectory()) {
-      throw new Error(`Inspect output path exists and is not a directory: ${directory}`);
-    }
-  } catch (error) {
-    if (!isNodeErrorCode(error, "ENOENT")) throw error;
-    await mkdir(directory, { recursive: true });
-  }
+async function prepareInspectionOutput(directory: string): Promise<void> {
+  await mkdir(dirname(directory), { recursive: true });
+  await assertOutputDoesNotExist(directory);
 }
 
 async function assertOutputDoesNotExist(outputPath: string): Promise<void> {
@@ -213,13 +206,25 @@ function printSummary(project: MigrationProject): void {
 
 async function inspect(project: MigrationProject, outputDirectory: string): Promise<void> {
   const directory = resolve(outputDirectory);
+  await prepareInspectionOutput(directory);
+  // A sibling keeps the final rename on the same filesystem.
+  const stagingDirectory = await mkdtemp(resolve(dirname(directory), `.${basename(directory)}.staging-`));
+
+  try {
+    const stagingPlanPath = resolve(stagingDirectory, "migration-plan.json");
+    const stagingReportPath = resolve(stagingDirectory, "report.html");
+
+    await writeNewFile(stagingPlanPath, `${JSON.stringify(createMigrationPlan(project), null, 2)}\n`);
+    await writeReport(project, stagingReportPath, { noClobber: true });
+    await assertOutputDoesNotExist(directory);
+    await rename(stagingDirectory, directory);
+  } catch (error) {
+    await rm(stagingDirectory, { recursive: true, force: true });
+    throw error;
+  }
+
   const planPath = resolve(directory, "migration-plan.json");
   const reportPath = resolve(directory, "report.html");
-  await ensureInspectionDirectory(directory);
-  await assertOutputDoesNotExist(planPath);
-  await assertOutputDoesNotExist(reportPath);
-  await writeNewFile(planPath, `${JSON.stringify(createMigrationPlan(project), null, 2)}\n`);
-  await writeReport(project, reportPath, { noClobber: true });
   printSummary(project);
   console.log(`\nPlan: ${planPath}`);
   console.log(`Report: ${reportPath}`);

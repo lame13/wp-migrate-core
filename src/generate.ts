@@ -4,7 +4,7 @@ import { dirname, parse, resolve } from "node:path";
 import type { ContentRecord, MigrationIssue, MigrationNode, MigrationProject } from "./types.js";
 
 const GENERATOR_NAME = "wp-migrate-core";
-const GENERATOR_VERSION = "0.1.0-demo";
+const GENERATOR_VERSION = "0.1.1";
 const SAFE_ELEMENTOR_HREF_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
 
 interface GeneratedRecord {
@@ -337,7 +337,7 @@ npm run dev
 
 Generated content lives in \`src/content/pages\` and \`src/content/posts\`. Route mappings and source IDs live in \`migration/manifest.json\`.
 
-Astro is the only enabled renderer in 0.1.0-demo. Next.js and Nuxt appear in the migration manifest as planned, disabled targets; this output contains no fake compatibility layer for either framework.
+Astro is the only enabled renderer in this handoff. Next.js and Nuxt appear in the migration manifest as planned, disabled targets; this output contains no fake compatibility layer for either framework.
 `;
 }
 

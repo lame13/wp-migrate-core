@@ -106,7 +106,7 @@ function renderTargetCard(project: MigrationProject, target: OutputTarget): stri
         <span class="target-state target-state--${enabled ? "available" : "unavailable"}">${state}</span>
       </div>
       <p>${escapeHtml(targetDescriptions[target])}</p>
-      ${enabled ? "" : '<span class="target-card__notice">Not implemented in 0.1.0-demo</span>'}
+      ${enabled ? "" : '<span class="target-card__notice">Not implemented in this release</span>'}
     </article>`;
 }
 
@@ -680,7 +680,7 @@ export function renderReport(project: MigrationProject): string {
   <header class="topbar">
     <div class="topbar__inner">
       <div class="product">WP Migrate Core</div>
-      <div class="report-meta">Local migration report · Version 0.1.0-demo</div>
+      <div class="report-meta">Local migration report · Version 0.1.1</div>
     </div>
   </header>
 

@@ -142,11 +142,12 @@ const SAFE_ELEMENTOR_HREF_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
  * Parse a bounded WXR export into a target-neutral migration model.
  *
  * This deliberately does not claim to be a complete XML or WordPress parser. It
- * is dependency-free so 0.1.0-demo can make the conversion boundary visible.
+ * is dependency-free so the conversion boundary stays visible.
  */
 export function parseWxr(xml: string, options: InspectOptions = {}): MigrationProject {
   const records: ContentRecord[] = [];
   const projectIssues: MigrationIssue[] = [];
+  const seenWordPressIds = new Set<number>();
   const channelHeader = xml.slice(0, xml.search(/<item\b/i) === -1 ? xml.length : xml.search(/<item\b/i));
   const itemPattern = /<item\b[^>]*>([\s\S]*?)<\/item>/gi;
   let itemMatch: RegExpExecArray | null;
@@ -164,20 +165,39 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
     }
 
     const rawId = cleanField(readTag(itemXml, "wp:post_id"));
-    const wordpressId = Number.parseInt(rawId, 10);
-    if (!Number.isFinite(wordpressId)) {
+    const wordpressId = parseWordPressId(rawId);
+    if (wordpressId === undefined) {
+      const missingId = rawId === "";
       projectIssues.push({
-        id: `project:WXR_ITEM_MISSING_ID:${projectIssues.length + 1}`,
+        id: `project:${missingId ? "WXR_ITEM_MISSING_ID" : "WXR_ITEM_INVALID_ID"}:${projectIssues.length + 1}`,
         severity: "warning",
-        code: "WXR_ITEM_MISSING_ID",
+        code: missingId ? "WXR_ITEM_MISSING_ID" : "WXR_ITEM_INVALID_ID",
         sourceId: "wp:unknown",
-        title: "WordPress item is missing its ID",
-        message: `Skipped a ${postType} without a numeric wp:post_id.`,
-        requiredAction: "Inspect the WXR export and restore the missing post identifier."
+        title: missingId ? "WordPress item is missing its ID" : "WordPress item has an invalid ID",
+        message: missingId
+          ? `Skipped a ${postType} without a wp:post_id.`
+          : `Skipped a ${postType} because wp:post_id must be a positive integer.`,
+        requiredAction: missingId
+          ? "Inspect the WXR export and restore the missing post identifier."
+          : "Inspect the WXR export and restore a positive integer post identifier."
       });
       continue;
     }
 
+    if (seenWordPressIds.has(wordpressId)) {
+      projectIssues.push({
+        id: `project:WXR_ITEM_DUPLICATE_ID:${projectIssues.length + 1}`,
+        severity: "warning",
+        code: "WXR_ITEM_DUPLICATE_ID",
+        sourceId: `wp:${postType}:${wordpressId}`,
+        title: "WordPress item repeats an existing ID",
+        message: `Skipped a duplicate ${postType} with wp:post_id ${wordpressId}.`,
+        requiredAction: "Inspect the WXR export and resolve the duplicate post identifier before migration."
+      });
+      continue;
+    }
+
+    seenWordPressIds.add(wordpressId);
     records.push(parseItem(itemXml, postType, status, wordpressId));
   }
 
@@ -496,7 +516,7 @@ function convertElementorElement(
   collector.add(
     "warning",
     "ELEMENTOR_WIDGET_UNKNOWN",
-    `Elementor widget ${widgetType} has no 0.1.0-demo adapter.`,
+    `Elementor widget ${widgetType} has no supported adapter in this release.`,
     "Replace it with an Astro component or preserve its rendered HTML.",
     { nodeId, evidence: widgetType }
   );
@@ -581,7 +601,7 @@ function reportGutenbergCompatibility(node: MutableNode, collector: IssueCollect
     collector.add(
       "warning",
       "GUTENBERG_UNKNOWN_BLOCK",
-      `Gutenberg block ${node.sourceType} has no 0.1.0-demo adapter.`,
+      `Gutenberg block ${node.sourceType} has no supported adapter in this release.`,
       "Add an adapter or preserve the block's rendered HTML.",
       { nodeId: node.id, evidence: node.sourceType }
     );
@@ -754,17 +774,43 @@ function cleanOptionalField(value: string): string | undefined {
   return cleaned === "" ? undefined : cleaned;
 }
 
+function parseWordPressId(value: string): number | undefined {
+  if (!/^[0-9]+$/.test(value)) {
+    return undefined;
+  }
+
+  const wordpressId = Number(value);
+  return Number.isSafeInteger(wordpressId) && wordpressId > 0 ? wordpressId : undefined;
+}
+
 function decodeXmlEntities(value: string): string {
   return value
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_match, decimal: string) => String.fromCodePoint(Number.parseInt(decimal, 10)))
-    .replace(/&#x([0-9a-f]+);/gi, (_match, hexadecimal: string) =>
-      String.fromCodePoint(Number.parseInt(hexadecimal, 16))
+    .replace(/&#(\d+);/g, (entity: string, decimal: string) => decodeNumericXmlEntity(entity, decimal, 10))
+    .replace(/&#x([0-9a-f]+);/gi, (entity: string, hexadecimal: string) =>
+      decodeNumericXmlEntity(entity, hexadecimal, 16)
     )
     .replace(/&amp;/g, "&");
+}
+
+function decodeNumericXmlEntity(entity: string, value: string, radix: number): string {
+  const codePoint = Number.parseInt(value, radix);
+  return isValidXmlCodePoint(codePoint) ? String.fromCodePoint(codePoint) : entity;
+}
+
+function isValidXmlCodePoint(value: number): boolean {
+  return (
+    Number.isSafeInteger(value) &&
+    (value === 0x9 ||
+      value === 0xa ||
+      value === 0xd ||
+      (value >= 0x20 && value <= 0xd7ff) ||
+      (value >= 0xe000 && value <= 0xfffd) ||
+      (value >= 0x10000 && value <= 0x10ffff))
+  );
 }
 
 function htmlToText(value: string): string {
