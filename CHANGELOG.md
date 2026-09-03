@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Adds read-only GitHub Actions CI for Node 20 installation, tests, and a dry-run npm package check.
+
 ## [0.1.1] - 2026-09-03
 
 This release makes inspection safer when an export or output path is not quite what the CLI expects.
@@ -14,5 +18,6 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/lame13/wp-migrate-core/compare/v0.1.0-demo...v0.1.1
 [0.1.0-demo]: https://github.com/lame13/wp-migrate-core/releases/tag/v0.1.0-demo
