@@ -40,3 +40,6 @@ jobs:
 
       - name: Check the npm package contents
         run: npm pack --dry-run --json
+
+      - name: Test the installed npm package
+        run: npm run test:package

@@ -2,9 +2,9 @@ import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, parse, resolve } from "node:path";
 
 import type { ContentRecord, MigrationIssue, MigrationNode, MigrationProject } from "./types.js";
+import { packageVersion } from "./version.js";
 
 const GENERATOR_NAME = "wp-migrate-core";
-const GENERATOR_VERSION = "0.1.1";
 const SAFE_ELEMENTOR_HREF_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
 
 interface GeneratedRecord {
@@ -291,7 +291,7 @@ function renderManifest(project: MigrationProject, records: readonly GeneratedRe
     schemaVersion: "0.1",
     generator: {
       name: GENERATOR_NAME,
-      version: GENERATOR_VERSION,
+      version: packageVersion,
       target: "astro"
     },
     sourceSite: project.site,
@@ -316,7 +316,7 @@ function renderManifest(project: MigrationProject, records: readonly GeneratedRe
 function renderReadme(project: MigrationProject): string {
   return `# ${project.site.title} — Astro migration handoff
 
-Generated from ${project.site.url ?? "a WordPress export"} by ${GENERATOR_NAME} ${GENERATOR_VERSION}.
+Generated from ${project.site.url ?? "a WordPress export"} by ${GENERATOR_NAME} ${packageVersion}.
 
 This is a rough migration output, not a production-ready replacement. The generator preserves source content where it can and emits explicit repair markers where it cannot.
 

@@ -1,5 +1,6 @@
 import { dirname } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
+import { packageVersion } from "./version.js";
 
 import type {
   ContentRecord,
@@ -680,7 +681,7 @@ export function renderReport(project: MigrationProject): string {
   <header class="topbar">
     <div class="topbar__inner">
       <div class="product">WP Migrate Core</div>
-      <div class="report-meta">Local migration report · Version 0.1.1</div>
+      <div class="report-meta">Local migration report · Version ${escapeHtml(packageVersion)}</div>
     </div>
   </header>
 
