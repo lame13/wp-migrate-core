@@ -7,6 +7,7 @@ import { assertTargetEnabled, targetAvailability } from "./adapters.js";
 import { parseWxr } from "./core.js";
 import { generateAstroProject } from "./generate.js";
 import { writeReport } from "./report.js";
+import { packageVersion } from "./version.js";
 import type {
   ContentRecord,
   MigrationIssue,
@@ -17,19 +18,25 @@ import type {
 
 interface CliOptions {
   readonly command: string;
+  readonly help: boolean;
+  readonly version: boolean;
   readonly input?: string;
   readonly output?: string;
   readonly target: OutputTarget;
 }
 
 function usage(): string {
-  return `WP Migrate Core 0.1.1
+  return `WP Migrate Core ${packageVersion}
 
 Usage:
   wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro]
   wp-migrate-core convert <export.xml> --out <new-site> [--target astro]
   wp-migrate-core report <export.xml> [--out migration-report.html]
   wp-migrate-core demo [--out wp-migrate-core-demo]
+
+Options:
+  --help, -h     show help, including after a command
+  --version, -v  show the installed package version
 
 Targets:
   astro  implemented
@@ -41,30 +48,55 @@ This is a deliberately incomplete demonstration. It does not modify WordPress.`;
 
 function parseArguments(argv: readonly string[]): CliOptions {
   const command = argv[0] ?? "help";
+  if (!["inspect", "convert", "report", "demo", "help", "--help", "-h", "--version", "-v"].includes(command)) {
+    throw new Error(`Unknown command: ${command}.\n\n${usage()}`);
+  }
+
+  let help = command === "help" || command === "--help" || command === "-h";
+  let version = command === "--version" || command === "-v";
   let input: string | undefined;
   let output: string | undefined;
   let target: OutputTarget = "astro";
 
   for (let index = 1; index < argv.length; index += 1) {
     const value = argv[index];
-    if (value === "--out") {
-      output = argv[index + 1];
+    if (value === "--help" || value === "-h") {
+      help = true;
+    } else if (value === "--version" || value === "-v") {
+      version = true;
+    } else if (value === "--out") {
+      output = optionValue(value, argv[index + 1]);
       index += 1;
     } else if (value === "--target") {
-      const candidate = argv[index + 1];
+      const candidate = optionValue(value, argv[index + 1]);
       if (candidate !== "astro" && candidate !== "next" && candidate !== "nuxt") {
-        throw new Error(`Unknown target: ${candidate ?? "missing"}. Use astro, next, or nuxt.`);
+        throw new Error(`Unknown target: ${candidate}. Use astro, next, or nuxt.`);
       }
       target = candidate;
       index += 1;
-    } else if (!value?.startsWith("--") && input === undefined) {
+    } else if (!value?.startsWith("-") && input === undefined) {
       input = value;
     } else {
       throw new Error(`Unknown argument: ${value ?? "missing"}`);
     }
   }
 
-  return { command, ...(input === undefined ? {} : { input }), ...(output === undefined ? {} : { output }), target };
+  return {
+    command,
+    help,
+    version,
+    ...(input === undefined ? {} : { input }),
+    ...(output === undefined ? {} : { output }),
+    target
+  };
+}
+
+function optionValue(option: string, value: string | undefined): string {
+  if (value === undefined || value.trim().length === 0 || value.startsWith("-")) {
+    throw new Error(`${option} requires a value.`);
+  }
+
+  return value;
 }
 
 async function loadProject(inputPath: string): Promise<MigrationProject> {
@@ -233,8 +265,13 @@ async function inspect(project: MigrationProject, outputDirectory: string): Prom
 async function run(): Promise<void> {
   const options = parseArguments(process.argv.slice(2));
 
-  if (options.command === "help" || options.command === "--help" || options.command === "-h") {
+  if (options.help) {
     console.log(usage());
+    return;
+  }
+
+  if (options.version) {
+    console.log(packageVersion);
     return;
   }
 

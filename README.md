@@ -1,6 +1,6 @@
 # wp-migrate-core
 
-`wp-migrate-core` is an intentionally limited, local CLI prototype for inspecting a WordPress WXR export and creating an Astro migration handoff. Version `0.1.1` uses npm's `demo` tag.
+`wp-migrate-core` is an intentionally limited, local CLI prototype for inspecting a WordPress WXR export and creating an Astro migration handoff. Releases use npm's `latest` tag; `demo` remains an alias for the same release.
 
 It can help expose what must be rebuilt. It does not produce a finished or production-ready WordPress replacement.
 
@@ -9,7 +9,7 @@ It can help expose what must be rebuilt. It does not produce a finished or produ
 Requires Node.js 20 or later.
 
 ```bash
-npm install --save-dev wp-migrate-core@demo
+npm install --save-dev wp-migrate-core
 ```
 
 Run the included fictional fixture:
@@ -27,7 +27,11 @@ wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro]
 wp-migrate-core convert <export.xml> --out <new-site> [--target astro]
 wp-migrate-core report <export.xml> [--out migration-report.html]
 wp-migrate-core demo [--out wp-migrate-core-demo]
+wp-migrate-core --version
+wp-migrate-core inspect --help
 ```
+
+Use `--help` (or `-h`) with any command to see usage without reading an export or writing output. `--version` (or `-v`) prints the installed package version. Options such as `--out` and `--target` require a nonempty value; incomplete options fail before reading an export or writing output.
 
 `inspect` validates the WXR file before writing. It creates `migration-plan.json` and a local repair report as a pair in a new output directory: if either output cannot be created, it leaves neither newly created file behind and never overwrites an existing `--out` path. `convert` writes an Astro-shaped project plus its migration manifest and repair report. `report` writes only the repair report. `demo` runs both inspection and conversion against the bundled fixture.
 
@@ -67,8 +71,11 @@ From a checkout:
 ```bash
 npm install
 npm test
+npm run test:package
 npm run demo
 ```
+
+`npm run test:package` builds and packs the package, installs the tarball in a temporary project outside the checkout, and checks the CLI, bundled demo, and ESM exports. It removes its temporary project, tarball, and npm cache afterward.
 
 ## License
 

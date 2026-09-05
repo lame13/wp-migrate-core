@@ -1,6 +1,6 @@
 {
   "name": "wp-migrate-core",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Turn a WordPress WXR export into an Astro handoff, with a repair queue for the parts that still need a human.",
   "keywords": [
     "wordpress",
@@ -32,10 +32,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/**/*.test.js",
+    "test:package": "node --test test/package.test.mjs",
     "demo": "npm run build && node dist/src/cli.js demo",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "prepack": "npm run clean && npm run build",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "npm test && npm run test:package"
   },
   "engines": {
     "node": ">=20"
@@ -55,6 +56,6 @@
   "homepage": "https://indexlane.dev",
   "publishConfig": {
     "access": "public",
-    "tag": "demo"
+    "tag": "latest"
   }
 }
