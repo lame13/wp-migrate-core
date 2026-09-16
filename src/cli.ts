@@ -13,8 +13,11 @@ import type {
   MigrationIssue,
   MigrationNode,
   MigrationProject,
+  MigrationSummary,
   OutputTarget
 } from "./types.js";
+
+type FailureThreshold = "none" | "warning" | "blocker";
 
 interface CliOptions {
   readonly command: string;
@@ -23,6 +26,9 @@ interface CliOptions {
   readonly input?: string;
   readonly output?: string;
   readonly target: OutputTarget;
+  readonly includeDrafts: boolean;
+  readonly json: boolean;
+  readonly failOn: FailureThreshold;
 }
 
 function usage(): string {
@@ -35,15 +41,21 @@ Usage:
   wp-migrate-core demo [--out wp-migrate-core-demo]
 
 Options:
-  --help, -h     show help, including after a command
-  --version, -v  show the installed package version
+  --help, -h            show help, including after a command
+  --version, -v         show the installed package version
+  --include-drafts      also read items that are skipped by default
+  --json                print one JSON document instead of the summary
+  --fail-on <severity>  fail on warning or blocker; none disables the gate (default)
 
 Targets:
   astro  implemented
   next   planned, not implemented
   nuxt   planned, not implemented
 
-This is a deliberately incomplete demonstration. It does not modify WordPress.`;
+This is a deliberately incomplete demonstration. It does not modify WordPress.
+
+--fail-on never changes what is written; it only sets the exit status so a
+caller can gate on the repair queue.`;
 }
 
 function parseArguments(argv: readonly string[]): CliOptions {
@@ -57,6 +69,9 @@ function parseArguments(argv: readonly string[]): CliOptions {
   let input: string | undefined;
   let output: string | undefined;
   let target: OutputTarget = "astro";
+  let includeDrafts = false;
+  let json = false;
+  let failOn: FailureThreshold = "none";
 
   for (let index = 1; index < argv.length; index += 1) {
     const value = argv[index];
@@ -64,6 +79,10 @@ function parseArguments(argv: readonly string[]): CliOptions {
       help = true;
     } else if (value === "--version" || value === "-v") {
       version = true;
+    } else if (value === "--include-drafts") {
+      includeDrafts = true;
+    } else if (value === "--json") {
+      json = true;
     } else if (value === "--out") {
       output = optionValue(value, argv[index + 1]);
       index += 1;
@@ -73,6 +92,13 @@ function parseArguments(argv: readonly string[]): CliOptions {
         throw new Error(`Unknown target: ${candidate}. Use astro, next, or nuxt.`);
       }
       target = candidate;
+      index += 1;
+    } else if (value === "--fail-on") {
+      const candidate = optionValue(value, argv[index + 1]);
+      if (candidate !== "none" && candidate !== "warning" && candidate !== "blocker") {
+        throw new Error(`Unknown --fail-on value: ${candidate}. Use none, warning, or blocker.`);
+      }
+      failOn = candidate;
       index += 1;
     } else if (!value?.startsWith("-") && input === undefined) {
       input = value;
@@ -87,7 +113,10 @@ function parseArguments(argv: readonly string[]): CliOptions {
     version,
     ...(input === undefined ? {} : { input }),
     ...(output === undefined ? {} : { output }),
-    target
+    target,
+    includeDrafts,
+    json,
+    failOn
   };
 }
 
@@ -99,9 +128,9 @@ function optionValue(option: string, value: string | undefined): string {
   return value;
 }
 
-async function loadProject(inputPath: string): Promise<MigrationProject> {
+async function loadProject(inputPath: string, options: CliOptions): Promise<MigrationProject> {
   const xml = await readFile(resolve(inputPath), "utf8");
-  return parseWxr(xml);
+  return parseWxr(xml, { includeDrafts: options.includeDrafts });
 }
 
 /**
@@ -236,7 +265,77 @@ function printSummary(project: MigrationProject): void {
   }
 }
 
-async function inspect(project: MigrationProject, outputDirectory: string): Promise<void> {
+/**
+ * A threshold is the minimum severity that should make the command fail. It is
+ * a reporting choice only: every command still writes the same files.
+ */
+function failureThresholdTripped(summary: MigrationSummary, threshold: FailureThreshold): boolean {
+  if (threshold === "blocker") return summary.blockers > 0;
+  if (threshold === "warning") return summary.blockers > 0 || summary.warnings > 0;
+  return false;
+}
+
+function describeFailure(summary: MigrationSummary, threshold: FailureThreshold): string {
+  if (threshold === "blocker") {
+    return `${summary.blockers} blocker(s)`;
+  }
+
+  return `${summary.blockers} blocker(s) and ${summary.warnings} warning(s)`;
+}
+
+/**
+ * Keeps --json interchangeable with the default summary: the same sanitized
+ * issues, the same counts, and no source content or unsanitized URLs.
+ */
+function createJsonDocument(
+  project: MigrationProject,
+  options: CliOptions,
+  command: string,
+  outputs: Readonly<Record<string, string>>,
+  failed: boolean
+): object {
+  return {
+    generator: { name: "wp-migrate-core", version: packageVersion },
+    command,
+    scan: { includeDrafts: options.includeDrafts },
+    source: project.source.title === undefined ? {} : { title: project.source.title },
+    summary: project.summary,
+    issues: project.issues.map(createPlanIssue),
+    outputs,
+    failed
+  };
+}
+
+interface CommandResult {
+  readonly command: string;
+  readonly outputs: Readonly<Record<string, string>>;
+  readonly humanLines: readonly string[];
+}
+
+function finishCommand(project: MigrationProject, options: CliOptions, result: CommandResult): void {
+  const failed = failureThresholdTripped(project.summary, options.failOn);
+
+  if (options.json) {
+    console.log(JSON.stringify(createJsonDocument(project, options, result.command, result.outputs, failed), null, 2));
+  } else {
+    printSummary(project);
+    for (const line of result.humanLines) {
+      console.log(line);
+    }
+  }
+
+  if (failed) {
+    process.exitCode = 1;
+    console.error(
+      `wp-migrate-core: --fail-on ${options.failOn} matched ${describeFailure(project.summary, options.failOn)}. Review the repair queue before using this handoff.`
+    );
+  }
+}
+
+async function inspect(
+  project: MigrationProject,
+  outputDirectory: string
+): Promise<{ readonly plan: string; readonly report: string }> {
   const directory = resolve(outputDirectory);
   await prepareInspectionOutput(directory);
   // A sibling keeps the final rename on the same filesystem.
@@ -255,11 +354,10 @@ async function inspect(project: MigrationProject, outputDirectory: string): Prom
     throw error;
   }
 
-  const planPath = resolve(directory, "migration-plan.json");
-  const reportPath = resolve(directory, "report.html");
-  printSummary(project);
-  console.log(`\nPlan: ${planPath}`);
-  console.log(`Report: ${reportPath}`);
+  return {
+    plan: resolve(directory, "migration-plan.json"),
+    report: resolve(directory, "report.html")
+  };
 }
 
 async function run(): Promise<void> {
@@ -278,12 +376,17 @@ async function run(): Promise<void> {
   if (options.command === "demo") {
     assertTargetEnabled(options.target);
     const fixture = fileURLToPath(new URL("../../fixtures/demo-wordpress.xml", import.meta.url));
-    const project = await loadProject(fixture);
+    const project = await loadProject(fixture, options);
     const output = resolve(options.output ?? "wp-migrate-core-demo");
-    await inspect(project, resolve(output, "migration-plan"));
-    await generateAstroProject(project, resolve(output, "astro-site"));
-    await writeReport(project, resolve(output, "astro-site", "migration", "report.html"));
-    console.log(`Astro demo: ${resolve(output, "astro-site")}`);
+    const plan = await inspect(project, resolve(output, "migration-plan"));
+    const site = resolve(output, "astro-site");
+    await generateAstroProject(project, site);
+    await writeReport(project, resolve(site, "migration", "report.html"));
+    finishCommand(project, options, {
+      command: "demo",
+      outputs: { plan: plan.plan, report: plan.report, site },
+      humanLines: [`\nPlan: ${plan.plan}`, `Report: ${plan.report}`, `Astro demo: ${site}`]
+    });
     return;
   }
 
@@ -291,19 +394,27 @@ async function run(): Promise<void> {
     throw new Error(`${options.command} requires a WordPress WXR file.\n\n${usage()}`);
   }
 
-  const project = await loadProject(options.input);
+  const project = await loadProject(options.input, options);
 
   if (options.command === "inspect") {
     assertTargetEnabled(options.target);
-    await inspect(project, options.output ?? "migration-plan");
+    const outputs = await inspect(project, options.output ?? "migration-plan");
+    finishCommand(project, options, {
+      command: "inspect",
+      outputs,
+      humanLines: [`\nPlan: ${outputs.plan}`, `Report: ${outputs.report}`]
+    });
     return;
   }
 
   if (options.command === "report") {
     const output = resolve(options.output ?? "migration-report.html");
     await writeReport(project, output, { noClobber: true });
-    printSummary(project);
-    console.log(`\nReport: ${output}`);
+    finishCommand(project, options, {
+      command: "report",
+      outputs: { report: output },
+      humanLines: [`\nReport: ${output}`]
+    });
     return;
   }
 
@@ -313,8 +424,16 @@ async function run(): Promise<void> {
     const output = resolve(options.output);
     await generateAstroProject(project, output);
     await writeReport(project, resolve(output, "migration", "report.html"));
-    printSummary(project);
-    console.log(`\nGenerated ${targetAvailability[options.target].label} project: ${output}`);
+    finishCommand(project, options, {
+      command: "convert",
+      outputs: {
+        site: output,
+        manifest: resolve(output, "migration", "manifest.json"),
+        issues: resolve(output, "migration", "issues.json"),
+        report: resolve(output, "migration", "report.html")
+      },
+      humanLines: [`\nGenerated ${targetAvailability[options.target].label} project: ${output}`]
+    });
     return;
   }
 

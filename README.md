@@ -33,6 +33,12 @@ wp-migrate-core inspect --help
 
 Use `--help` (or `-h`) with any command to see usage without reading an export or writing output. `--version` (or `-v`) prints the installed package version. Options such as `--out` and `--target` require a nonempty value; incomplete options fail before reading an export or writing output.
 
+`--include-drafts` also reads items that a default scan skips, such as drafts, pending, and private content. The library equivalent is `parseWxr(xml, { includeDrafts: true })`.
+
+`--json` works with `inspect`, `convert`, `report`, and `demo`. It replaces the human-readable summary with a single JSON document on stdout: generator identity, command, scan settings, summary counts, the same sanitized issues as the plan, output paths, and a `failed` flag. The source URL is omitted. The generated files are unchanged. Argument, input, and write errors go to stderr without a JSON summary; help and version requests keep their usual output.
+
+`--fail-on none|warning|blocker` sets a nonzero exit status when the scan finds issues at or above that severity. The default, `none`, only fails when the command itself errors. This never changes what is written, so the plan and report are still available for review after a failed run; it exists so a build or CI step can gate on a repair queue that is not empty.
+
 `inspect` validates the WXR file before writing. It creates `migration-plan.json` and a local repair report as a pair in a new output directory: if either output cannot be created, it leaves neither newly created file behind and never overwrites an existing `--out` path. `convert` writes an Astro-shaped project plus its migration manifest and repair report. `report` writes only the repair report. `demo` runs both inspection and conversion against the bundled fixture.
 
 The `astro` target is the only enabled target. `next` and `nuxt` are registered as planned targets and deliberately fail when selected.
