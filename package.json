@@ -1,6 +1,6 @@
 {
   "name": "wp-migrate-core",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Turn a WordPress WXR export into an Astro handoff, with a repair queue for the parts that still need a human.",
   "keywords": [
     "wordpress",

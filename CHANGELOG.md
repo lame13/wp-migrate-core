@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-16
+
+This release adds CLI scan controls and machine-readable results for local review and CI.
+
+- Passes `--include-drafts` through to the parser so CLI scans can include drafts, pending, private, and other non-published posts and pages.
+- Adds `--json` to `inspect`, `convert`, `report`, and `demo`, reporting generator identity, scan settings, summary counts, sanitized issues, output paths, and failure status without the source URL or raw issue evidence.
+- Adds `--fail-on none|warning|blocker` to set a failing exit status for issues at or above the chosen severity after writing output. The default `none` preserves existing behavior.
+- Covers draft inclusion, JSON privacy, clean and single-severity scans, and output preservation when a severity gate fails with CLI regression tests.
+
 ## [0.1.2] - 2026-09-05
 
 This release improves CLI argument handling and makes the current release the default npm install.
@@ -28,7 +37,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/lame13/wp-migrate-core/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/lame13/wp-migrate-core/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/lame13/wp-migrate-core/compare/v0.1.0-demo...v0.1.1
 [0.1.0-demo]: https://github.com/lame13/wp-migrate-core/releases/tag/v0.1.0-demo
