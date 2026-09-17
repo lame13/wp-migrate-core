@@ -75,5 +75,12 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   }
   const readme = await readFile(join(output, "astro-site/README.md"), "utf8");
   assert.ok(readme.includes(`wp-migrate-core ${metadata.version}`));
+  const media = JSON.parse(await readFile(join(output, "astro-site/migration/media.json"), "utf8"));
+  const redirects = JSON.parse(await readFile(join(output, "astro-site/migration/redirects.json"), "utf8"));
+  assert.equal(media.schemaVersion, manifest.schemaVersion);
+  assert.equal(media.summary.assets, 5);
+  assert.equal(redirects.summary.generated, manifest.redirects.summary.generated);
+  assert.equal(manifest.media.file, "migration/media.json");
+  assert.equal(manifest.redirects.file, "migration/redirects.json");
   context.diagnostic(`Verified wp-migrate-core@${metadata.version}: installed executable, ESM exports, types, bundled demo, and handoff version.`);
 });

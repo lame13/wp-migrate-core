@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-17
+
+This release adds a media inventory and a URL/redirect map to help plan a WordPress-to-Astro migration. Both use only the WXR export; migration commands make no network calls and do not download media or publish redirects.
+
+- Inventories attachment records, available alt text and dimensions, and references from supported Gutenberg blocks, Elementor image/background settings and text/HTML widgets, featured images, and rendered image tags.
+- Matches attachments by ID or file path, with unambiguous WordPress filename variants as a fallback. Exact filenames take priority; different hosts, folders, or filename case are not silently merged. Repeated references to one asset are grouped per content record.
+- Adds per-record warnings for missing attachment records and missing alt text. Unreferenced uploads remain visible without adding warnings, and trashed attachments are skipped.
+- Maps exported page/post permalinks to proposed routes, identifies path redirects, and explains excluded, skipped, colliding, and query-string URLs. Conversion continues to refuse duplicate routes.
+- Includes both inventories in the HTML report and inspection plan, and their summary counts in CLI output and `--json`. Generated projects include `migration/media.json` and `migration/redirects.json`; these files and the manifest use schema version `0.2` independently of the package version.
+- Preserves encoded source paths and repeated slashes in redirect rules, and sanitizes protocol-relative URLs consistently so credentials cannot leak into review plans, reports, or inventory URL fields.
+- Refreshes the npm README with a demo-first walkthrough, output-file guide, library example, and clearer migration and privacy limits.
+- Extends parser, CLI, privacy, and installed-package regression coverage, including exact media matching, nested blocks, filename variants, Elementor inline images, and redirect path preservation.
+
 ## [0.1.3] - 2026-09-16
 
 This release adds CLI scan controls and machine-readable results for local review and CI.
@@ -37,7 +50,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/lame13/wp-migrate-core/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/lame13/wp-migrate-core/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/lame13/wp-migrate-core/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/lame13/wp-migrate-core/compare/v0.1.0-demo...v0.1.1

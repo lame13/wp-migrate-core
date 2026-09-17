@@ -71,3 +71,52 @@ test("keeps raw source evidence out of reports and refuses to clobber a report",
     /Refusing to overwrite existing output/
   );
 });
+
+test("ships a media inventory and a redirect map without source credentials", async (context) => {
+  const output = await mkdtemp(join(tmpdir(), "wp-migrate-core-inventory-"));
+  context.after(() => rm(output, { recursive: true, force: true }));
+
+  const fixture = (await readFile(demoFixturePath, "utf8"))
+    .replaceAll("https://brightpath.example", "https://private-user:private-password@brightpath.example")
+    .replace(/(<link>[^<]+)(<\/link>)/g, "$1?private-query=secret#private-fragment$2")
+    .replace('[gravityform id="4"', '[gravityform secret="private-evidence" id="4"');
+  const project = parseWxr(fixture);
+  await generateAstroProject(project, output);
+  await writeReport(project, join(output, "migration/report.html"));
+
+  const [media, redirects, manifest, report] = await Promise.all([
+    readFile(join(output, "migration/media.json"), "utf8"),
+    readFile(join(output, "migration/redirects.json"), "utf8"),
+    readFile(join(output, "migration/manifest.json"), "utf8"),
+    readFile(join(output, "migration/report.html"), "utf8")
+  ]);
+
+  const inventory = JSON.parse(media);
+  assert.equal(inventory.schemaVersion, "0.2");
+  assert.equal(inventory.summary.assets, 5);
+  assert.equal(inventory.summary.notInExport, 1);
+  assert.ok(
+    inventory.references.some(
+      (reference: { status: string; kind: string }) =>
+        reference.status === "missing-alt-text" && reference.kind === "elementor-image"
+    ),
+    "the inventory must keep the per-asset detail the repair queue aggregates"
+  );
+
+  const urlMap = JSON.parse(redirects);
+  assert.equal(urlMap.summary.generated, 0, "every URL in this export carries a query string");
+  assert.equal(
+    urlMap.urls.filter((entry: { status: string }) => entry.status === "ambiguous-url").length,
+    4
+  );
+
+  assert.equal(JSON.parse(manifest).media.file, "migration/media.json");
+  assert.equal(JSON.parse(manifest).redirects.file, "migration/redirects.json");
+
+  for (const generated of [media, redirects, report]) {
+    assert.doesNotMatch(generated, /private-user|private-password|private-query|private-fragment|private-evidence/);
+  }
+  assert.doesNotMatch(media, /gravityform id=/);
+  assert.match(report, /Media inventory/);
+  assert.match(report, /URL and redirect map/);
+});

@@ -180,7 +180,7 @@ test("--json prints one machine-readable document instead of the summary", async
   const output = join(workspace, "migration-plan");
   const input = join(workspace, "private-export.xml");
   const fixture = (await readFile(demoFixturePath, "utf8"))
-    .replaceAll("https://brightpath.example", "https://private-user:private-password@brightpath.example")
+    .replaceAll("https://brightpath.example", "//private-user:private-password@brightpath.example")
     .replace(/(<link>[^<]+)(<\/link>)/g, "$1?private-query=secret#private-fragment$2")
     .replace('[gravityform id="4"', '[gravityform secret="private-evidence" id="4"');
   await writeFile(input, fixture, "utf8");
@@ -200,7 +200,15 @@ test("--json prints one machine-readable document instead of the summary", async
   assert.deepEqual(document.source, { title: "Bright Path Plumbing" });
   assert.deepEqual(document.summary, plan.summary);
   assert.deepEqual(document.issues, plan.issues);
+  assert.equal(document.summary.media.assets, 5);
+  assert.equal(document.summary.media.notInExport, 1);
+  assert.equal(document.summary.routes.generated, 0, "every link in this export carries a query string");
+  assert.equal(document.summary.routes.withoutTarget, 4);
   assert.doesNotMatch(result.stdout, /private-user|private-password|private-query|private-fragment|private-evidence/);
+  assert.doesNotMatch(JSON.stringify(plan), /private-user|private-password|private-query|private-fragment|private-evidence/);
+  const report = await readFile(join(output, "report.html"), "utf8");
+  assert.doesNotMatch(report, /private-user|private-password|private-query|private-fragment|private-evidence/);
+  assert.match(report, /Some source URLs still need a decision/);
   assert.ok(document.issues.every((issue: object) => !("evidence" in issue)));
   assert.deepEqual(document.outputs, {
     plan: join(output, "migration-plan.json"),
@@ -325,3 +333,37 @@ for (const command of ["convert", "report", "demo"]) {
     }
   });
 }
+
+test("convert writes a media inventory and a URL map beside the generated site", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-inventory-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const output = join(workspace, "site");
+
+  const humanRun = runCli(["convert", demoFixturePath, "--out", output], workspace);
+  assert.equal(humanRun.status, 0, humanRun.stderr);
+  assert.match(humanRun.stdout, /media: 5 assets in the export, 4 referenced/);
+  assert.match(humanRun.stdout, /urls: 4 routes generated, 1 redirect needed/);
+  assert.match(humanRun.stdout, /Media inventory: .*migration\/media\.json/);
+  assert.match(humanRun.stdout, /URL and redirect map: .*migration\/redirects\.json/);
+
+  const jsonRun = runCli(["convert", demoFixturePath, "--out", join(workspace, "second-site"), "--json"], workspace);
+  assert.equal(jsonRun.status, 0, jsonRun.stderr);
+  const document = JSON.parse(jsonRun.stdout);
+
+  assert.equal(document.outputs.media, join(workspace, "second-site", "migration", "media.json"));
+  assert.equal(document.outputs.redirects, join(workspace, "second-site", "migration", "redirects.json"));
+
+  const media = JSON.parse(await readFile(document.outputs.media, "utf8"));
+  assert.deepEqual(media.summary, document.summary.media);
+  assert.ok(media.assets.some((asset: { file?: string }) => asset.file === "2026/05/workshop-team.jpg"));
+
+  const redirects = JSON.parse(await readFile(document.outputs.redirects, "utf8"));
+  assert.deepEqual(redirects.summary, document.summary.routes);
+  assert.deepEqual(
+    redirects.redirects.map((redirect: { sourcePath: string; targetRoute: string }) => [
+      redirect.sourcePath,
+      redirect.targetRoute
+    ]),
+    [["/guides/stop-a-leaking-tap", "/guides/stop-a-leaking-tap/"]]
+  );
+});
