@@ -70,7 +70,9 @@ export type MigrationIssueCode =
   | "ELEMENTOR_QUERY_UNSUPPORTED"
   | "ELEMENTOR_IMAGE_REMOTE_MEDIA"
   | "ELEMENTOR_BUTTON_UNSAFE_URL"
-  | "ELEMENTOR_WIDGET_UNKNOWN";
+  | "ELEMENTOR_WIDGET_UNKNOWN"
+  | "MEDIA_MISSING_ALT_TEXT"
+  | "MEDIA_MISSING_FROM_EXPORT";
 
 export interface MigrationIssue {
   readonly id: string;
@@ -112,6 +114,132 @@ export interface ContentRecord {
   readonly issues: readonly MigrationIssue[];
 }
 
+/**
+ * How a media reference was found. The kind records where the reference came
+ * from so a reviewer can tell widget settings apart from rendered HTML.
+ */
+export type MediaReferenceKind =
+  | "gutenberg-image"
+  | "gutenberg-gallery"
+  | "elementor-image"
+  | "elementor-background"
+  | "html-image"
+  | "featured-image";
+
+/**
+ * `matched` means the export carries a matching attachment item.
+ * `missing-alt-text` means it carries one, but nothing in the export or the
+ * content describes the image. `not-in-export` means no attachment item
+ * matched, so the asset has to come from somewhere else.
+ */
+export type MediaReferenceStatus = "matched" | "missing-alt-text" | "not-in-export";
+
+/**
+ * One attachment item from the export. This is an inventory entry only: no
+ * media is downloaded, copied, re-encoded, or rewritten.
+ */
+export interface MediaAsset {
+  readonly id: string;
+  readonly wordpressId: number;
+  readonly parentId?: number;
+  readonly title: string;
+  /** Path of the asset on the source site, without query or fragment. */
+  readonly path?: string;
+  /** Sanitized absolute source URL, when the export provides one. */
+  readonly url?: string;
+  /** `_wp_attached_file`, such as `2026/05/repair.jpg`. */
+  readonly file?: string;
+  readonly mimeType?: string;
+  readonly altText?: string;
+  readonly width?: number;
+  readonly height?: number;
+  /** Number of included content records that reference this asset. */
+  readonly referenceCount: number;
+  /** Source record identifiers that reference this asset. */
+  readonly referencedBy: readonly string[];
+}
+
+/** One place a content record refers to media, deduplicated per record. */
+export interface MediaReference {
+  readonly id: string;
+  readonly sourceId: string;
+  readonly route?: string;
+  readonly nodeId?: string;
+  readonly kind: MediaReferenceKind;
+  readonly path?: string;
+  readonly url?: string;
+  readonly altText?: string;
+  /** Set when a matching attachment item was found in the export. */
+  readonly assetId?: string;
+  readonly status: MediaReferenceStatus;
+}
+
+export interface MediaSummary {
+  /** Attachment items found in the export. */
+  readonly assets: number;
+  /** Assets referenced by at least one included content record. */
+  readonly referenced: number;
+  readonly references: number;
+  readonly matched: number;
+  readonly missingAltText: number;
+  readonly notInExport: number;
+  /** Attachments no included content record refers to. */
+  readonly unusedAssets: number;
+}
+
+export interface MigrationMedia {
+  readonly assets: readonly MediaAsset[];
+  readonly references: readonly MediaReference[];
+  readonly summary: MediaSummary;
+}
+
+export type RouteStatus =
+  | "generated"
+  | "duplicate-route"
+  | "excluded"
+  | "skipped"
+  | "ambiguous-url";
+
+/**
+ * One exported page/post permalink and its mapping in the handoff. For an
+ * ambiguous URL or duplicate route, `targetRoute` is only a proposed path;
+ * the source URL still needs a decision before publishing.
+ */
+export interface RouteEntry {
+  readonly id: string;
+  readonly sourceId?: string;
+  readonly sourceUrl?: string;
+  readonly sourcePath?: string;
+  readonly targetRoute?: string;
+  readonly status: RouteStatus;
+  readonly reason: string;
+}
+
+/** A source path that needs a redirect rule on whatever hosts the new site. */
+export interface RedirectEntry {
+  readonly id: string;
+  readonly sourceId?: string;
+  readonly sourcePath: string;
+  readonly targetRoute: string;
+  readonly reason: string;
+}
+
+export interface RouteSummary {
+  readonly sourceUrls: number;
+  /** Unique, unambiguous page/post route mappings. */
+  readonly generated: number;
+  readonly redirects: number;
+  /** Source URLs without a confirmed mapping, including unresolved ones. */
+  readonly withoutTarget: number;
+  readonly duplicateRoutes: number;
+}
+
+export interface MigrationRoutes {
+  readonly entries: readonly RouteEntry[];
+  readonly redirects: readonly RedirectEntry[];
+  readonly summary: RouteSummary;
+}
+
 export interface MigrationSummary {
   readonly records: number;
   readonly pages: number;
@@ -123,6 +251,8 @@ export interface MigrationSummary {
   readonly reviewItems: number;
   readonly warnings: number;
   readonly blockers: number;
+  readonly media: MediaSummary;
+  readonly routes: RouteSummary;
 }
 
 export interface MigrationProject {
@@ -136,6 +266,8 @@ export interface MigrationProject {
   };
   readonly records: readonly ContentRecord[];
   readonly issues: readonly MigrationIssue[];
+  readonly media: MigrationMedia;
+  readonly routes: MigrationRoutes;
   readonly summary: MigrationSummary;
 }
 

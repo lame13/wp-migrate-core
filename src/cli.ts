@@ -4,7 +4,7 @@ import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertTargetEnabled, targetAvailability } from "./adapters.js";
-import { parseWxr } from "./core.js";
+import { parseWxr, sanitizeSourceUrl } from "./core.js";
 import { generateAstroProject } from "./generate.js";
 import { writeReport } from "./report.js";
 import { packageVersion } from "./version.js";
@@ -144,12 +144,47 @@ function createMigrationPlan(project: MigrationProject): object {
     source: project.source.title === undefined ? {} : { title: project.source.title },
     records: project.records.map(createPlanRecord),
     issues: project.issues.map(createPlanIssue),
+    media: {
+      summary: project.media.summary,
+      assets: project.media.assets.map((asset) => ({
+        id: asset.id,
+        wordpressId: asset.wordpressId,
+        ...(asset.parentId === undefined ? {} : { parentId: asset.parentId }),
+        title: asset.title,
+        ...(asset.path === undefined ? {} : { path: asset.path }),
+        ...(asset.url === undefined ? {} : { url: asset.url }),
+        ...(asset.file === undefined ? {} : { file: asset.file }),
+        ...(asset.mimeType === undefined ? {} : { mimeType: asset.mimeType }),
+        ...(asset.altText === undefined ? {} : { altText: asset.altText }),
+        ...(asset.width === undefined ? {} : { width: asset.width }),
+        ...(asset.height === undefined ? {} : { height: asset.height }),
+        referenceCount: asset.referenceCount,
+        referencedBy: asset.referencedBy
+      })),
+      references: project.media.references.map((reference) => ({
+        id: reference.id,
+        sourceId: reference.sourceId,
+        ...(reference.route === undefined ? {} : { route: reference.route }),
+        ...(reference.nodeId === undefined ? {} : { nodeId: reference.nodeId }),
+        kind: reference.kind,
+        ...(reference.path === undefined ? {} : { path: reference.path }),
+        ...(reference.url === undefined ? {} : { url: reference.url }),
+        ...(reference.altText === undefined ? {} : { altText: reference.altText }),
+        ...(reference.assetId === undefined ? {} : { assetId: reference.assetId }),
+        status: reference.status
+      }))
+    },
+    routes: {
+      summary: project.routes.summary,
+      redirects: project.routes.redirects,
+      entries: project.routes.entries
+    },
     summary: project.summary
   };
 }
 
 function createPlanRecord(record: ContentRecord): object {
-  const route = sanitizePlanRoute(record.route);
+  const route = sanitizeSourceUrl(record.route);
 
   return {
     sourceId: record.sourceId,
@@ -179,7 +214,7 @@ function createPlanNode(node: MigrationNode): object {
 }
 
 function createPlanIssue(issue: MigrationIssue): object {
-  const route = sanitizePlanRoute(issue.route);
+  const route = sanitizeSourceUrl(issue.route);
 
   return {
     id: issue.id,
@@ -192,23 +227,6 @@ function createPlanIssue(issue: MigrationIssue): object {
     message: issue.message,
     requiredAction: issue.requiredAction
   };
-}
-
-function sanitizePlanRoute(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-    url.username = "";
-    url.password = "";
-    url.search = "";
-    url.hash = "";
-    return url.href;
-  } catch {
-    const pathname = value.trim().split(/[?#]/, 1)[0] ?? "";
-    return pathname.startsWith("/") ? pathname : undefined;
-  }
 }
 
 function isNodeErrorCode(error: unknown, code: string): boolean {
@@ -246,6 +264,10 @@ async function writeNewFile(outputPath: string, contents: string): Promise<void>
   }
 }
 
+function pluralize(count: number, singular: string): string {
+  return count === 1 ? singular : `${singular}s`;
+}
+
 function printSummary(project: MigrationProject): void {
   const { summary } = project;
   console.log(`\n${project.source.title ?? "WordPress export"}`);
@@ -255,6 +277,16 @@ function printSummary(project: MigrationProject): void {
   console.log(`  ${summary.manualNodes} constructs need manual handling`);
   console.log(`  ${summary.blockedNodes} blocked constructs`);
   console.log(`  ${summary.blockers} blockers; ${summary.warnings} items need review`);
+  console.log(
+    `  media: ${summary.media.assets} ${pluralize(summary.media.assets, "asset")} in the export, ` +
+      `${summary.media.referenced} referenced, ` +
+      `${summary.media.notInExport} referenced but not in the export, ${summary.media.missingAltText} without alternative text`
+  );
+  console.log(
+    `  urls: ${summary.routes.generated} ${pluralize(summary.routes.generated, "route")} generated, ` +
+      `${summary.routes.redirects} ${pluralize(summary.routes.redirects, "redirect")} needed, ` +
+      `${summary.routes.withoutTarget} ${pluralize(summary.routes.withoutTarget, "source URL")} left without a target`
+  );
 
   if (project.issues.length > 0) {
     console.log("\nRepair queue");
@@ -385,7 +417,13 @@ async function run(): Promise<void> {
     finishCommand(project, options, {
       command: "demo",
       outputs: { plan: plan.plan, report: plan.report, site },
-      humanLines: [`\nPlan: ${plan.plan}`, `Report: ${plan.report}`, `Astro demo: ${site}`]
+      humanLines: [
+        `\nPlan: ${plan.plan}`,
+        `Report: ${plan.report}`,
+        `Astro demo: ${site}`,
+        `Media inventory: ${resolve(site, "migration", "media.json")}`,
+        `URL and redirect map: ${resolve(site, "migration", "redirects.json")}`
+      ]
     });
     return;
   }
@@ -430,9 +468,15 @@ async function run(): Promise<void> {
         site: output,
         manifest: resolve(output, "migration", "manifest.json"),
         issues: resolve(output, "migration", "issues.json"),
+        media: resolve(output, "migration", "media.json"),
+        redirects: resolve(output, "migration", "redirects.json"),
         report: resolve(output, "migration", "report.html")
       },
-      humanLines: [`\nGenerated ${targetAvailability[options.target].label} project: ${output}`]
+      humanLines: [
+        `\nGenerated ${targetAvailability[options.target].label} project: ${output}`,
+        `Media inventory: ${resolve(output, "migration", "media.json")}`,
+        `URL and redirect map: ${resolve(output, "migration", "redirects.json")}`
+      ]
     });
     return;
   }

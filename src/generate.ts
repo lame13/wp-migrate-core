@@ -1,6 +1,7 @@
 import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, parse, resolve } from "node:path";
 
+import { normalizeRoute } from "./core.js";
 import type { ContentRecord, MigrationIssue, MigrationNode, MigrationProject } from "./types.js";
 import { packageVersion } from "./version.js";
 
@@ -32,6 +33,8 @@ export async function generateAstroProject(
     ["src/styles/global.css", renderStyles()],
     ["public/robots.txt", renderRobotsTxt()],
     ["migration/issues.json", renderIssues(project.issues)],
+    ["migration/media.json", renderMedia(project)],
+    ["migration/redirects.json", renderRedirects(project)],
     ["migration/manifest.json", renderManifest(project, records)],
     ["README.md", renderReadme(project)]
   ]);
@@ -288,7 +291,7 @@ function renderIssues(issues: readonly MigrationIssue[]): string {
 
 function renderManifest(project: MigrationProject, records: readonly GeneratedRecord[]): string {
   return renderJson({
-    schemaVersion: "0.1",
+    schemaVersion: "0.2",
     generator: {
       name: GENERATOR_NAME,
       version: packageVersion,
@@ -301,6 +304,14 @@ function renderManifest(project: MigrationProject, records: readonly GeneratedRe
       next: { enabled: false, label: "Next.js" },
       nuxt: { enabled: false, label: "Nuxt" }
     },
+    media: {
+      file: "migration/media.json",
+      summary: project.media.summary
+    },
+    redirects: {
+      file: "migration/redirects.json",
+      summary: project.routes.summary
+    },
     records: records.map(({ record, collection, fileName, route, sourceUrl }) => ({
       sourceId: record.sourceId,
       wordpressId: record.wordpressId,
@@ -309,6 +320,83 @@ function renderManifest(project: MigrationProject, records: readonly GeneratedRe
       route,
       sourceUrl,
       outputFile: `src/content/${collection}/${fileName}`
+    }))
+  });
+}
+
+/**
+ * The media inventory is an index of what the export already carries. It is
+ * not a download, a copy, or a rewrite: every entry still needs a human to
+ * import, describe and verify the asset.
+ */
+function renderMedia(project: MigrationProject): string {
+  return renderJson({
+    schemaVersion: "0.2",
+    generator: {
+      name: GENERATOR_NAME,
+      version: packageVersion,
+      target: "astro"
+    },
+    summary: project.media.summary,
+    assets: project.media.assets.map((asset) => ({
+      id: asset.id,
+      wordpressId: asset.wordpressId,
+      ...(asset.parentId === undefined ? {} : { parentId: asset.parentId }),
+      title: asset.title,
+      ...(asset.path === undefined ? {} : { path: asset.path }),
+      ...(asset.url === undefined ? {} : { url: asset.url }),
+      ...(asset.file === undefined ? {} : { file: asset.file }),
+      ...(asset.mimeType === undefined ? {} : { mimeType: asset.mimeType }),
+      ...(asset.altText === undefined ? {} : { altText: asset.altText }),
+      ...(asset.width === undefined ? {} : { width: asset.width }),
+      ...(asset.height === undefined ? {} : { height: asset.height }),
+      referenceCount: asset.referenceCount,
+      referencedBy: asset.referencedBy
+    })),
+    references: project.media.references.map((reference) => ({
+      id: reference.id,
+      sourceId: reference.sourceId,
+      ...(reference.route === undefined ? {} : { route: reference.route }),
+      ...(reference.nodeId === undefined ? {} : { nodeId: reference.nodeId }),
+      kind: reference.kind,
+      ...(reference.path === undefined ? {} : { path: reference.path }),
+      ...(reference.url === undefined ? {} : { url: reference.url }),
+      ...(reference.altText === undefined ? {} : { altText: reference.altText }),
+      ...(reference.assetId === undefined ? {} : { assetId: reference.assetId }),
+      status: reference.status
+    }))
+  });
+}
+
+/**
+ * The redirect list is what makes the handoff auditable against the live site:
+ * every source URL is either served at the same path, given a rule, or
+ * explicitly left without a target.
+ */
+function renderRedirects(project: MigrationProject): string {
+  return renderJson({
+    schemaVersion: "0.2",
+    generator: {
+      name: GENERATOR_NAME,
+      version: packageVersion,
+      target: "astro"
+    },
+    summary: project.routes.summary,
+    redirects: project.routes.redirects.map((redirect) => ({
+      id: redirect.id,
+      ...(redirect.sourceId === undefined ? {} : { sourceId: redirect.sourceId }),
+      sourcePath: redirect.sourcePath,
+      targetRoute: redirect.targetRoute,
+      reason: redirect.reason
+    })),
+    urls: project.routes.entries.map((entry) => ({
+      id: entry.id,
+      ...(entry.sourceId === undefined ? {} : { sourceId: entry.sourceId }),
+      ...(entry.sourceUrl === undefined ? {} : { sourceUrl: entry.sourceUrl }),
+      ...(entry.sourcePath === undefined ? {} : { sourcePath: entry.sourcePath }),
+      ...(entry.targetRoute === undefined ? {} : { targetRoute: entry.targetRoute }),
+      status: entry.status,
+      reason: entry.reason
     }))
   });
 }
@@ -330,12 +418,16 @@ npm run dev
 ## Handoff sequence
 
 1. Open \`migration/issues.json\` and resolve every blocker.
-2. Review warnings and accepted legacy HTML instead of assuming conversion fidelity.
-3. Compare every generated route with the original WordPress route on desktop and mobile.
-4. Replace forms, dynamic widgets, shortcodes and plugin behavior deliberately.
-5. Run \`npm run build\` only after the repair queue is understood.
+2. Work through \`migration/media.json\` and import each referenced asset, then write its alternative text. Nothing was downloaded for you.
+3. Publish the rules in \`migration/redirects.json\` on whatever hosts this site, and decide what happens to the source URLs listed there without a target.
+4. Review warnings and accepted legacy HTML instead of assuming conversion fidelity.
+5. Compare every generated route with the original WordPress route on desktop and mobile.
+6. Replace forms, dynamic widgets, shortcodes and plugin behavior deliberately.
+7. Run \`npm run build\` only after the repair queue is understood.
 
-Generated content lives in \`src/content/pages\` and \`src/content/posts\`. Route mappings and source IDs live in \`migration/manifest.json\`.
+Generated content lives in \`src/content/pages\` and \`src/content/posts\`. Route mappings and source IDs live in \`migration/manifest.json\`; the media inventory is \`migration/media.json\` and the URL and redirect map is \`migration/redirects.json\`.
+
+No media was downloaded, copied or rewritten. Every asset in the inventory still has to be imported from the source site, described, and verified against the original page.
 
 Astro is the only enabled renderer in this handoff. Next.js and Nuxt appear in the migration manifest as planned, disabled targets; this output contains no fake compatibility layer for either framework.
 `;
@@ -583,17 +675,6 @@ function getNestedString(
   }
   const nested = Reflect.get(value, nestedKey);
   return typeof nested === "string" && nested.length > 0 ? nested : undefined;
-}
-
-function normalizeRoute(route: string): string {
-  let pathname = route.trim();
-  if (/^https?:\/\//i.test(pathname)) {
-    pathname = new URL(pathname).pathname;
-  }
-  pathname = pathname.split(/[?#]/, 1)[0] ?? "/";
-  pathname = pathname.replaceAll("\\", "/").replace(/\/{2,}/g, "/");
-  const segments = pathname.split("/").filter((segment) => segment && segment !== "." && segment !== "..");
-  return segments.length === 0 ? "/" : `/${segments.join("/")}/`;
 }
 
 function safeFileStem(value: string): string {

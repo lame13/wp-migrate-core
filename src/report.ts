@@ -1,13 +1,17 @@
 import { dirname } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { packageVersion } from "./version.js";
+import { sanitizeSourceUrl } from "./core.js";
 
 import type {
   ContentRecord,
+  MediaReferenceKind,
+  MediaReferenceStatus,
   MigrationIssue,
   MigrationIssueSeverity,
   MigrationProject,
   OutputTarget,
+  RouteStatus,
   SourceEditor
 } from "./types.js";
 
@@ -58,27 +62,12 @@ function frameworkNeutralCopy(value: string): string {
 }
 
 function safeSourceUrl(value: string): string | undefined {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-    url.username = "";
-    url.password = "";
-    url.search = "";
-    url.hash = "";
-    return url.href;
-  } catch {
-    return undefined;
-  }
+  const sanitized = sanitizeSourceUrl(value);
+  return sanitized?.startsWith("/") ? undefined : sanitized;
 }
 
 function safeRoute(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-
-  const absoluteUrl = safeSourceUrl(value);
-  if (absoluteUrl !== undefined) return absoluteUrl;
-
-  const pathname = value.trim().split(/[?#]/, 1)[0] ?? "";
-  return pathname.startsWith("/") ? pathname : undefined;
+  return sanitizeSourceUrl(value);
 }
 
 function formatDate(value: string): string {
@@ -316,6 +305,186 @@ function reportScript(): string {
 
       apply();
     })();`;
+}
+
+const inventoryRowLimit = 40;
+
+const mediaStatusLabels: Readonly<Record<MediaReferenceStatus, string>> = {
+  matched: "Matched",
+  "missing-alt-text": "Needs alt text",
+  "not-in-export": "Not in export"
+};
+
+const mediaStatusClasses: Readonly<Record<MediaReferenceStatus, string>> = {
+  matched: "badge--ok",
+  "missing-alt-text": "badge--notice",
+  "not-in-export": "badge--warning"
+};
+
+const mediaKindLabels: Readonly<Record<MediaReferenceKind, string>> = {
+  "gutenberg-image": "Gutenberg image",
+  "gutenberg-gallery": "Gutenberg gallery",
+  "elementor-image": "Elementor image",
+  "elementor-background": "Elementor background",
+  "html-image": "HTML image",
+  "featured-image": "Featured image"
+};
+
+const routeStatusLabels: Readonly<Record<RouteStatus, string>> = {
+  generated: "Same path",
+  "duplicate-route": "Route conflict",
+  excluded: "Excluded",
+  skipped: "Skipped",
+  "ambiguous-url": "Needs permalink decision"
+};
+
+const routeStatusClasses: Readonly<Record<RouteStatus, string>> = {
+  generated: "badge--ok",
+  "duplicate-route": "badge--notice",
+  excluded: "badge--warning",
+  skipped: "badge--warning",
+  "ambiguous-url": "badge--warning"
+};
+
+function renderMediaSection(project: MigrationProject): string {
+  const { summary, assets, references } = project.media;
+  const recordsById = new Map(project.records.map((record) => [record.sourceId, record]));
+  const unused = assets.filter((asset) => asset.referenceCount === 0);
+  const shownReferences = references.slice(0, inventoryRowLimit);
+
+  const rows = shownReferences
+    .map((reference) => {
+      const source = recordsById.get(reference.sourceId)?.title ?? reference.sourceId;
+      const target = reference.path ?? reference.url ?? "Unknown path";
+      return `<tr>
+        <td><code>${escapeHtml(target)}</code></td>
+        <td>${escapeHtml(mediaKindLabels[reference.kind])}</td>
+        <td>${escapeHtml(source)}</td>
+        <td><span class="badge ${mediaStatusClasses[reference.status]}">${escapeHtml(mediaStatusLabels[reference.status])}</span></td>
+      </tr>`;
+    })
+    .join("\n");
+
+  const unusedList = unused
+    .slice(0, inventoryRowLimit)
+    .map((asset) => `<li><code>${escapeHtml(asset.path ?? asset.file ?? asset.title)}</code><span>${escapeHtml(asset.title)}</span></li>`)
+    .join("\n");
+
+  return `
+    <section class="section" aria-labelledby="media-heading">
+      <div class="section-heading">
+        <h2 id="media-heading">Media inventory</h2>
+        <p>Attachment items this export already carries, matched against the media the included pages reference. No asset was downloaded, copied, re-encoded or rewritten.</p>
+      </div>
+
+      <div class="metric-grid">
+        <article class="metric"><span>Attachments in export</span><strong>${summary.assets}</strong><small>Attachment items found in the WXR file</small></article>
+        <article class="metric"><span>Referenced assets</span><strong>${summary.referenced}</strong><small>Attachments at least one included page uses</small></article>
+        <article class="metric"><span>Needs alternative text</span><strong>${summary.missingAltText}</strong><small>Referenced images with no description anywhere in the export</small></article>
+        <article class="metric"><span>Not in this export</span><strong>${summary.notInExport}</strong><small>References whose asset has to come from somewhere else</small></article>
+      </div>
+
+      ${references.length === 0 ? `
+        <div class="empty-state">
+          <h3>No media references were detected</h3>
+          <p>The included content does not point at any image through a supported block, widget or image tag.</p>
+        </div>` : `
+        <article class="panel">
+          <h3>Referenced media</h3>
+          <div class="inventory-scroll">
+            <table class="inventory-table">
+              <thead>
+                <tr><th scope="col">Source path</th><th scope="col">Found in</th><th scope="col">Used by</th><th scope="col">Status</th></tr>
+              </thead>
+              <tbody>
+                ${rows}
+              </tbody>
+            </table>
+          </div>
+          ${references.length > shownReferences.length ? `<p class="inventory-note">Showing ${shownReferences.length} of ${references.length} references. Every reference is listed in the generated <code>migration/media.json</code>.</p>` : ""}
+        </article>`}
+
+      ${unused.length === 0 ? "" : `
+        <article class="panel">
+          <h3>Uploads nothing links to</h3>
+          <ul class="inventory-list">
+            ${unusedList}
+          </ul>
+          ${unused.length > inventoryRowLimit ? `<p class="inventory-note">Showing ${inventoryRowLimit} of ${unused.length} unreferenced uploads.</p>` : ""}
+          <p class="inventory-note">These attachments are in the export but no included page references them. Decide whether their URLs still need to resolve before retiring them.</p>
+        </article>`}
+    </section>`;
+}
+
+function renderUrlSection(project: MigrationProject): string {
+  const { summary, redirects, entries } = project.routes;
+  const withoutTarget = entries.filter((entry) => entry.sourceUrl !== undefined && entry.status !== "generated");
+  const shownRedirects = redirects.slice(0, inventoryRowLimit);
+  const shownWithoutTarget = withoutTarget.slice(0, inventoryRowLimit);
+
+  const redirectRows = shownRedirects
+    .map((redirect) => `<tr>
+      <td><code>${escapeHtml(redirect.sourcePath)}</code></td>
+      <td><code>${escapeHtml(redirect.targetRoute)}</code></td>
+      <td>${escapeHtml(redirect.reason)}</td>
+    </tr>`)
+    .join("\n");
+
+  const withoutTargetList = shownWithoutTarget
+    .map((entry) => {
+      const label = entry.sourcePath ?? entry.sourceUrl ?? "Unknown URL";
+      return `<li><code>${escapeHtml(label)}</code><span>${escapeHtml(`${routeStatusLabels[entry.status]}: ${entry.reason}`)}</span></li>`;
+    })
+    .join("\n");
+
+  return `
+    <section class="section" aria-labelledby="urls-heading">
+      <div class="section-heading">
+        <h2 id="urls-heading">URL and redirect map</h2>
+        <p>Permalinks declared by the exported pages and posts, and their proposed routes in the handoff. Nothing here is published for you.</p>
+      </div>
+
+      <div class="metric-grid">
+        <article class="metric"><span>Source URLs</span><strong>${summary.sourceUrls}</strong><small>URLs declared by the exported items</small></article>
+        <article class="metric"><span>Routes mapped</span><strong>${summary.generated}</strong><small>Unique, unambiguous paths in the handoff</small></article>
+        <article class="metric"><span>Redirects needed</span><strong>${summary.redirects}</strong><small>Paths whose generated route differs</small></article>
+        <article class="metric"><span>No confirmed target</span><strong>${summary.withoutTarget}</strong><small>Source URLs without a resolved mapping</small></article>
+      </div>
+
+      ${summary.sourceUrls === 0 ? `
+        <div class="empty-state">
+          <h3>No source URLs were found</h3>
+          <p>The included items do not declare a permalink. Generated routes come from their slugs, so there is nothing to redirect.</p>
+        </div>` : redirects.length === 0 ? `
+        <div class="empty-state">
+          <h3>No automatic path redirects were identified</h3>
+          <p>${withoutTarget.length > 0 ? "Some source URLs still need a decision; review them below." : "Generated routes match the exported paths. Verify that on the host before publishing."}</p>
+        </div>` : `
+        <article class="panel">
+          <h3>Redirect rules to publish</h3>
+          <div class="inventory-scroll">
+            <table class="inventory-table">
+              <thead>
+                <tr><th scope="col">Exported path</th><th scope="col">Generated route</th><th scope="col">Why</th></tr>
+              </thead>
+              <tbody>
+                ${redirectRows}
+              </tbody>
+            </table>
+          </div>
+          ${redirects.length > shownRedirects.length ? `<p class="inventory-note">Showing ${shownRedirects.length} of ${redirects.length} redirect rules.</p>` : ""}
+        </article>`}
+
+      ${withoutTarget.length === 0 ? "" : `
+        <article class="panel">
+          <h3>Source URLs that need a decision</h3>
+          <ul class="inventory-list">
+            ${withoutTargetList}
+          </ul>
+          ${withoutTarget.length > shownWithoutTarget.length ? `<p class="inventory-note">Showing ${shownWithoutTarget.length} of ${withoutTarget.length} URLs without a target.</p>` : ""}
+          <p class="inventory-note">Resolve these URLs before publishing. A proposed route alone does not resolve a query-string permalink or a collision; excluded and skipped items may need a replacement page or a redirect.</p>
+        </article>`}
+    </section>`;
 }
 
 export function renderReport(project: MigrationProject): string {
@@ -638,6 +807,34 @@ export function renderReport(project: MigrationProject): string {
     .muted { color: var(--muted); }
     .footer-note { margin: 35px 0 0; color: var(--muted); font-size: 13px; }
 
+    .inventory-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .inventory-table th,
+    .inventory-table td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+    .inventory-table th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .inventory-table tbody tr:last-child td { border-bottom: 0; }
+    .inventory-table code { overflow-wrap: anywhere; }
+    .inventory-table tr { break-inside: avoid; }
+    .inventory-scroll { overflow-x: auto; }
+    .inventory-note { margin: 11px 0 0; color: var(--muted); font-size: 13px; }
+    .inventory-list { margin: 0; padding-left: 18px; }
+    .inventory-list li { margin: 5px 0; overflow-wrap: anywhere; }
+    .inventory-list code { display: block; }
+    .inventory-list span { color: var(--muted); }
+    .badge--ok { background: var(--green-soft); color: var(--green); }
+    .badge--notice { background: var(--amber-soft); color: var(--amber); }
+    .panel + .panel { margin-top: 16px; }
+
     @media (prefers-reduced-motion: reduce) {
       html { scroll-behavior: auto; }
     }
@@ -734,6 +931,10 @@ export function renderReport(project: MigrationProject): string {
         </article>
       </div>
     </section>
+
+    ${renderMediaSection(project)}
+
+    ${renderUrlSection(project)}
 
     <section class="section" aria-labelledby="targets-heading">
       <div class="section-heading">

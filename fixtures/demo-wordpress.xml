@@ -66,6 +66,7 @@
             "settings":{"flex_direction":"row"},
             "elements":[
               {"id":"i001","elType":"widget","widgetType":"image","settings":{"image":{"url":"https://brightpath.example/wp-content/uploads/2026/05/repair.jpg","id":301},"image_size":"large"},"elements":[]},
+              {"id":"i002","elType":"widget","widgetType":"image","settings":{"image":{"url":"https://brightpath.example/wp-content/uploads/2026/05/pipes-300x200.jpg","id":304},"image_size":"medium"},"elements":[]},
               {"id":"p001","elType":"widget","widgetType":"posts","settings":{"posts_per_page":3,"orderby":"menu_order"},"elements":[]},
               {"id":"x001","elType":"widget","widgetType":"essential-addons-testimonial-slider","settings":{"autoplay":"yes"},"elements":[]}
             ]
@@ -81,6 +82,7 @@
       <content:encoded><![CDATA[
 <!-- wp:heading --><h2>Request a quote</h2><!-- /wp:heading -->
 <!-- wp:paragraph --><p>Tell us what needs attention.</p><!-- /wp:paragraph -->
+<img src="https://cdn.example.net/photos/emergency-callout.jpg" alt="" width="640" height="360" />
 [gravityform id="4" title="false" description="false"]
       ]]></content:encoded>
       <wp:post_id>12</wp:post_id>
@@ -92,13 +94,13 @@
 
     <item>
       <title>How to stop a leaking tap</title>
-      <link>https://brightpath.example/guides/stop-a-leaking-tap/</link>
+      <link>https://brightpath.example/guides/stop-a-leaking-tap</link>
       <dc:creator><![CDATA[niko]]></dc:creator>
       <category domain="category" nicename="guides"><![CDATA[Guides]]></category>
       <content:encoded><![CDATA[
 <!-- wp:heading --><h2>Find the shut-off valve</h2><!-- /wp:heading -->
 <!-- wp:paragraph --><p>Turn off the local valve before removing the tap handle.</p><!-- /wp:paragraph -->
-<!-- wp:image {"id":302,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="https://brightpath.example/wp-content/uploads/2026/05/tap.jpg" alt="Tap handle removed" /></figure><!-- /wp:image -->
+<!-- wp:image {"id":302,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="https://brightpath.example/wp-content/uploads/2026/05/tap-768x512.jpg" alt="Tap handle removed" /></figure><!-- /wp:image -->
 <!-- wp:quote --><blockquote class="wp-block-quote"><p>Do not force a seized valve.</p></blockquote><!-- /wp:quote -->
       ]]></content:encoded>
       <wp:post_id>20</wp:post_id>
@@ -106,6 +108,119 @@
       <wp:post_name>stop-a-leaking-tap</wp:post_name>
       <wp:status>publish</wp:status>
       <wp:post_type>post</wp:post_type>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_thumbnail_id]]></wp:meta_key>
+        <wp:meta_value><![CDATA[305]]></wp:meta_value>
+      </wp:postmeta>
+    </item>
+
+    <item>
+      <title>repair</title>
+      <dc:creator><![CDATA[niko]]></dc:creator>
+      <content:encoded><![CDATA[]]></content:encoded>
+      <wp:post_id>301</wp:post_id>
+      <wp:post_date>2026-05-18 10:12:00</wp:post_date>
+      <wp:post_name>repair</wp:post_name>
+      <wp:status>inherit</wp:status>
+      <wp:post_parent>11</wp:post_parent>
+      <wp:post_type>attachment</wp:post_type>
+      <wp:post_mime_type>image/jpeg</wp:post_mime_type>
+      <wp:attachment_url>https://brightpath.example/wp-content/uploads/2026/05/repair.jpg</wp:attachment_url>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_wp_attached_file]]></wp:meta_key>
+        <wp:meta_value><![CDATA[2026/05/repair.jpg]]></wp:meta_value>
+      </wp:postmeta>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_wp_attachment_image_alt]]></wp:meta_key>
+        <wp:meta_value><![CDATA[Technician repairing a kitchen sink]]></wp:meta_value>
+      </wp:postmeta>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_wp_attachment_metadata]]></wp:meta_key>
+        <wp:meta_value><![CDATA[a:3:{s:5:"width";i:1600;s:6:"height";i:1067;s:4:"file";s:18:"2026/05/repair.jpg";}]]></wp:meta_value>
+      </wp:postmeta>
+    </item>
+
+    <item>
+      <title>tap</title>
+      <dc:creator><![CDATA[niko]]></dc:creator>
+      <content:encoded><![CDATA[]]></content:encoded>
+      <wp:post_id>302</wp:post_id>
+      <wp:post_date>2026-05-18 10:14:00</wp:post_date>
+      <wp:post_name>tap</wp:post_name>
+      <wp:status>inherit</wp:status>
+      <wp:post_parent>20</wp:post_parent>
+      <wp:post_type>attachment</wp:post_type>
+      <wp:post_mime_type>image/jpeg</wp:post_mime_type>
+      <wp:attachment_url>https://brightpath.example/wp-content/uploads/2026/05/tap.jpg</wp:attachment_url>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_wp_attached_file]]></wp:meta_key>
+        <wp:meta_value><![CDATA[2026/05/tap.jpg]]></wp:meta_value>
+      </wp:postmeta>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_wp_attachment_metadata]]></wp:meta_key>
+        <wp:meta_value><![CDATA[a:3:{s:5:"width";i:1024;s:6:"height";i:683;s:4:"file";s:15:"2026/05/tap.jpg";}]]></wp:meta_value>
+      </wp:postmeta>
+    </item>
+
+    <item>
+      <title>The team at the workshop</title>
+      <dc:creator><![CDATA[niko]]></dc:creator>
+      <content:encoded><![CDATA[]]></content:encoded>
+      <wp:post_id>303</wp:post_id>
+      <wp:post_date>2026-05-20 08:30:00</wp:post_date>
+      <wp:post_name>workshop-team</wp:post_name>
+      <wp:status>inherit</wp:status>
+      <wp:post_type>attachment</wp:post_type>
+      <wp:post_mime_type>image/jpeg</wp:post_mime_type>
+      <wp:attachment_url>https://brightpath.example/wp-content/uploads/2026/05/workshop-team.jpg</wp:attachment_url>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_wp_attached_file]]></wp:meta_key>
+        <wp:meta_value><![CDATA[2026/05/workshop-team.jpg]]></wp:meta_value>
+      </wp:postmeta>
+    </item>
+
+    <item>
+      <title>pipes</title>
+      <dc:creator><![CDATA[niko]]></dc:creator>
+      <content:encoded><![CDATA[]]></content:encoded>
+      <wp:post_id>304</wp:post_id>
+      <wp:post_date>2026-05-21 15:05:00</wp:post_date>
+      <wp:post_name>pipes</wp:post_name>
+      <wp:status>inherit</wp:status>
+      <wp:post_parent>11</wp:post_parent>
+      <wp:post_type>attachment</wp:post_type>
+      <wp:post_mime_type>image/jpeg</wp:post_mime_type>
+      <wp:attachment_url>https://brightpath.example/wp-content/uploads/2026/05/pipes.jpg</wp:attachment_url>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_wp_attached_file]]></wp:meta_key>
+        <wp:meta_value><![CDATA[2026/05/pipes.jpg]]></wp:meta_value>
+      </wp:postmeta>
+    </item>
+
+    <item>
+      <title>hero</title>
+      <dc:creator><![CDATA[niko]]></dc:creator>
+      <content:encoded><![CDATA[]]></content:encoded>
+      <wp:post_id>305</wp:post_id>
+      <wp:post_date>2026-05-22 07:45:00</wp:post_date>
+      <wp:post_name>hero</wp:post_name>
+      <wp:status>inherit</wp:status>
+      <wp:post_parent>20</wp:post_parent>
+      <wp:post_type>attachment</wp:post_type>
+      <wp:post_mime_type>image/jpeg</wp:post_mime_type>
+      <wp:attachment_url>https://brightpath.example/wp-content/uploads/2026/05/hero.jpg</wp:attachment_url>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_wp_attached_file]]></wp:meta_key>
+        <wp:meta_value><![CDATA[2026/05/hero.jpg]]></wp:meta_value>
+      </wp:postmeta>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_wp_attachment_image_alt]]></wp:meta_key>
+        <wp:meta_value><![CDATA[Plumber arriving with a tool bag]]></wp:meta_value>
+      </wp:postmeta>
+      <wp:postmeta>
+        <wp:meta_key><![CDATA[_wp_attachment_metadata]]></wp:meta_key>
+        <wp:meta_value><![CDATA[a:3:{s:5:"width";i:1920;s:6:"height";i:1080;s:4:"file";s:16:"2026/05/hero.jpg";}]]></wp:meta_value>
+      </wp:postmeta>
     </item>
   </channel>
 </rss>
