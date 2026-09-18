@@ -4,7 +4,7 @@ import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertTargetEnabled, targetAvailability } from "./adapters.js";
-import { parseWxr, sanitizeSourceUrl } from "./core.js";
+import { linkRewrites, parseWxr, sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
 import { generateAstroProject } from "./generate.js";
 import { writeReport } from "./report.js";
 import { packageVersion } from "./version.js";
@@ -27,6 +27,7 @@ interface CliOptions {
   readonly output?: string;
   readonly target: OutputTarget;
   readonly includeDrafts: boolean;
+  readonly keepSourceLinks: boolean;
   readonly json: boolean;
   readonly failOn: FailureThreshold;
 }
@@ -44,6 +45,7 @@ Options:
   --help, -h            show help, including after a command
   --version, -v         show the installed package version
   --include-drafts      also read items that are skipped by default
+  --keep-source-links   keep exported link targets instead of rewriting them
   --json                print one JSON document instead of the summary
   --fail-on <severity>  fail on warning or blocker; none disables the gate (default)
 
@@ -70,6 +72,7 @@ function parseArguments(argv: readonly string[]): CliOptions {
   let output: string | undefined;
   let target: OutputTarget = "astro";
   let includeDrafts = false;
+  let keepSourceLinks = false;
   let json = false;
   let failOn: FailureThreshold = "none";
 
@@ -81,6 +84,8 @@ function parseArguments(argv: readonly string[]): CliOptions {
       version = true;
     } else if (value === "--include-drafts") {
       includeDrafts = true;
+    } else if (value === "--keep-source-links") {
+      keepSourceLinks = true;
     } else if (value === "--json") {
       json = true;
     } else if (value === "--out") {
@@ -115,6 +120,7 @@ function parseArguments(argv: readonly string[]): CliOptions {
     ...(output === undefined ? {} : { output }),
     target,
     includeDrafts,
+    keepSourceLinks,
     json,
     failOn
   };
@@ -178,6 +184,24 @@ function createMigrationPlan(project: MigrationProject): object {
       summary: project.routes.summary,
       redirects: project.routes.redirects,
       entries: project.routes.entries
+    },
+    links: {
+      summary: project.links.summary,
+      rewrites: linkRewrites(project.links),
+      references: project.links.references.map((reference) => ({
+        id: reference.id,
+        sourceId: reference.sourceId,
+        ...(reference.route === undefined ? {} : { route: reference.route }),
+        ...(reference.nodeId === undefined ? {} : { nodeId: reference.nodeId }),
+        kind: reference.kind,
+        href: sanitizeLinkHref(reference.href),
+        ...(reference.path === undefined ? {} : { path: reference.path }),
+        ...(reference.fragment === undefined ? {} : { fragment: reference.fragment }),
+        ...(reference.host === undefined ? {} : { host: reference.host }),
+        ...(reference.targetRoute === undefined ? {} : { targetRoute: reference.targetRoute }),
+        status: reference.status,
+        reason: reference.reason
+      }))
     },
     summary: project.summary
   };
@@ -286,6 +310,12 @@ function printSummary(project: MigrationProject): void {
     `  urls: ${summary.routes.generated} ${pluralize(summary.routes.generated, "route")} generated, ` +
       `${summary.routes.redirects} ${pluralize(summary.routes.redirects, "redirect")} needed, ` +
       `${summary.routes.withoutTarget} ${pluralize(summary.routes.withoutTarget, "source URL")} left without a target`
+  );
+  console.log(
+    `  links: ${summary.links.internal} ${pluralize(summary.links.internal, "same-site link")}, ` +
+      `${summary.links.needsRewrite} proposed rewrites, ` +
+      `${summary.links.noTarget + summary.links.outsideExport} without a generated page, ` +
+      `${summary.links.external} external`
   );
 
   if (project.issues.length > 0) {
@@ -412,7 +442,7 @@ async function run(): Promise<void> {
     const output = resolve(options.output ?? "wp-migrate-core-demo");
     const plan = await inspect(project, resolve(output, "migration-plan"));
     const site = resolve(output, "astro-site");
-    await generateAstroProject(project, site);
+    await generateAstroProject(project, site, { rewriteLinks: !options.keepSourceLinks });
     await writeReport(project, resolve(site, "migration", "report.html"));
     finishCommand(project, options, {
       command: "demo",
@@ -422,7 +452,8 @@ async function run(): Promise<void> {
         `Report: ${plan.report}`,
         `Astro demo: ${site}`,
         `Media inventory: ${resolve(site, "migration", "media.json")}`,
-        `URL and redirect map: ${resolve(site, "migration", "redirects.json")}`
+        `URL and redirect map: ${resolve(site, "migration", "redirects.json")}`,
+        `Link inventory: ${resolve(site, "migration", "links.json")}`
       ]
     });
     return;
@@ -460,7 +491,7 @@ async function run(): Promise<void> {
     assertTargetEnabled(options.target);
     if (!options.output) throw new Error("convert requires --out <new-site>.");
     const output = resolve(options.output);
-    await generateAstroProject(project, output);
+    await generateAstroProject(project, output, { rewriteLinks: !options.keepSourceLinks });
     await writeReport(project, resolve(output, "migration", "report.html"));
     finishCommand(project, options, {
       command: "convert",
@@ -470,12 +501,14 @@ async function run(): Promise<void> {
         issues: resolve(output, "migration", "issues.json"),
         media: resolve(output, "migration", "media.json"),
         redirects: resolve(output, "migration", "redirects.json"),
+        links: resolve(output, "migration", "links.json"),
         report: resolve(output, "migration", "report.html")
       },
       humanLines: [
         `\nGenerated ${targetAvailability[options.target].label} project: ${output}`,
         `Media inventory: ${resolve(output, "migration", "media.json")}`,
-        `URL and redirect map: ${resolve(output, "migration", "redirects.json")}`
+        `URL and redirect map: ${resolve(output, "migration", "redirects.json")}`,
+        `Link inventory: ${resolve(output, "migration", "links.json")}`
       ]
     });
     return;

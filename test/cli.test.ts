@@ -27,6 +27,8 @@ test("inspect publishes a complete new output directory and preserves an existin
   const first = inspectWithCli(output);
   assert.equal(first.error, undefined);
   assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /2 proposed rewrites/);
+  assert.doesNotMatch(first.stdout, /2 rewritten/);
   assert.deepEqual((await readdir(output)).sort(), ["migration-plan.json", "report.html"]);
 
   const [planBefore, reportBefore] = await Promise.all([
@@ -204,6 +206,11 @@ test("--json prints one machine-readable document instead of the summary", async
   assert.equal(document.summary.media.notInExport, 1);
   assert.equal(document.summary.routes.generated, 0, "every link in this export carries a query string");
   assert.equal(document.summary.routes.withoutTarget, 4);
+  assert.equal(document.summary.links.internal, 4);
+  assert.equal(document.summary.links.needsRewrite, 0, "ambiguous exported URLs must not be rewritten");
+  assert.equal(document.summary.links.noTarget, 3);
+  assert.equal(document.summary.links.outsideExport, 1);
+  assert.equal(document.summary.links.external, 1);
   assert.doesNotMatch(result.stdout, /private-user|private-password|private-query|private-fragment|private-evidence/);
   assert.doesNotMatch(JSON.stringify(plan), /private-user|private-password|private-query|private-fragment|private-evidence/);
   const report = await readFile(join(output, "report.html"), "utf8");
@@ -343,8 +350,10 @@ test("convert writes a media inventory and a URL map beside the generated site",
   assert.equal(humanRun.status, 0, humanRun.stderr);
   assert.match(humanRun.stdout, /media: 5 assets in the export, 4 referenced/);
   assert.match(humanRun.stdout, /urls: 4 routes generated, 1 redirect needed/);
+  assert.match(humanRun.stdout, /links: 4 same-site links, 2 proposed rewrites, 1 without a generated page, 1 external/);
   assert.match(humanRun.stdout, /Media inventory: .*migration\/media\.json/);
   assert.match(humanRun.stdout, /URL and redirect map: .*migration\/redirects\.json/);
+  assert.match(humanRun.stdout, /Link inventory: .*migration\/links\.json/);
 
   const jsonRun = runCli(["convert", demoFixturePath, "--out", join(workspace, "second-site"), "--json"], workspace);
   assert.equal(jsonRun.status, 0, jsonRun.stderr);
@@ -352,6 +361,7 @@ test("convert writes a media inventory and a URL map beside the generated site",
 
   assert.equal(document.outputs.media, join(workspace, "second-site", "migration", "media.json"));
   assert.equal(document.outputs.redirects, join(workspace, "second-site", "migration", "redirects.json"));
+  assert.equal(document.outputs.links, join(workspace, "second-site", "migration", "links.json"));
 
   const media = JSON.parse(await readFile(document.outputs.media, "utf8"));
   assert.deepEqual(media.summary, document.summary.media);
@@ -366,4 +376,38 @@ test("convert writes a media inventory and a URL map beside the generated site",
     ]),
     [["/guides/stop-a-leaking-tap", "/guides/stop-a-leaking-tap/"]]
   );
+
+  const links = JSON.parse(await readFile(document.outputs.links, "utf8"));
+  assert.deepEqual(links.summary, document.summary.links);
+  assert.equal(links.rewrites.length, 2);
+  assert.match(
+    await readFile(join(workspace, "second-site", "src", "content", "pages", "home.md"), "utf8"),
+    /href="\/guides\/stop-a-leaking-tap\/"/
+  );
+});
+
+test("--keep-source-links leaves the exported targets in the generated content", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-source-links-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const output = join(workspace, "site");
+
+  const result = runCli(
+    ["convert", demoFixturePath, "--out", output, "--keep-source-links", "--json"],
+    workspace
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const document = JSON.parse(result.stdout);
+
+  const home = await readFile(join(output, "src", "content", "pages", "home.md"), "utf8");
+  assert.match(home, /href="\/guides\/stop-a-leaking-tap"/);
+  assert.doesNotMatch(home, /href="\/guides\/stop-a-leaking-tap\/"/);
+
+  const links = JSON.parse(await readFile(join(output, "migration", "links.json"), "utf8"));
+  assert.equal(links.rewrites.length, 2, "the inventory reports the rewrites that were not applied");
+  assert.deepEqual(document.summary.links, links.summary);
+  const readme = await readFile(join(output, "README.md"), "utf8");
+  const report = await readFile(join(output, "migration", "report.html"), "utf8");
+  assert.match(readme, /Automatic link rewriting was disabled/);
+  assert.match(report, /Proposed link rewrites/);
+  assert.doesNotMatch(report, /were rewritten in the generated content/);
 });

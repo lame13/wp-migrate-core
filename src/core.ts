@@ -2,6 +2,11 @@ import type {
   ContentRecord,
   ConversionDisposition,
   InspectOptions,
+  LinkReference,
+  LinkReferenceKind,
+  LinkReferenceStatus,
+  LinkRewrite,
+  LinkSummary,
   MediaAsset,
   MediaReference,
   MediaReferenceKind,
@@ -9,6 +14,7 @@ import type {
   MediaSummary,
   MigrationIssue,
   MigrationIssueCode,
+  MigrationLinks,
   MigrationMedia,
   MigrationNode,
   MigrationNodeKind,
@@ -261,29 +267,39 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
     });
   }
 
-  const referencesByRecord = records.map((record) => collectMediaReferences(record, assetIndex));
-  const annotatedRecords = records.map((record, index) => withMediaIssues(record, referencesByRecord[index] ?? []));
-  const media = finalizeMedia(baseAssets, referencesByRecord.flat());
-  const routes = finalizeRoutes(pendingRoutes);
-  const recordIssues = annotatedRecords.flatMap((record) => record.issues);
-  const issues = [...projectIssues, ...recordIssues];
-
   const source = compactOptionalObject({
     title: cleanOptionalField(readTag(channelHeader, "title")),
     url: cleanOptionalField(readTag(channelHeader, "link"))
   });
+  const siteUrl = source.url;
+
+  const referencesByRecord = records.map((record) => collectMediaReferences(record, assetIndex));
+  const routes = finalizeRoutes(pendingRoutes);
+  const linkIndex = createLinkTargetIndex(routes.entries, siteUrl);
+  const linkReferencesByRecord = records.map((record) => collectLinkReferences(record, linkIndex));
+  const annotatedRecords = records.map((record, index) =>
+    withLinkIssues(
+      withMediaIssues(record, referencesByRecord[index] ?? []),
+      linkReferencesByRecord[index] ?? []
+    )
+  );
+  const links = finalizeLinks(linkReferencesByRecord.flat());
+  const media = finalizeMedia(baseAssets, referencesByRecord.flat());
+  const recordIssues = annotatedRecords.flatMap((record) => record.issues);
+  const issues = [...projectIssues, ...recordIssues];
 
   return {
     site: {
       title: source.title ?? "WordPress migration",
-      ...(source.url === undefined ? {} : { url: source.url })
+      ...(siteUrl === undefined ? {} : { url: siteUrl })
     },
     source,
     records: annotatedRecords,
     issues,
     media,
     routes,
-    summary: summarize(annotatedRecords, issues, media.summary, routes.summary)
+    links,
+    summary: summarize(annotatedRecords, issues, media.summary, routes.summary, links.summary)
   };
 }
 
@@ -1148,11 +1164,15 @@ function scanHtmlImages(html: string): Array<{ readonly url: string; readonly al
   return images;
 }
 
-function readHtmlAttribute(tag: string, name: string): string | undefined {
-  const pattern = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i");
-  const match = pattern.exec(tag);
-  const value = (match?.[1] ?? match?.[2] ?? match?.[3] ?? "").trim();
-  return value === "" ? undefined : decodeXmlEntities(value);
+export function readHtmlAttribute(tag: string, name: string): string | undefined {
+  const pattern = /(?:^|\s)([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+  for (const match of tag.matchAll(pattern)) {
+    if (match[1]?.toLowerCase() === name.toLowerCase()) {
+      const value = (match[2] ?? match[3] ?? match[4] ?? "").trim();
+      return value === "" ? undefined : decodeXmlEntities(value);
+    }
+  }
+  return undefined;
 }
 
 function stringAttribute(values: Readonly<Record<string, unknown>>, key: string): string | undefined {
@@ -1393,6 +1413,413 @@ function targetRouteFor(record: ContentRecord): string {
   return normalizeRoute(record.route ?? `/${record.slug}/`);
 }
 
+interface LinkTargetIndex {
+  /** Source paths the export declares, keyed by a normalized path. */
+  readonly byPath: ReadonlyMap<string, readonly RouteEntry[]>;
+  /** Hosts that belong to the site being migrated. */
+  readonly siteHosts: ReadonlySet<string>;
+  readonly siteUrl?: string | undefined;
+}
+
+interface LinkCandidate {
+  readonly kind: LinkReferenceKind;
+  readonly href: string;
+  readonly nodeId?: string | undefined;
+}
+
+interface LinkClassification {
+  readonly status: LinkReferenceStatus;
+  readonly reason: string;
+  readonly path?: string | undefined;
+  readonly fragment?: string | undefined;
+  readonly host?: string | undefined;
+  readonly targetRoute?: string | undefined;
+  readonly rewritten?: string | undefined;
+}
+
+/** WordPress ID permalinks need a permalink decision, not a path rewrite. */
+const WORDPRESS_ID_QUERY_PATTERN = /(?:^|[?&])(?:p|page_id|attachment_id|cat)=\d+/i;
+
+/**
+ * Keep reporting artifacts free of credentials and query strings while
+ * preserving the fragment, which is part of what a link points at.
+ */
+export function sanitizeLinkHref(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return "";
+  }
+
+  const withoutQuery = trimmed.split(/[?#]/, 1)[0] ?? "";
+  const fragment = trimmed.includes("#") ? `#${trimmed.slice(trimmed.indexOf("#") + 1)}` : "";
+
+  const sanitized = sanitizeSourceUrl(trimmed);
+  if (sanitized !== undefined) {
+    return `${sanitized}${fragment}`;
+  }
+  // Do not expose authority text from malformed or unsupported absolute URLs.
+  return /^[a-z][a-z0-9+.-]*:|^[\/\\]{2}/i.test(trimmed) ? "" : `${withoutQuery}${fragment}`;
+}
+
+/**
+ * Proposed rewrites, with reporting-safe hrefs. The
+ * manifest, the plan and the link inventory all read from this.
+ */
+export function linkRewrites(links: MigrationLinks): LinkRewrite[] {
+  return links.references
+    .filter((reference) => reference.status === "needs-rewrite" && reference.rewritten !== undefined)
+    .map((reference) => ({
+      id: reference.id,
+      sourceId: reference.sourceId,
+      href: sanitizeLinkHref(reference.href),
+      rewritten: sanitizeLinkHref(reference.rewritten ?? ""),
+      reason: reference.reason
+    }));
+}
+
+function createLinkTargetIndex(entries: readonly RouteEntry[], siteUrl: string | undefined): LinkTargetIndex {
+  const byPath = new Map<string, RouteEntry[]>();
+  for (const entry of entries) {
+    const paths = new Set([
+      entry.sourcePath,
+      ...(entry.status === "generated" ? [entry.targetRoute] : [])
+    ].map(linkPathKey));
+    for (const key of paths) {
+      if (key !== undefined) {
+        const matches = byPath.get(key) ?? [];
+        matches.push(entry);
+        byPath.set(key, matches);
+      }
+    }
+  }
+
+  const siteHosts = new Set<string>();
+  const addHost = (value: string | undefined): void => {
+    try {
+      siteHosts.add(new URL(sanitizeSourceUrl(value) ?? "").host);
+    } catch {
+      // Relative or malformed source URLs cannot establish a site host.
+    }
+  };
+  addHost(siteUrl);
+  if (siteHosts.size === 0) {
+    for (const entry of entries) addHost(entry.sourceUrl);
+  }
+
+  return { byPath, siteHosts, siteUrl };
+}
+
+/**
+ * Allow a trailing slash difference, but preserve case, encoded separators
+ * and repeated slashes: those can identify different source pages.
+ */
+function linkPathKey(path: string | undefined): string | undefined {
+  if (path === undefined) {
+    return undefined;
+  }
+
+  return path.replace(/\/$/, "") || "/";
+}
+
+function collectLinkReferences(record: ContentRecord, index: LinkTargetIndex): LinkReference[] {
+  const candidates = new Map<string, LinkCandidate>();
+
+  const add = (candidate: LinkCandidate): void => {
+    const href = candidate.href.trim();
+    if (href === "" || href.startsWith("#") || isIgnoredLinkHref(href)) {
+      return;
+    }
+    if (candidates.has(href)) {
+      return;
+    }
+    candidates.set(href, { ...candidate, href });
+  };
+
+  const visit = (node: MigrationNode): void => {
+    addNodeLinkSettings(node, add);
+    for (const child of node.children) {
+      visit(child);
+    }
+    // Elementor text and HTML widgets keep their markup in settings rather
+    // than in rendered HTML, so those links are read from the same place the
+    // media inventory reads its images from.
+    const widgetHtml =
+      node.source === "elementor"
+        ? stringAttribute(node.attributes, node.sourceType === "text-editor" ? "editor" : "html")
+        : undefined;
+    for (const html of [node.rawHtml, widgetHtml]) {
+      if (html === undefined) {
+        continue;
+      }
+      for (const href of scanHtmlAnchors(html)) {
+        add({ kind: "html-anchor", href, nodeId: node.id });
+      }
+    }
+  };
+
+  for (const node of record.nodes) {
+    visit(node);
+  }
+  // Raw content can also contain HTML outside Gutenberg block boundaries.
+  for (const href of scanHtmlAnchors(record.rawContent)) {
+    add({ kind: "html-anchor", href });
+  }
+
+  const references: LinkReference[] = [];
+  for (const candidate of candidates.values()) {
+    const classification = classifyLink(candidate.href, record, index);
+    if (classification === undefined) {
+      continue;
+    }
+
+    references.push({
+      id: `${record.sourceId}:link:${references.length + 1}`,
+      sourceId: record.sourceId,
+      ...optionalProperty("route", sanitizeSourceUrl(record.route)),
+      ...optionalProperty("nodeId", candidate.nodeId),
+      kind: candidate.kind,
+      href: candidate.href,
+      ...optionalProperty("path", classification.path),
+      ...optionalProperty("fragment", classification.fragment),
+      ...optionalProperty("host", classification.host),
+      ...optionalProperty("targetRoute", classification.targetRoute),
+      ...optionalProperty("rewritten", classification.rewritten),
+      status: classification.status,
+      reason: classification.reason
+    });
+  }
+
+  return references;
+}
+
+function addNodeLinkSettings(node: MigrationNode, add: (candidate: LinkCandidate) => void): void {
+  if (node.source === "gutenberg" && node.sourceType === "core/button") {
+    const href = stringAttribute(node.attributes, "url");
+    if (href !== undefined) {
+      add({ kind: "gutenberg-button", href, nodeId: node.id });
+    }
+    return;
+  }
+
+  if (node.source !== "elementor") {
+    return;
+  }
+
+  if (node.sourceType === "button") {
+    const href = getNestedString(node.attributes, "link", "url");
+    if (href !== undefined) {
+      add({ kind: "elementor-button", href, nodeId: node.id });
+    }
+  }
+}
+
+function classifyLink(
+  href: string,
+  record: ContentRecord,
+  index: LinkTargetIndex
+): LinkClassification | undefined {
+  const absolute = /^[a-z][a-z0-9+.-]*:|^[\/\\]{2}/i.test(href);
+  const url = resolveLinkUrl(href, record, index);
+  if (url === undefined) {
+    return {
+      status: "outside-export",
+      reason: "This link could not be resolved against the source site, so it cannot be verified."
+    };
+  }
+
+  const fragment = url.hash === "" ? undefined : url.hash;
+  const path = url.pathname === "" ? "/" : url.pathname;
+  const key = linkPathKey(path);
+  const entries = key === undefined ? [] : index.byPath.get(key) ?? [];
+  const entry = entries[0];
+  const sameHost = index.siteHosts.has(url.host);
+
+  if (!sameHost && (absolute || index.siteHosts.size > 0)) {
+    return {
+      status: "external",
+      reason: "This link leaves the migrated site, so it is kept as written.",
+      path,
+      fragment,
+      host: url.host
+    };
+  }
+
+  if (WORDPRESS_ID_QUERY_PATTERN.test(url.search)) {
+    return {
+      status: "no-target",
+      reason: "This link uses a WordPress ID permalink, which needs a permalink decision before it can be rewritten.",
+      path,
+      fragment
+    };
+  }
+
+  if (entry === undefined) {
+    return {
+      status: "outside-export",
+      reason: "No page or post in this export declares this URL, so the link cannot be verified.",
+      path,
+      fragment
+    };
+  }
+
+  if (entries.length > 1 || entry.targetRoute === undefined || entry.status !== "generated") {
+    return {
+      status: "no-target",
+      reason: entries.length > 1 ? "More than one exported item declares this path, so its target needs review." : entry.reason,
+      path,
+      fragment,
+      targetRoute: entry.targetRoute
+    };
+  }
+
+  const rewritten = `${entry.targetRoute}${url.search}${url.hash}`;
+  if (rewritten === href) {
+    return {
+      status: "resolves",
+      reason: "The generated route already matches this link.",
+      path,
+      fragment,
+      targetRoute: entry.targetRoute
+    };
+  }
+
+  return {
+    status: "needs-rewrite",
+    reason: absolute
+      ? "The link points at the source site, so the generated content links to the local route instead."
+      : "The generated route differs from this link, so the generated content links to the route directly.",
+    path,
+    fragment,
+    targetRoute: entry.targetRoute,
+    rewritten
+  };
+}
+
+function resolveLinkUrl(href: string, record: ContentRecord, index: LinkTargetIndex): URL | undefined {
+  const bases: string[] = [];
+  if (record.route !== undefined) {
+    bases.push(record.route);
+  }
+  bases.push(`/${record.slug}/`);
+
+  for (const base of bases) {
+    try {
+      return new URL(href, base);
+    } catch {
+      if (index.siteUrl !== undefined) {
+        try {
+          return new URL(href, new URL(base, index.siteUrl));
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+
+  if (index.siteUrl !== undefined) {
+    try {
+      return new URL(href, index.siteUrl);
+    } catch {
+      // Fall through to the sentinel base below.
+    }
+  }
+
+  try {
+    const fallbackHost = index.siteHosts.values().next().value ?? "link.invalid";
+    return new URL(href, new URL(record.route ?? `/${record.slug}/`, `https://${fallbackHost}/`));
+  } catch {
+    return undefined;
+  }
+}
+
+function isIgnoredLinkHref(href: string): boolean {
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(href)?.[1]?.toLowerCase();
+  if (scheme === undefined) {
+    return false;
+  }
+  return scheme !== "http" && scheme !== "https";
+}
+
+function scanHtmlAnchors(html: string): string[] {
+  const hrefs: string[] = [];
+  const pattern = /<a\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(html)) !== null) {
+    const href = readHtmlAttribute(match[0], "href");
+    if (href !== undefined) {
+      hrefs.push(href);
+    }
+  }
+
+  return hrefs;
+}
+
+function withLinkIssues(record: ContentRecord, references: readonly LinkReference[]): ContentRecord {
+  const issues = createLinkIssues(record, references);
+  return issues.length === 0 ? record : { ...record, issues: [...record.issues, ...issues] };
+}
+
+/**
+ * Link findings stay aggregated per content record for the same reason media
+ * findings do: one repaired page can contain dozens of links, and the repair
+ * queue has to stay readable.
+ */
+function createLinkIssues(record: ContentRecord, references: readonly LinkReference[]): MigrationIssue[] {
+  const issues: MigrationIssue[] = [];
+  const withoutTarget = references.filter((reference) => reference.status === "no-target").length;
+  const outsideExport = references.filter((reference) => reference.status === "outside-export").length;
+
+  if (withoutTarget > 0) {
+    const message = `${withoutTarget} link${withoutTarget === 1 ? "" : "s"} point${withoutTarget === 1 ? "s" : ""} at a URL this export generates no page for.`;
+    issues.push({
+      id: `${record.sourceId}:LINK_TARGET_MISSING:${record.issues.length + issues.length + 1}`,
+      severity: "warning",
+      code: "LINK_TARGET_MISSING",
+      sourceId: record.sourceId,
+      ...optionalProperty("route", record.route),
+      title: message,
+      message,
+      requiredAction: "Decide where each of these links should go; the link map in this handoff lists them."
+    });
+  }
+
+  if (outsideExport > 0) {
+    const message = `${outsideExport} link${outsideExport === 1 ? "" : "s"} point${outsideExport === 1 ? "s" : ""} outside anything this export contains.`;
+    issues.push({
+      id: `${record.sourceId}:LINK_TARGET_OUTSIDE_EXPORT:${record.issues.length + issues.length + 1}`,
+      severity: "warning",
+      code: "LINK_TARGET_OUTSIDE_EXPORT",
+      sourceId: record.sourceId,
+      ...optionalProperty("route", record.route),
+      title: message,
+      message,
+      requiredAction: "Confirm whether each target still exists on the live site, then update or remove the link."
+    });
+  }
+
+  return issues;
+}
+
+function finalizeLinks(references: readonly LinkReference[]): MigrationLinks {
+  const count = (status: LinkReferenceStatus): number =>
+    references.filter((reference) => reference.status === status).length;
+  const external = count("external");
+
+  return {
+    references,
+    summary: {
+      references: references.length,
+      internal: references.length - external,
+      resolves: count("resolves"),
+      needsRewrite: count("needs-rewrite"),
+      noTarget: count("no-target"),
+      outsideExport: count("outside-export"),
+      external
+    }
+  };
+}
+
 function createIssueCollector(sourceId: string, route: string | undefined): IssueCollector {
   const issues: MigrationIssue[] = [];
   return {
@@ -1458,7 +1885,8 @@ function summarize(
   records: readonly ContentRecord[],
   issues: readonly MigrationIssue[],
   media: MediaSummary,
-  routes: RouteSummary
+  routes: RouteSummary,
+  links: LinkSummary
 ): MigrationSummary {
   const nodes = records.flatMap((record) => flattenNodes(record.nodes));
   return {
@@ -1475,7 +1903,8 @@ function summarize(
     warnings: issues.filter((issue) => issue.severity === "warning").length,
     blockers: issues.filter((issue) => issue.severity === "blocker").length,
     media,
-    routes
+    routes,
+    links
   };
 }
 

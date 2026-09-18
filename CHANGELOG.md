@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-18
+
+- Adds a link inventory to inspection plans, HTML reports, CLI summaries, and generated projects at `migration/links.json`.
+- Classifies supported HTML, Gutenberg, and Elementor links against exported URLs and generated routes, with per-record warnings for unresolved same-site targets.
+- Rewrites supported same-site hrefs during conversion, preserving query strings and fragments. `--keep-source-links` and the library's `{ rewriteLinks: false }` option retain source hrefs while keeping proposed rewrites visible.
+- Preserves distinct hrefs, path case, and encoded separators; leaves ambiguous permalinks and unknown external hosts for review instead of guessing a target.
+- Sanitizes credentials and queries in link reporting, including protocol-relative URLs, and sanitizes source URLs in the generated manifest and README.
+- Updates the manifest and link inventory to schema version `0.3`; media and redirect inventories remain at `0.2`.
+
 ## [0.2.0] - 2026-09-17
 
 This release adds a media inventory and a URL/redirect map to help plan a WordPress-to-Astro migration. Both use only the WXR export; migration commands make no network calls and do not download media or publish redirects.
@@ -50,7 +59,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/lame13/wp-migrate-core/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lame13/wp-migrate-core/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/lame13/wp-migrate-core/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/lame13/wp-migrate-core/compare/v0.1.1...v0.1.2

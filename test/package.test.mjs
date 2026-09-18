@@ -77,10 +77,18 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   assert.ok(readme.includes(`wp-migrate-core ${metadata.version}`));
   const media = JSON.parse(await readFile(join(output, "astro-site/migration/media.json"), "utf8"));
   const redirects = JSON.parse(await readFile(join(output, "astro-site/migration/redirects.json"), "utf8"));
-  assert.equal(media.schemaVersion, manifest.schemaVersion);
+  const links = JSON.parse(await readFile(join(output, "astro-site/migration/links.json"), "utf8"));
+  // Inventory formats are versioned on their own, so they only move when
+  // their shape changes.
+  assert.equal(media.schemaVersion, "0.2");
+  assert.equal(redirects.schemaVersion, "0.2");
   assert.equal(media.summary.assets, 5);
   assert.equal(redirects.summary.generated, manifest.redirects.summary.generated);
+  assert.equal(links.schemaVersion, manifest.schemaVersion);
+  assert.equal(manifest.schemaVersion, "0.3");
+  assert.equal(links.rewrites.length, manifest.links.summary.needsRewrite);
   assert.equal(manifest.media.file, "migration/media.json");
   assert.equal(manifest.redirects.file, "migration/redirects.json");
+  assert.equal(manifest.links.file, "migration/links.json");
   context.diagnostic(`Verified wp-migrate-core@${metadata.version}: installed executable, ESM exports, types, bundled demo, and handoff version.`);
 });
