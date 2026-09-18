@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { assertTargetEnabled } from "../src/adapters.js";
-import { parseWxr } from "../src/core.js";
+import { parseWxr, sanitizeLinkHref } from "../src/core.js";
 import type { MigrationNode } from "../src/types.js";
 import { demoFixturePath } from "./fixture-path.js";
 
@@ -262,6 +262,219 @@ test("falls back to the slug when an item has no exported link", () => {
     withoutTarget: 0,
     duplicateRoutes: 0
   });
+});
+
+test("classifies every link against the routes the export generates", async () => {
+  const project = parseWxr(await readFile(demoFixturePath, "utf8"));
+
+  assert.deepEqual(project.links.summary, {
+    references: 5,
+    internal: 4,
+    resolves: 1,
+    needsRewrite: 2,
+    noTarget: 0,
+    outsideExport: 1,
+    external: 1
+  });
+
+  const byHref = new Map(project.links.references.map((reference) => [reference.href, reference]));
+
+  const guide = byHref.get("/guides/stop-a-leaking-tap");
+  assert.equal(guide?.status, "needs-rewrite");
+  assert.equal(guide?.rewritten, "/guides/stop-a-leaking-tap/");
+  assert.equal(guide?.kind, "html-anchor");
+  assert.equal(guide?.targetRoute, "/guides/stop-a-leaking-tap/");
+
+  const elementorButton = byHref.get("/contact");
+  assert.equal(elementorButton?.kind, "elementor-button");
+  assert.equal(elementorButton?.rewritten, "/contact/");
+
+  const resolved = byHref.get("/contact/");
+  assert.equal(resolved?.status, "resolves");
+  assert.equal(resolved?.rewritten, undefined, "a link that already matches is not rewritten");
+
+  const outside = byHref.get("/pricing/");
+  assert.equal(outside?.status, "outside-export");
+  assert.equal(outside?.targetRoute, undefined);
+
+  const external = byHref.get("https://example.org/plumbing-standards");
+  assert.equal(external?.status, "external");
+  assert.equal(external?.host, "example.org");
+
+  const codes = project.issues.map((issue) => issue.code);
+  assert.equal(codes.filter((code) => code === "LINK_TARGET_OUTSIDE_EXPORT").length, 1);
+  assert.equal(codes.filter((code) => code === "LINK_TARGET_MISSING").length, 0);
+});
+
+test("explains links the export cannot resolve instead of guessing", () => {
+  const project = parseWxr(
+    wxrDocument(
+      "<item><title>Guides</title><link>https://example.test/guides/</link>",
+      "<wp:post_id>61</wp:post_id><wp:post_type>page</wp:post_type><wp:status>publish</wp:status>",
+      "<wp:post_name>guides</wp:post_name>",
+      "<content:encoded><![CDATA[",
+      '<a href="/guides/#pricing">Prices</a>',
+      '<a href="../contact/">Contact</a>',
+      '<a href="/search/?q=leak">Search</a>',
+      '<a href="https://example.test/?p=61">Permalink form</a>',
+      '<a href="/gone/">Gone</a>',
+      "]]></content:encoded></item>",
+      "<item><title>Search</title><link>https://example.test/search/</link>",
+      "<wp:post_id>62</wp:post_id><wp:post_type>page</wp:post_type><wp:status>publish</wp:status>",
+      "<wp:post_name>search</wp:post_name></item>",
+      "<item><title>Contact</title><link>https://example.test/contact/</link>",
+      "<wp:post_id>63</wp:post_id><wp:post_type>page</wp:post_type><wp:status>publish</wp:status>",
+      "<wp:post_name>contact</wp:post_name></item>"
+    )
+  );
+
+  const byHref = new Map(project.links.references.map((reference) => [reference.href, reference]));
+  assert.equal(byHref.get("/guides/#pricing")?.status, "resolves");
+  assert.equal(byHref.get("/guides/#pricing")?.fragment, "#pricing");
+  assert.equal(
+    byHref.get("../contact/")?.status,
+    "needs-rewrite",
+    "a relative link resolves against the page it appears on, then links to the route directly"
+  );
+  assert.equal(byHref.get("../contact/")?.targetRoute, "/contact/");
+  assert.equal(byHref.get("../contact/")?.rewritten, "/contact/");
+  assert.equal(byHref.get("/search/?q=leak")?.status, "resolves");
+  assert.equal(
+    byHref.get("https://example.test/?p=61")?.status,
+    "no-target",
+    "a WordPress ID permalink needs a permalink decision"
+  );
+  assert.match(byHref.get("https://example.test/?p=61")?.reason ?? "", /WordPress ID permalink/);
+  assert.equal(byHref.get("/gone/")?.status, "outside-export");
+
+  assert.deepEqual(project.links.summary, {
+    references: 5,
+    internal: 5,
+    resolves: 2,
+    needsRewrite: 1,
+    noTarget: 1,
+    outsideExport: 1,
+    external: 0
+  });
+});
+
+test("keeps anchors, mail handlers and unsafe schemes out of the link graph", () => {
+  const project = parseWxr(
+    wxrDocument(
+      "<item><title>Contact</title><link>https://example.test/contact/</link>",
+      "<wp:post_id>71</wp:post_id><wp:post_type>page</wp:post_type><wp:status>publish</wp:status>",
+      "<wp:post_name>contact</wp:post_name>",
+      "<content:encoded><![CDATA[",
+      '<a href="#top">Top</a>',
+      '<a href="mailto:hello@example.test">Mail</a>',
+      '<a href="tel:+441234567890">Call</a>',
+      '<a href="javascript:alert(1)">Unsafe</a>',
+      '<a href="https://example.test/contact/">Duplicate</a>',
+      '<a href="/contact/">Contact</a>',
+      "]]></content:encoded></item>"
+    )
+  );
+
+  assert.equal(project.links.references.length, 2, "only the two real destinations are counted");
+  assert.deepEqual(
+    project.links.references.map((reference) => reference.href),
+    ["https://example.test/contact/", "/contact/"]
+  );
+  assert.deepEqual(
+    project.links.references.map((reference) => reference.status),
+    ["needs-rewrite", "resolves"],
+    "an absolute link to the source site is rewritten to the local route"
+  );
+  assert.deepEqual(project.links.summary, {
+    references: 2,
+    internal: 2,
+    resolves: 1,
+    needsRewrite: 1,
+    noTarget: 0,
+    outsideExport: 0,
+    external: 0
+  });
+});
+
+test("sanitizes link credentials and queries without duplicating fragments", () => {
+  for (const href of [
+    "https://private-user:private-password@example.test/contact?secret=1#Team",
+    "//private-user:private-password@example.test/contact?secret=1#Team"
+  ]) {
+    assert.equal(sanitizeLinkHref(href), "https://example.test/contact#Team");
+  }
+  assert.equal(sanitizeLinkHref("../contact?secret=1#Team"), "../contact#Team");
+});
+
+function linkedPage(id: number, path: string | undefined, html = "", status = "publish"): string {
+  return `<item><title>Page ${id}</title>${path === undefined ? "" : `<link>https://example.test${path}</link>`}
+    <wp:post_id>${id}</wp:post_id><wp:post_type>page</wp:post_type><wp:status>${status}</wp:status>
+    <wp:post_name>page-${id}</wp:post_name><content:encoded><![CDATA[${html}]]></content:encoded></item>`;
+}
+
+test("keeps link spelling distinct and scans HTML outside Gutenberg blocks", () => {
+  const hrefs = ["/contact/", "/contact", "contact", "/contact?x=A#Team", "/contact?x=a#team"];
+  const project = parseWxr(wxrDocument(
+    linkedPage(1, "/guides/", hrefs.map((href) => `<a href="${href}">Go</a>`).join("") +
+      '<!-- wp:paragraph --><p><a href="/contact">Repeated</a></p><!-- /wp:paragraph -->'),
+    linkedPage(2, "/contact/"),
+    linkedPage(3, "/guides/contact/")
+  ));
+  const references = new Map(project.links.references.map((reference) => [reference.href, reference]));
+  assert.equal(references.size, hrefs.length);
+  assert.equal(references.get("/contact/")?.status, "resolves");
+  assert.equal(references.get("/contact")?.rewritten, "/contact/");
+  assert.equal(references.get("contact")?.rewritten, "/guides/contact/");
+  assert.equal(references.get("/contact?x=A#Team")?.rewritten, "/contact/?x=A#Team");
+  assert.equal(references.get("/contact?x=a#team")?.rewritten, "/contact/?x=a#team");
+});
+
+test("does not merge distinct source paths or approve ambiguous permalinks", () => {
+  const hrefs = ["/Case", "/case", "/a%2Fb", "/a/b", "/a%3Fb", "/a", "/a//b", "/lookup", "/blog/?p=4", "/draft/", "/page-9/"];
+  const project = parseWxr(wxrDocument(
+    linkedPage(1, "/", hrefs.map((href) => `<a href="${href}">Go</a>`).join("")),
+    linkedPage(2, "/Case"), linkedPage(3, "/case"),
+    linkedPage(4, "/a%2Fb"), linkedPage(5, "/a/b"), linkedPage(6, "/a%3Fb"),
+    linkedPage(7, "/lookup?view=page"), linkedPage(8, "/draft/", "", "draft"),
+    linkedPage(9, undefined)
+  ));
+  const references = new Map(project.links.references.map((reference) => [reference.href, reference]));
+  for (const href of ["/Case", "/case", "/a%2Fb", "/a/b", "/a%3Fb"]) {
+    assert.equal(references.get(href)?.rewritten, `${href}/`, href);
+  }
+  for (const href of ["/a", "/a//b"]) {
+    assert.equal(references.get(href)?.status, "outside-export", href);
+  }
+  for (const href of ["/lookup", "/blog/?p=4", "/draft/"]) {
+    assert.equal(references.get(href)?.status, "no-target", href);
+  }
+  assert.equal(references.get("/page-9/")?.status, "resolves");
+});
+
+test("requires a known source host before rewriting absolute links", () => {
+  const xml = wxrDocument(linkedPage(1, "/contact/",
+    '<a href="https://other.test/contact">External</a><a href="https://example.test/contact">Local</a>'
+  )).replace("<link>https://example.test/</link>", "");
+  const project = parseWxr(xml);
+  assert.equal(project.links.references[0]?.status, "external");
+  assert.equal(project.links.references[1]?.rewritten, "/contact/");
+
+  const relative = parseWxr(wxrDocument(
+    linkedPage(1, undefined, '<a href="../contact">Contact</a>'),
+    linkedPage(2, "/contact/")
+  ).replace("<link>https://example.test/</link>", ""));
+  assert.equal(relative.links.references[0]?.rewritten, "/contact/");
+});
+
+test("leaves duplicate exported targets unresolved regardless of item order", () => {
+  for (const items of [
+    [linkedPage(2, "/contact/"), linkedPage(3, "/contact/", "", "draft")],
+    [linkedPage(3, "/contact/", "", "draft"), linkedPage(2, "/contact/")]
+  ]) {
+    const project = parseWxr(wxrDocument(linkedPage(1, "/", '<a href="/contact">Contact</a>'), ...items));
+    assert.equal(project.links.references[0]?.status, "no-target");
+    assert.equal(project.links.references[0]?.rewritten, undefined);
+  }
 });
 
 function attachment(id: number, file: string): string {

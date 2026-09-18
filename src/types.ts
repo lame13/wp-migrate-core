@@ -72,7 +72,9 @@ export type MigrationIssueCode =
   | "ELEMENTOR_BUTTON_UNSAFE_URL"
   | "ELEMENTOR_WIDGET_UNKNOWN"
   | "MEDIA_MISSING_ALT_TEXT"
-  | "MEDIA_MISSING_FROM_EXPORT";
+  | "MEDIA_MISSING_FROM_EXPORT"
+  | "LINK_TARGET_MISSING"
+  | "LINK_TARGET_OUTSIDE_EXPORT";
 
 export interface MigrationIssue {
   readonly id: string;
@@ -240,6 +242,67 @@ export interface MigrationRoutes {
   readonly summary: RouteSummary;
 }
 
+export type LinkReferenceKind = "html-anchor" | "gutenberg-button" | "elementor-button";
+
+/**
+ * `resolves` means the generated route already matches the link as written.
+ * `needs-rewrite` means a route exists but the href has to change to reach it.
+ * `no-target` means the export knows the URL but generates no page for it.
+ * `outside-export` means a same-site link no item in this export declares.
+ * `external` means a different host, which stays untouched.
+ */
+export type LinkReferenceStatus =
+  | "resolves"
+  | "needs-rewrite"
+  | "no-target"
+  | "outside-export"
+  | "external";
+
+/** One link found in a content record, deduplicated per record. */
+export interface LinkReference {
+  readonly id: string;
+  readonly sourceId: string;
+  readonly route?: string;
+  readonly nodeId?: string;
+  readonly kind: LinkReferenceKind;
+  /** The link target exactly as written; reporting sanitizes it. */
+  readonly href: string;
+  readonly path?: string;
+  readonly fragment?: string;
+  readonly host?: string;
+  /** The generated route this link resolves to, when one exists. */
+  readonly targetRoute?: string;
+  /** The href the generated content should use, when it has to differ. */
+  readonly rewritten?: string;
+  readonly status: LinkReferenceStatus;
+  readonly reason: string;
+}
+
+export interface LinkSummary {
+  readonly references: number;
+  /** Same-site links: the ones this handoff can reason about. */
+  readonly internal: number;
+  readonly resolves: number;
+  readonly needsRewrite: number;
+  readonly noTarget: number;
+  readonly outsideExport: number;
+  readonly external: number;
+}
+
+/** One proposed rewrite, applied during conversion unless disabled. */
+export interface LinkRewrite {
+  readonly id: string;
+  readonly sourceId: string;
+  readonly href: string;
+  readonly rewritten: string;
+  readonly reason: string;
+}
+
+export interface MigrationLinks {
+  readonly references: readonly LinkReference[];
+  readonly summary: LinkSummary;
+}
+
 export interface MigrationSummary {
   readonly records: number;
   readonly pages: number;
@@ -253,6 +316,7 @@ export interface MigrationSummary {
   readonly blockers: number;
   readonly media: MediaSummary;
   readonly routes: RouteSummary;
+  readonly links: LinkSummary;
 }
 
 export interface MigrationProject {
@@ -268,6 +332,7 @@ export interface MigrationProject {
   readonly issues: readonly MigrationIssue[];
   readonly media: MigrationMedia;
   readonly routes: MigrationRoutes;
+  readonly links: MigrationLinks;
   readonly summary: MigrationSummary;
 }
 

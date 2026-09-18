@@ -1,7 +1,7 @@
 {
   "name": "wp-migrate-core",
-  "version": "0.2.0",
-  "description": "Turn a WordPress WXR export into an Astro handoff, with a media inventory, a URL and redirect map, and a repair queue for the parts that still need a human.",
+  "version": "0.3.0",
+  "description": "Turn a WordPress WXR export into an Astro handoff, with media, URL and link inventories, and a repair queue for the parts that still need a human.",
   "keywords": [
     "wordpress",
     "wordpress-migration",

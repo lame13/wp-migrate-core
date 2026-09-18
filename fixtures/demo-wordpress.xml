@@ -23,6 +23,7 @@
   <!-- wp:buttons --><div class="wp-block-buttons"><!-- wp:button --><div class="wp-block-button"><a class="wp-block-button__link" href="/contact/">Request a quote</a></div><!-- /wp:button --></div><!-- /wp:buttons -->
 </div>
 <!-- /wp:group -->
+<!-- wp:paragraph --><p>Read our <a href="/guides/stop-a-leaking-tap">guide to leaking taps</a>, see <a href="/pricing/">what a callout costs</a>, or check the <a href="https://example.org/plumbing-standards">industry standards</a> we work to.</p><!-- /wp:paragraph -->
 <!-- wp:latest-posts {"postsToShow":3,"displayPostDate":true} /-->
       ]]></content:encoded>
       <excerpt:encoded><![CDATA[Local plumbing services.]]></excerpt:encoded>
@@ -57,7 +58,7 @@
             "elements":[
               {"id":"h001","elType":"widget","widgetType":"heading","settings":{"title":"Repairs, installations and maintenance","header_size":"h1"},"elements":[]},
               {"id":"t001","elType":"widget","widgetType":"text-editor","settings":{"editor":"<p>Residential plumbing handled by licensed technicians.</p>"},"elements":[]},
-              {"id":"b001","elType":"widget","widgetType":"button","settings":{"text":"Request a quote","link":{"url":"/contact/"}},"elements":[]}
+              {"id":"b001","elType":"widget","widgetType":"button","settings":{"text":"Request a quote","link":{"url":"/contact"}},"elements":[]}
             ]
           },
           {

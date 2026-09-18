@@ -1,7 +1,7 @@
 import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, parse, resolve } from "node:path";
 
-import { normalizeRoute } from "./core.js";
+import { linkRewrites, normalizeRoute, readHtmlAttribute, sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
 import type { ContentRecord, MigrationIssue, MigrationNode, MigrationProject } from "./types.js";
 import { packageVersion } from "./version.js";
 
@@ -16,12 +16,22 @@ interface GeneratedRecord {
   readonly sourceUrl: string;
 }
 
+export interface GenerateOptions {
+  /**
+   * Rewrite same-site links so the generated content points at its own routes
+   * instead of the source permalinks. Defaults to true.
+   */
+  readonly rewriteLinks?: boolean;
+}
+
 export async function generateAstroProject(
   project: MigrationProject,
-  outDir: string
+  outDir: string,
+  options: GenerateOptions = {}
 ): Promise<void> {
   const outputDirectory = await prepareOutputDirectory(outDir);
   const records = prepareRecords(project);
+  const linkRewritesByRecord = createLinkRewriteMap(project, options.rewriteLinks !== false);
 
   const files = new Map<string, string>([
     ["package.json", renderPackageJson(project)],
@@ -35,14 +45,15 @@ export async function generateAstroProject(
     ["migration/issues.json", renderIssues(project.issues)],
     ["migration/media.json", renderMedia(project)],
     ["migration/redirects.json", renderRedirects(project)],
+    ["migration/links.json", renderLinks(project)],
     ["migration/manifest.json", renderManifest(project, records)],
-    ["README.md", renderReadme(project)]
+    ["README.md", renderReadme(project, options.rewriteLinks !== false)]
   ]);
 
   for (const generated of records) {
     files.set(
       `src/content/${generated.collection}/${generated.fileName}`,
-      renderContentRecord(generated)
+      renderContentRecord(generated, linkRewritesByRecord.get(generated.record.sourceId))
     );
   }
 
@@ -81,6 +92,30 @@ async function prepareOutputDirectory(outDir: string): Promise<string> {
   }
 
   return outputDirectory;
+}
+
+/** Raw href -> generated href, per content record. */
+function createLinkRewriteMap(
+  project: MigrationProject,
+  enabled: boolean
+): Map<string, Map<string, string>> {
+  const byRecord = new Map<string, Map<string, string>>();
+  if (!enabled) {
+    return byRecord;
+  }
+
+  for (const reference of project.links.references) {
+    const rewritten = reference.rewritten;
+    if (reference.status !== "needs-rewrite" || rewritten === undefined || rewritten === reference.href) {
+      continue;
+    }
+
+    const rewrites = byRecord.get(reference.sourceId) ?? new Map<string, string>();
+    rewrites.set(reference.href, rewritten);
+    byRecord.set(reference.sourceId, rewrites);
+  }
+
+  return byRecord;
 }
 
 function prepareRecords(project: MigrationProject): GeneratedRecord[] {
@@ -290,14 +325,18 @@ function renderIssues(issues: readonly MigrationIssue[]): string {
 }
 
 function renderManifest(project: MigrationProject, records: readonly GeneratedRecord[]): string {
+  const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   return renderJson({
-    schemaVersion: "0.2",
+    schemaVersion: "0.3",
     generator: {
       name: GENERATOR_NAME,
       version: packageVersion,
       target: "astro"
     },
-    sourceSite: project.site,
+    sourceSite: {
+      title: project.site.title,
+      ...(siteUrl === undefined ? {} : { url: siteUrl })
+    },
     summary: project.summary,
     targets: {
       astro: { enabled: true, label: "Astro" },
@@ -312,13 +351,17 @@ function renderManifest(project: MigrationProject, records: readonly GeneratedRe
       file: "migration/redirects.json",
       summary: project.routes.summary
     },
+    links: {
+      file: "migration/links.json",
+      summary: project.links.summary
+    },
     records: records.map(({ record, collection, fileName, route, sourceUrl }) => ({
       sourceId: record.sourceId,
       wordpressId: record.wordpressId,
       postType: record.type,
       sourceEditor: record.editor,
       route,
-      sourceUrl,
+      sourceUrl: sanitizeSourceUrl(sourceUrl) ?? route,
       outputFile: `src/content/${collection}/${fileName}`
     }))
   });
@@ -401,10 +444,43 @@ function renderRedirects(project: MigrationProject): string {
   });
 }
 
-function renderReadme(project: MigrationProject): string {
+/**
+ * The link inventory is the answer to "what will not work after this move":
+ * every same-site link with the route it resolves to, the hrefs the handoff
+ * proposes to rewrite, and every target this export cannot vouch for.
+ */
+function renderLinks(project: MigrationProject): string {
+  return renderJson({
+    schemaVersion: "0.3",
+    generator: {
+      name: GENERATOR_NAME,
+      version: packageVersion,
+      target: "astro"
+    },
+    summary: project.links.summary,
+    rewrites: linkRewrites(project.links),
+    references: project.links.references.map((reference) => ({
+      id: reference.id,
+      sourceId: reference.sourceId,
+      ...(reference.route === undefined ? {} : { route: reference.route }),
+      ...(reference.nodeId === undefined ? {} : { nodeId: reference.nodeId }),
+      kind: reference.kind,
+      href: sanitizeLinkHref(reference.href),
+      ...(reference.path === undefined ? {} : { path: reference.path }),
+      ...(reference.fragment === undefined ? {} : { fragment: reference.fragment }),
+      ...(reference.host === undefined ? {} : { host: reference.host }),
+      ...(reference.targetRoute === undefined ? {} : { targetRoute: reference.targetRoute }),
+      status: reference.status,
+      reason: reference.reason
+    }))
+  });
+}
+
+function renderReadme(project: MigrationProject, rewriteLinks: boolean): string {
+  const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   return `# ${project.site.title} — Astro migration handoff
 
-Generated from ${project.site.url ?? "a WordPress export"} by ${GENERATOR_NAME} ${packageVersion}.
+Generated from ${siteUrl ?? "a WordPress export"} by ${GENERATOR_NAME} ${packageVersion}.
 
 This is a rough migration output, not a production-ready replacement. The generator preserves source content where it can and emits explicit repair markers where it cannot.
 
@@ -420,20 +496,29 @@ npm run dev
 1. Open \`migration/issues.json\` and resolve every blocker.
 2. Work through \`migration/media.json\` and import each referenced asset, then write its alternative text. Nothing was downloaded for you.
 3. Publish the rules in \`migration/redirects.json\` on whatever hosts this site, and decide what happens to the source URLs listed there without a target.
-4. Review warnings and accepted legacy HTML instead of assuming conversion fidelity.
-5. Compare every generated route with the original WordPress route on desktop and mobile.
-6. Replace forms, dynamic widgets, shortcodes and plugin behavior deliberately.
-7. Run \`npm run build\` only after the repair queue is understood.
+4. Read \`migration/links.json\` and check every link this export could not vouch for, along with the proposed rewrites.
+5. Review warnings and accepted legacy HTML instead of assuming conversion fidelity.
+6. Compare every generated route with the original WordPress route on desktop and mobile.
+7. Replace forms, dynamic widgets, shortcodes and plugin behavior deliberately.
+8. Run \`npm run build\` only after the repair queue is understood.
 
-Generated content lives in \`src/content/pages\` and \`src/content/posts\`. Route mappings and source IDs live in \`migration/manifest.json\`; the media inventory is \`migration/media.json\` and the URL and redirect map is \`migration/redirects.json\`.
+Generated content lives in \`src/content/pages\` and \`src/content/posts\`. Route mappings and source IDs live in \`migration/manifest.json\`; the media inventory is \`migration/media.json\`, the URL and redirect map is \`migration/redirects.json\`, and the link inventory is \`migration/links.json\`.
 
 No media was downloaded, copied or rewritten. Every asset in the inventory still has to be imported from the source site, described, and verified against the original page.
+
+${rewriteLinks
+    ? "Automatic link rewriting was enabled for this handoff. Supported same-site links use the generated routes."
+    : "Automatic link rewriting was disabled for this handoff. Source links were kept; the inventory lists proposed rewrites that were not applied."}
+The link inventory omits credentials and query strings; consult the original export for complete source URLs.
 
 Astro is the only enabled renderer in this handoff. Next.js and Nuxt appear in the migration manifest as planned, disabled targets; this output contains no fake compatibility layer for either framework.
 `;
 }
 
-function renderContentRecord(generated: GeneratedRecord): string {
+function renderContentRecord(
+  generated: GeneratedRecord,
+  rewrites: ReadonlyMap<string, string> | undefined
+): string {
   const { record, route } = generated;
   const frontmatter = [
     "---",
@@ -447,8 +532,43 @@ function renderContentRecord(generated: GeneratedRecord): string {
     "---"
   ].join("\n");
 
-  const body = ensureTitleH1(renderRecordBody(record), record.title);
+  const body = ensureTitleH1(rewriteInternalLinks(renderRecordBody(record), rewrites), record.title);
   return `${frontmatter}\n\n${body.trim()}\n`;
+}
+
+/**
+ * Same-site links that resolve to a different generated route are rewritten to
+ * that route directly, so the handoff does not depend on a redirect rule being
+ * published. Everything else, including external links and anchors, is left
+ * exactly as the export wrote it.
+ */
+function rewriteInternalLinks(html: string, rewrites: ReadonlyMap<string, string> | undefined): string {
+  if (rewrites === undefined || rewrites.size === 0) {
+    return html;
+  }
+
+  return html.replace(/<a\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi, (tag) => {
+    const href = readHtmlAttribute(tag, "href");
+    if (href === undefined) {
+      return tag;
+    }
+
+    const rewritten = rewrites.get(href);
+    return rewritten === undefined || rewritten === href
+      ? tag
+      : replaceHtmlAttribute(tag, "href", rewritten);
+  });
+}
+
+function replaceHtmlAttribute(tag: string, name: string, value: string): string {
+  const pattern = /((?:^|\s)([^\s"'<>/=]+)\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+)/g;
+  const escaped = escapeHtmlAttribute(value);
+  let replaced = false;
+  return tag.replace(pattern, (match, prefix: string, attribute: string) => {
+    if (replaced || attribute.toLowerCase() !== name.toLowerCase()) return match;
+    replaced = true;
+    return `${prefix}"${escaped}"`;
+  });
 }
 
 function renderRecordBody(record: ContentRecord): string {

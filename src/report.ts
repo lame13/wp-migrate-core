@@ -1,10 +1,11 @@
 import { dirname } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
+import { sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
 import { packageVersion } from "./version.js";
-import { sanitizeSourceUrl } from "./core.js";
 
 import type {
   ContentRecord,
+  LinkReferenceStatus,
   MediaReferenceKind,
   MediaReferenceStatus,
   MigrationIssue,
@@ -345,6 +346,92 @@ const routeStatusClasses: Readonly<Record<RouteStatus, string>> = {
   skipped: "badge--warning",
   "ambiguous-url": "badge--warning"
 };
+
+const linkStatusLabels: Readonly<Record<LinkReferenceStatus, string>> = {
+  resolves: "Resolves",
+  "needs-rewrite": "Proposed rewrite",
+  "no-target": "No target",
+  "outside-export": "Outside this export",
+  external: "External"
+};
+
+function renderLinkSection(project: MigrationProject): string {
+  const { summary, references } = project.links;
+  const recordsById = new Map(project.records.map((record) => [record.sourceId, record]));
+  const rewrites = references.filter(
+    (reference) => reference.status === "needs-rewrite" && reference.rewritten !== undefined
+  );
+  const unresolved = references.filter(
+    (reference) => reference.status === "no-target" || reference.status === "outside-export"
+  );
+  const shownRewrites = rewrites.slice(0, inventoryRowLimit);
+  const shownUnresolved = unresolved.slice(0, inventoryRowLimit);
+  const needsDecision = summary.noTarget + summary.outsideExport;
+
+  const rewriteRows = shownRewrites
+    .map((reference) => {
+      const source = recordsById.get(reference.sourceId)?.title ?? reference.sourceId;
+      return `<tr>
+        <td>${escapeHtml(source)}</td>
+        <td><code>${escapeHtml(sanitizeLinkHref(reference.href))}</code></td>
+        <td><code>${escapeHtml(sanitizeLinkHref(reference.rewritten ?? ""))}</code></td>
+      </tr>`;
+    })
+    .join("\n");
+
+  const unresolvedList = shownUnresolved
+    .map((reference) => {
+      const source = recordsById.get(reference.sourceId)?.title ?? reference.sourceId;
+      return `<li><code>${escapeHtml(sanitizeLinkHref(reference.href))}</code><span>${escapeHtml(`${linkStatusLabels[reference.status]} — linked from ${source}: ${reference.reason}`)}</span></li>`;
+    })
+    .join("\n");
+
+  return `
+    <section class="section" aria-labelledby="links-heading">
+      <div class="section-heading">
+        <h2 id="links-heading">Link map</h2>
+        <p>Recognized content links, checked against the generated routes. Conversion applies the proposed same-site rewrites unless source links are kept with <code>--keep-source-links</code>. Inspection alone does not change content. ${summary.external} external link${summary.external === 1 ? "" : "s"} kept as written.</p>
+      </div>
+
+      <div class="metric-grid">
+        <article class="metric"><span>Same-site links</span><strong>${summary.internal}</strong><small>Includes links that still need review</small></article>
+        <article class="metric"><span>Resolve directly</span><strong>${summary.resolves}</strong><small>Already pointing at the generated route</small></article>
+        <article class="metric"><span>Proposed rewrites</span><strong>${summary.needsRewrite}</strong><small>Applied during conversion by default</small></article>
+        <article class="metric"><span>Need a decision</span><strong>${needsDecision}</strong><small>No generated page behind them</small></article>
+      </div>
+
+      ${references.length === 0 ? `
+        <div class="empty-state">
+          <h3>No links were found</h3>
+          <p>The included content does not contain links this scan recognizes: anchors, Gutenberg buttons, Elementor buttons and rendered HTML.</p>
+        </div>` : `
+        <article class="panel">
+          <h3>Proposed link rewrites</h3>
+          ${rewrites.length === 0 ? '<p class="muted">No automatic rewrites are proposed. Unresolved links still need review.</p>' : `
+          <div class="inventory-scroll">
+            <table class="inventory-table">
+              <thead>
+                <tr><th scope="col">Linked from</th><th scope="col">In the export</th><th scope="col">Proposed href</th></tr>
+              </thead>
+              <tbody>
+                ${rewriteRows}
+              </tbody>
+            </table>
+          </div>
+          ${rewrites.length > shownRewrites.length ? `<p class="inventory-note">Showing ${shownRewrites.length} of ${rewrites.length} proposed rewrites. The full list is in the inspection plan or the generated <code>migration/links.json</code>.</p>` : ""}`}
+        </article>`}
+
+      ${unresolved.length === 0 ? "" : `
+        <article class="panel">
+          <h3>Links this export cannot vouch for</h3>
+          <ul class="inventory-list">
+            ${unresolvedList}
+          </ul>
+          ${unresolved.length > shownUnresolved.length ? `<p class="inventory-note">Showing ${shownUnresolved.length} of ${unresolved.length} unresolved links.</p>` : ""}
+          <p class="inventory-note">These links were left exactly as the export wrote them. Confirm each target on the live site before publishing, and remove or repoint anything that is already gone.</p>
+        </article>`}
+    </section>`;
+}
 
 function renderMediaSection(project: MigrationProject): string {
   const { summary, assets, references } = project.media;
@@ -935,6 +1022,8 @@ export function renderReport(project: MigrationProject): string {
     ${renderMediaSection(project)}
 
     ${renderUrlSection(project)}
+
+    ${renderLinkSection(project)}
 
     <section class="section" aria-labelledby="targets-heading">
       <div class="section-heading">
