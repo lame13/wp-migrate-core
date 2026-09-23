@@ -74,7 +74,9 @@ export type MigrationIssueCode =
   | "MEDIA_MISSING_ALT_TEXT"
   | "MEDIA_MISSING_FROM_EXPORT"
   | "LINK_TARGET_MISSING"
-  | "LINK_TARGET_OUTSIDE_EXPORT";
+  | "LINK_TARGET_OUTSIDE_EXPORT"
+  | "LIVE_URL_UNCOVERED"
+  | "LIVE_URL_SOURCE_EMPTY";
 
 export interface MigrationIssue {
   readonly id: string;
@@ -303,6 +305,88 @@ export interface MigrationLinks {
   readonly summary: LinkSummary;
 }
 
+/**
+ * Live URLs the caller supplied for checking: a sitemap they downloaded, a
+ * sitemap index, or a plain list of URLs. Nothing here is fetched.
+ */
+export interface LiveUrlSource {
+  /** Page and asset URLs read from the supplied files. */
+  readonly urls: readonly string[];
+  /** Sitemap files a sitemap index points at. This tool never fetches them. */
+  readonly sitemapRefs: readonly string[];
+}
+
+/**
+ * `routed` means a generated page serves this path. `redirected` means a
+ * proposed rule in the redirect map already covers it, so it still has to be
+ * published. `unresolved` means the export declares the URL but the scan did
+ * not map it, such as an excluded draft. `excluded-shape` means the URL is a
+ * WordPress shape this handoff does not serve, such as a feed, an upload, an
+ * archive or a query-string permalink. `external-host` means another site.
+ * `invalid-url` means the entry could not be read as a URL. `uncovered` is the
+ * one that needs a new route or a new rule.
+ */
+export type LiveUrlStatus =
+  | "routed"
+  | "redirected"
+  | "unresolved"
+  | "excluded-shape"
+  | "external-host"
+  | "invalid-url"
+  | "uncovered";
+
+/** The WordPress shapes a coverage check recognizes without inventing a route. */
+export type LiveUrlShape =
+  | "feed"
+  | "media-file"
+  | "wordpress-endpoint"
+  | "taxonomy-archive"
+  | "date-archive"
+  | "author-archive"
+  | "paged"
+  | "query-url";
+
+/** One live URL compared against the routes and rules this plan proposes. */
+export interface LiveUrlEntry {
+  readonly id: string;
+  /** Sanitized live URL without credentials, query string or fragment. */
+  readonly url?: string;
+  readonly host?: string;
+  readonly path?: string;
+  /** True when the URL carries a query string, which no path rule can match. */
+  readonly hasQuery: boolean;
+  readonly status: LiveUrlStatus;
+  readonly shape?: LiveUrlShape;
+  /** The generated route that serves this URL, or that a rule points it at. */
+  readonly targetRoute?: string;
+  /** Route status behind an unresolved URL, such as `excluded`. */
+  readonly sourceStatus?: RouteStatus;
+  readonly reason: string;
+}
+
+export interface LiveUrlSummary {
+  /** True when the caller supplied live URLs to compare against the plan. */
+  readonly checked: boolean;
+  /** Distinct live URLs read from the supplied sources. */
+  readonly liveUrls: number;
+  readonly routed: number;
+  readonly redirected: number;
+  readonly unresolved: number;
+  /** Feeds, uploads, archives and query URLs no static route serves. */
+  readonly excluded: number;
+  readonly externalHosts: number;
+  readonly invalid: number;
+  /** Live URLs with no route, no rule and no recognized WordPress shape. */
+  readonly uncovered: number;
+  /** Sitemap indexes pointing at child sitemaps this tool does not fetch. */
+  readonly sitemapRefs: number;
+}
+
+export interface LiveUrlCoverage {
+  readonly entries: readonly LiveUrlEntry[];
+  readonly summary: LiveUrlSummary;
+}
+
 export interface MigrationSummary {
   readonly records: number;
   readonly pages: number;
@@ -333,9 +417,16 @@ export interface MigrationProject {
   readonly media: MigrationMedia;
   readonly routes: MigrationRoutes;
   readonly links: MigrationLinks;
+  readonly coverage: LiveUrlCoverage;
   readonly summary: MigrationSummary;
 }
 
 export interface InspectOptions {
   readonly includeDrafts?: boolean;
+  /**
+   * Live URLs to compare against the generated routes and redirect rules.
+   * Read the file yourself with `parseLiveUrlSource`; the parser never
+   * touches the filesystem or the network.
+   */
+  readonly liveUrlSource?: LiveUrlSource;
 }

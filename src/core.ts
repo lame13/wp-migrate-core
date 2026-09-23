@@ -7,6 +7,12 @@ import type {
   LinkReferenceStatus,
   LinkRewrite,
   LinkSummary,
+  LiveUrlCoverage,
+  LiveUrlEntry,
+  LiveUrlShape,
+  LiveUrlSource,
+  LiveUrlStatus,
+  LiveUrlSummary,
   MediaAsset,
   MediaReference,
   MediaReferenceKind,
@@ -285,8 +291,9 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
   );
   const links = finalizeLinks(linkReferencesByRecord.flat());
   const media = finalizeMedia(baseAssets, referencesByRecord.flat());
+  const coverage = buildLiveUrlCoverage(options.liveUrlSource, routes, annotatedRecords, media.assets, siteUrl);
   const recordIssues = annotatedRecords.flatMap((record) => record.issues);
-  const issues = [...projectIssues, ...recordIssues];
+  const issues = [...projectIssues, ...coverage.issues, ...recordIssues];
 
   return {
     site: {
@@ -299,6 +306,7 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
     media,
     routes,
     links,
+    coverage: coverage.coverage,
     summary: summarize(annotatedRecords, issues, media.summary, routes.summary, links.summary)
   };
 }
@@ -1411,6 +1419,472 @@ function sameRouteIgnoringTrailingSlash(left: string, right: string): boolean {
 
 function targetRouteFor(record: ContentRecord): string {
   return normalizeRoute(record.route ?? `/${record.slug}/`);
+}
+
+interface LiveUrlIndexes {
+  /** Generated route targets, keyed by the exact path they serve. */
+  readonly routeTargets: ReadonlyMap<string, string>;
+  /** Generated route targets, keyed by path without a trailing slash. */
+  readonly routeVariants: ReadonlyMap<string, string>;
+  /** Proposed redirect rules, keyed by the path they match. */
+  readonly redirects: ReadonlyMap<string, RedirectEntry>;
+  /** Exported URLs the map left without a confirmed route. */
+  readonly unresolved: ReadonlyMap<string, RouteEntry>;
+  /** Hosts that belong to the site being migrated. */
+  readonly siteHosts: ReadonlySet<string>;
+  /** Terms the export carries, keyed by slug and name. */
+  readonly terms: ReadonlyMap<string, WordPressTerm>;
+  /** Upload paths the export carries attachment records for. */
+  readonly mediaPaths: ReadonlySet<string>;
+}
+
+interface ParsedLiveUrl {
+  readonly key?: string | undefined;
+  readonly url?: string | undefined;
+  readonly host?: string | undefined;
+  readonly path?: string | undefined;
+  readonly hasQuery: boolean;
+  readonly invalidReason?: string | undefined;
+}
+
+/**
+ * Compare the live URLs a caller supplied with the routes and redirect rules
+ * this plan proposes. The check is a path comparison against files the caller
+ * already has: it requests nothing, so it cannot tell whether a live URL still
+ * returns a page, what it redirects to today, or what a URL serves that is not
+ * in the supplied source.
+ */
+function buildLiveUrlCoverage(
+  source: LiveUrlSource | undefined,
+  routes: MigrationRoutes,
+  records: readonly ContentRecord[],
+  assets: readonly MediaAsset[],
+  siteUrl: string | undefined
+): { readonly coverage: LiveUrlCoverage; readonly issues: readonly MigrationIssue[] } {
+  if (source === undefined) {
+    return { coverage: emptyLiveUrlCoverage(), issues: [] };
+  }
+
+  const indexes = createLiveUrlIndexes(routes, records, assets, siteUrl);
+  const entries: LiveUrlEntry[] = [];
+  const seen = new Set<string>();
+
+  source.urls.forEach((value) => {
+    const parsed = parseLiveUrl(value);
+    if (parsed.key !== undefined) {
+      // One URL can appear in several sitemaps and over both schemes. The host
+      // and the exact path decide, so a scheme difference does not create a
+      // second check, and a trailing slash still does.
+      if (seen.has(parsed.key)) {
+        return;
+      }
+      seen.add(parsed.key);
+    }
+
+    entries.push({
+      id: `live-url:${entries.length + 1}`,
+      ...classifyLiveUrl(parsed, indexes)
+    });
+  });
+
+  return {
+    coverage: { entries, summary: summarizeLiveUrlCoverage(entries, source) },
+    issues: createLiveUrlIssues(source, entries)
+  };
+}
+
+function emptyLiveUrlCoverage(): LiveUrlCoverage {
+  return {
+    entries: [],
+    summary: {
+      checked: false,
+      liveUrls: 0,
+      routed: 0,
+      redirected: 0,
+      unresolved: 0,
+      excluded: 0,
+      externalHosts: 0,
+      invalid: 0,
+      uncovered: 0,
+      sitemapRefs: 0
+    }
+  };
+}
+
+function createLiveUrlIndexes(
+  routes: MigrationRoutes,
+  records: readonly ContentRecord[],
+  assets: readonly MediaAsset[],
+  siteUrl: string | undefined
+): LiveUrlIndexes {
+  const routeTargets = new Map<string, string>();
+  const routeVariants = new Map<string, string>();
+  const redirects = new Map<string, RedirectEntry>();
+  const unresolved = new Map<string, RouteEntry>();
+
+  // Source permalink ambiguity does not prevent conversion from writing the
+  // record's generated route. Only colliding generated routes lack a page.
+  const targetCounts = new Map<string, number>();
+  for (const record of records) {
+    const target = targetRouteFor(record);
+    targetCounts.set(target, (targetCounts.get(target) ?? 0) + 1);
+  }
+  for (const [target, count] of targetCounts) {
+    if (count === 1) {
+      routeTargets.set(target, target);
+      routeVariants.set(livePathKey(target), target);
+    }
+  }
+
+  for (const entry of routes.entries) {
+    if (entry.status === "generated" || entry.status === "ambiguous-url") {
+      continue;
+    }
+
+    // Several items can share one path. The first explanation is kept so the
+    // report stays stable between runs.
+    if (entry.sourcePath !== undefined && !unresolved.has(entry.sourcePath)) {
+      unresolved.set(entry.sourcePath, entry);
+    }
+  }
+
+  for (const redirect of routes.redirects) {
+    redirects.set(redirect.sourcePath, redirect);
+  }
+
+  const siteHosts = new Set<string>();
+  const addHost = (value: string | undefined): void => {
+    try {
+      siteHosts.add(new URL(sanitizeSourceUrl(value) ?? "").host);
+    } catch {
+      // Relative or malformed source URLs cannot establish a site host.
+    }
+  };
+  addHost(siteUrl);
+  if (siteHosts.size === 0) {
+    for (const entry of routes.entries) addHost(entry.sourceUrl);
+  }
+
+  const terms = new Map<string, WordPressTerm>();
+  for (const term of records.flatMap((record) => record.terms)) {
+    for (const key of [term.nicename, term.name]) {
+      const normalized = key.trim().toLowerCase();
+      if (normalized !== "" && !terms.has(normalized)) {
+        terms.set(normalized, term);
+      }
+    }
+  }
+
+  const mediaPaths = new Set<string>();
+  for (const asset of assets) {
+    if (asset.path !== undefined) {
+      mediaPaths.add(livePathKey(asset.path));
+    }
+  }
+
+  return { routeTargets, routeVariants, redirects, unresolved, siteHosts, terms, mediaPaths };
+}
+
+/**
+ * Read one entry as a URL. Reported values never carry credentials, a query
+ * string or a fragment, and an entry that cannot be read is never echoed.
+ */
+function parseLiveUrl(value: string): ParsedLiveUrl {
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return { hasQuery: false, invalidReason: "The entry is empty." };
+  }
+
+  const relative = trimmed.startsWith("/") && !trimmed.startsWith("//") && !trimmed.startsWith("/\\");
+  let url: URL;
+  try {
+    url = relative ? new URL(trimmed, "https://live-url.invalid") : new URL(trimmed);
+  } catch {
+    return { hasQuery: false, invalidReason: "The entry is not an absolute URL or a site-relative path." };
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return {
+      hasQuery: false,
+      invalidReason: "The entry uses a scheme other than HTTP or HTTPS, which this check does not compare."
+    };
+  }
+
+  const hasQuery = url.search !== "";
+  const path = url.pathname === "" ? "/" : url.pathname;
+  return {
+    // Retain query identity for counting without exposing its contents in artifacts.
+    key: `${relative ? "path:" : url.host}|${path}|${url.search}`,
+    // Built from parts: this cannot carry credentials, a query or a fragment.
+    url: relative ? path : `${url.protocol}//${url.host}${path}`,
+    ...(relative ? {} : { host: url.host }),
+    path,
+    hasQuery
+  };
+}
+
+function classifyLiveUrl(
+  parsed: ParsedLiveUrl,
+  indexes: LiveUrlIndexes
+): Omit<LiveUrlEntry, "id"> {
+  const shared = {
+    ...optionalProperty("url", parsed.url),
+    ...optionalProperty("host", parsed.host),
+    ...optionalProperty("path", parsed.path),
+    hasQuery: parsed.hasQuery
+  };
+
+  if (parsed.invalidReason !== undefined) {
+    return { ...shared, status: "invalid-url", reason: parsed.invalidReason };
+  }
+
+  if (parsed.host !== undefined && indexes.siteHosts.size > 0 && !indexes.siteHosts.has(parsed.host)) {
+    return {
+      ...shared,
+      status: "external-host",
+      reason: `${parsed.host} is a different host from the site this export describes, so this plan cannot account for it.`
+    };
+  }
+
+  if (parsed.hasQuery) {
+    return {
+      ...shared,
+      status: "excluded-shape",
+      shape: "query-url",
+      reason: "The URL carries a query string, and a path rule cannot match a query. This permalink needs its own decision."
+    };
+  }
+
+  const key = parsed.path ?? "/";
+
+  // A trailing slash is part of the URL on a static host, so both the route
+  // and the rule are matched exactly before anything is called covered.
+  const targetRoute = indexes.routeTargets.get(key);
+  if (targetRoute !== undefined) {
+    return {
+      ...shared,
+      status: "routed",
+      targetRoute,
+      reason: "A generated page serves this path."
+    };
+  }
+
+  const redirect = indexes.redirects.get(key);
+  if (redirect !== undefined) {
+    return {
+      ...shared,
+      status: "redirected",
+      targetRoute: redirect.targetRoute,
+      reason: `The redirect map already proposes a rule for this path: ${redirect.reason} Publish that rule on whatever hosts the new site.`
+    };
+  }
+
+  const unresolved = indexes.unresolved.get(key);
+  if (unresolved !== undefined) {
+    return {
+      ...shared,
+      status: "unresolved",
+      ...optionalProperty("targetRoute", unresolved.targetRoute),
+      sourceStatus: unresolved.status,
+      reason: `The export declares this URL, and the URL map left it without a confirmed route. ${unresolved.reason}`
+    };
+  }
+
+  const shape = recognizeWordPressShape(parsed.path ?? "/", indexes);
+  if (shape !== undefined) {
+    return { ...shared, status: "excluded-shape", shape: shape.shape, reason: shape.reason };
+  }
+
+  const variant = indexes.routeVariants.get(livePathKey(key));
+  if (variant !== undefined) {
+    return {
+      ...shared,
+      status: "uncovered",
+      targetRoute: variant,
+      reason: `A generated route serves this path as ${variant}, and nothing serves the URL as it is written here. Add a trailing-slash rule, or confirm that the host resolves both spellings.`
+    };
+  }
+
+  return {
+    ...shared,
+    status: "uncovered",
+    reason: "Nothing in this plan serves this path: there is no generated route and no redirect rule."
+  };
+}
+
+/**
+ * Recognize the WordPress URLs that never become a static route, so they are
+ * listed as a decision instead of being reported as a missing page.
+ */
+function recognizeWordPressShape(
+  path: string,
+  indexes: LiveUrlIndexes
+): { readonly shape: LiveUrlShape; readonly reason: string } | undefined {
+  const key = livePathKey(path);
+  const segments = key === "/" ? [] : key.slice(1).split("/");
+  if (segments.length === 0) {
+    return undefined;
+  }
+
+  const lower = segments.map((segment) => segment.toLowerCase());
+  const lowerPath = key.toLowerCase();
+  const base = lower[0] ?? "";
+
+  if (lower[lower.length - 1] === "feed") {
+    return {
+      shape: "feed",
+      reason: "Feeds are served by WordPress and have no static route in this handoff."
+    };
+  }
+
+  if (lowerPath.startsWith("/wp-content/uploads/") || indexes.mediaPaths.has(key)) {
+    return {
+      shape: "media-file",
+      reason: indexes.mediaPaths.has(key)
+        ? "This is an upload the export carries, and it is listed in the media inventory. No file was downloaded, copied or rewritten."
+        : "This looks like an upload file, and the export carries no attachment record for this path."
+    };
+  }
+
+  if (isWordPressEndpoint(lowerPath, lower)) {
+    return {
+      shape: "wordpress-endpoint",
+      reason: "WordPress serves this path and a static handoff has no equivalent, so retire it or redirect it deliberately."
+    };
+  }
+
+  if ((base === "category" || base === "tag" || base === "post_tag") && segments.length >= 2) {
+    const term = indexes.terms.get((lower[1] ?? "").toLowerCase());
+    return {
+      shape: "taxonomy-archive",
+      reason: term === undefined
+        ? "Category and tag archives have no generated route in this handoff, and no term in this export matches this path."
+        : `The export carries the "${term.name}" ${termKindLabel(term.domain)} term, whose archive URL has no generated route in this handoff.`
+    };
+  }
+
+  if (base === "author" && segments.length >= 2) {
+    return {
+      shape: "author-archive",
+      reason: "Author archives have no generated route in this handoff."
+    };
+  }
+
+  if (isPagedArchive(lower)) {
+    return {
+      shape: "paged",
+      reason: "Paginated archive URLs have no generated route in this handoff: one static route serves one page."
+    };
+  }
+
+  if (
+    lower.length <= 3 &&
+    /^\d{4}$/.test(lower[0] ?? "") &&
+    lower.slice(1).every((segment) => /^\d{1,2}$/.test(segment))
+  ) {
+    return {
+      shape: "date-archive",
+      reason: "Date archives have no generated route in this handoff."
+    };
+  }
+
+  return undefined;
+}
+
+function isWordPressEndpoint(lowerPath: string, segments: readonly string[]): boolean {
+  if (/\.php$/.test(lowerPath)) {
+    return true;
+  }
+
+  return ["wp-admin", "wp-json", "wp-includes", "wp-content"].includes(segments[0] ?? "");
+}
+
+function isPagedArchive(segments: readonly string[]): boolean {
+  if (segments.length < 2) {
+    return false;
+  }
+
+  return segments[segments.length - 2] === "page" && /^\d+$/.test(segments[segments.length - 1] ?? "");
+}
+
+function termKindLabel(domain: string): string {
+  if (domain === "category") return "category";
+  if (domain === "post_tag" || domain === "tag") return "tag";
+  return domain;
+}
+
+function createLiveUrlIssues(source: LiveUrlSource, entries: readonly LiveUrlEntry[]): MigrationIssue[] {
+  const issues: MigrationIssue[] = [];
+
+  if (!entries.some((entry) => entry.status !== "invalid-url")) {
+    const sitemapRefs = source.sitemapRefs.length;
+    issues.push({
+      id: "coverage:LIVE_URL_SOURCE_EMPTY:1",
+      severity: "warning",
+      code: "LIVE_URL_SOURCE_EMPTY",
+      sourceId: "coverage",
+      title: "The live URL source declared no page URLs",
+      message: source.urls.length > 0
+        ? "The supplied live URL source contains no readable URLs, so no live URL was compared against this plan."
+        : sitemapRefs === 0
+          ? "The supplied live URL source lists no URLs, so no live URL was compared against this plan."
+        : `The supplied live URL source is a sitemap index with ${sitemapRefs} child ${pluralizeCount(sitemapRefs, "sitemap")}, and this tool does not fetch them. No live URL was compared against this plan.`,
+      requiredAction:
+        "Pass each sitemap that lists page URLs with --live-urls, or supply a plain list with one URL per line."
+    });
+  }
+
+  entries
+    .filter((entry) => entry.status === "uncovered")
+    .forEach((entry, index) => {
+      const label = entry.url ?? entry.path ?? "A live URL";
+      issues.push({
+        id: `coverage:LIVE_URL_UNCOVERED:${index + 1}`,
+        severity: "warning",
+        code: "LIVE_URL_UNCOVERED",
+        sourceId: "coverage",
+        ...optionalProperty("route", entry.path),
+        title: "Live URL has no route or redirect",
+        message: `${label} is served by no generated route and no redirect rule covers it.`,
+        requiredAction:
+          "Add a route or a redirect rule for this URL, or confirm that retiring the page is intentional."
+      });
+    });
+
+  return issues;
+}
+
+function summarizeLiveUrlCoverage(
+  entries: readonly LiveUrlEntry[],
+  source: LiveUrlSource
+): LiveUrlSummary {
+  const withStatus = (status: LiveUrlStatus): number =>
+    entries.filter((entry) => entry.status === status).length;
+
+  return {
+    checked: true,
+    liveUrls: entries.length - withStatus("invalid-url"),
+    routed: withStatus("routed"),
+    redirected: withStatus("redirected"),
+    unresolved: withStatus("unresolved"),
+    excluded: withStatus("excluded-shape"),
+    externalHosts: withStatus("external-host"),
+    invalid: withStatus("invalid-url"),
+    uncovered: withStatus("uncovered"),
+    sitemapRefs: source.sitemapRefs.length
+  };
+}
+
+/**
+ * Allow a trailing slash difference but keep case and encoded separators:
+ * `/Guides/` and `/guides/` are different paths on most static hosts.
+ */
+function livePathKey(path: string): string {
+  return path.replace(/\/$/, "") || "/";
+}
+
+function pluralizeCount(count: number, singular: string): string {
+  return count === 1 ? singular : `${singular}s`;
 }
 
 interface LinkTargetIndex {

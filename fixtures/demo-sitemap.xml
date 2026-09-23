@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fictional sitemap for the bundled demo. It stands in for the sitemap a
+     real migration would download from the live site: three published pages,
+     one post at its canonical permalink, the blog archives, two uploads, and a
+     page that the export does not carry. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://brightpath.example/</loc>
+    <lastmod>2026-06-01</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/services/</loc>
+    <lastmod>2026-06-02</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/contact/</loc>
+    <lastmod>2026-06-03</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/guides/stop-a-leaking-tap/</loc>
+    <lastmod>2026-06-04</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/guides/stop-a-leaking-tap</loc>
+    <lastmod>2026-06-04</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/guides/water-heater-repair/</loc>
+    <lastmod>2026-05-30</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/emergency-callout/</loc>
+    <lastmod>2026-05-29</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/category/guides/</loc>
+    <lastmod>2026-06-04</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/services/page/2/</loc>
+    <lastmod>2026-06-02</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/2026/06/</loc>
+    <lastmod>2026-06-04</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/author/dana/</loc>
+    <lastmod>2026-06-04</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/feed/</loc>
+    <lastmod>2026-06-04</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/?s=leaking+tap</loc>
+    <lastmod>2026-06-04</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/wp-content/uploads/2026/05/tap.jpg</loc>
+    <lastmod>2026-05-18</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/wp-content/uploads/2026/05/boiler-room.jpg</loc>
+    <lastmod>2026-05-19</lastmod>
+  </url>
+  <url>
+    <loc>https://brightpath.example/wp-login.php</loc>
+  </url>
+  <url>
+    <loc>https://cdn.brightpath.example/assets/hero.jpg</loc>
+    <lastmod>2026-05-22</lastmod>
+  </url>
+</urlset>

@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
-import { demoFixturePath } from "./fixture-path.js";
+import { demoFixturePath, demoSitemapPath } from "./fixture-path.js";
 
 const cliPath = resolve(process.cwd(), "dist/src/cli.js");
 
@@ -410,4 +410,146 @@ test("--keep-source-links leaves the exported targets in the generated content",
   assert.match(readme, /Automatic link rewriting was disabled/);
   assert.match(report, /Proposed link rewrites/);
   assert.doesNotMatch(report, /were rewritten in the generated content/);
+});
+
+test("--live-urls checks a downloaded sitemap against the routes and rules", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-live-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const output = join(workspace, "migration-plan");
+
+  const human = runCli(["inspect", demoFixturePath, "--out", output, "--live-urls", demoSitemapPath], workspace);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(
+    human.stdout,
+    /live urls: 17 URLs checked, 4 served by a route, 1 covered by a proposed rule, 2 with no route or rule/
+  );
+  assert.match(human.stdout, /\[WARNING\] \/guides\/water-heater-repair\/: .*no redirect rule covers it/);
+
+  const plan = JSON.parse(await readFile(join(output, "migration-plan.json"), "utf8"));
+  assert.equal(plan.coverage.summary.checked, true);
+  assert.equal(plan.coverage.summary.uncovered, 2);
+  assert.equal(plan.coverage.entries.length, 17);
+  assert.deepEqual((await readdir(output)).sort(), ["migration-plan.json", "report.html"]);
+
+  const report = await readFile(join(output, "report.html"), "utf8");
+  assert.match(report, /Live URL coverage/);
+  assert.match(report, /Live URLs to resolve before publishing/);
+  assert.doesNotMatch(report, /No live URL source was checked/);
+});
+
+test("--live-urls accepts several files, a plain list, and gates the exit status", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-live-list-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const urls = join(workspace, "live-urls.txt");
+  const sitemapIndex = join(workspace, "sitemap-index.xml");
+  await writeFile(urls, "# Live URLs\nhttps://brightpath.example/services/\nhttps://brightpath.example/gone/\n", "utf8");
+  await writeFile(
+    sitemapIndex,
+    '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><sitemap><loc>https://brightpath.example/post-sitemap.xml</loc></sitemap></sitemapindex>',
+    "utf8"
+  );
+
+  const gated = runCli([
+    "inspect", demoFixturePath, "--out", join(workspace, "gated"),
+    "--live-urls", urls, "--live-urls", sitemapIndex, "--json", "--fail-on", "warning"
+  ], workspace);
+  assert.equal(gated.status, 1, gated.stderr);
+  const document = JSON.parse(gated.stdout);
+  assert.equal(document.coverage.checked, true);
+  assert.equal(document.coverage.liveUrls, 2);
+  assert.equal(document.coverage.routed, 1);
+  assert.equal(document.coverage.uncovered, 1);
+  assert.equal(document.coverage.sitemapRefs, 1);
+  assert.equal(document.failed, true);
+  assert.match(gated.stderr, /--fail-on warning matched/);
+  assert.equal(document.issues.filter((issue: { code: string }) => issue.code === "LIVE_URL_UNCOVERED").length, 1);
+
+  const ungated = runCli([
+    "inspect", demoFixturePath, "--out", join(workspace, "ungated"), "--live-urls", urls, "--json"
+  ], workspace);
+  assert.equal(ungated.status, 0, ungated.stderr);
+  assert.equal(JSON.parse(ungated.stdout).failed, false);
+});
+
+test("--live-urls reads local files only", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-live-errors-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const cases = [
+    {
+      args: ["--live-urls", "https://brightpath.example/sitemap.xml"],
+      error: "--live-urls reads a local file."
+    },
+    {
+      args: ["--live-urls", join(workspace, "missing.xml")],
+      error: "Cannot read the --live-urls source"
+    },
+    {
+      args: ["--live-urls", demoFixturePath],
+      error: "is a WordPress export or a feed"
+    },
+    { args: ["--live-urls"], error: "--live-urls requires a value." },
+    { args: ["--live-urls", "--json"], error: "--live-urls requires a value." }
+  ];
+
+  for (const { args, error } of cases) {
+    const result = runCli(["inspect", demoFixturePath, "--out", join(workspace, "plan"), ...args], workspace);
+    assert.equal(result.status, 1, `${args.join(" ")}: ${result.stderr}`);
+    assert.ok(result.stderr.includes(error), result.stderr);
+    assert.deepEqual(await readdir(workspace), [], "a rejected run must not write output");
+  }
+});
+
+test("convert writes the coverage inventory and publishable redirect rules", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-coverage-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const site = join(workspace, "site");
+
+  const result = runCli([
+    "convert", demoFixturePath, "--out", site, "--live-urls", demoSitemapPath, "--json"
+  ], workspace);
+  assert.equal(result.status, 0, result.stderr);
+  const document = JSON.parse(result.stdout);
+
+  assert.equal(document.outputs.coverage, join(site, "migration", "coverage.json"));
+  assert.equal(document.outputs.redirectRules, join(site, "migration", "redirect-rules"));
+
+  const coverage = JSON.parse(await readFile(document.outputs.coverage, "utf8"));
+  assert.deepEqual(coverage.summary, document.coverage);
+  assert.deepEqual(coverage.summary, JSON.parse(await readFile(join(site, "migration", "manifest.json"), "utf8")).coverage.summary);
+  assert.equal(coverage.entries.length, 17);
+
+  const netlify = await readFile(join(site, "migration", "redirect-rules", "netlify", "_redirects"), "utf8");
+  assert.match(netlify, /^# Generated by wp-migrate-core /);
+  assert.match(netlify, /# Handled by Pretty URLs: \/guides\/stop-a-leaking-tap -> \/guides\/stop-a-leaking-tap\//);
+  assert.deepEqual(
+    (await readdir(join(site, "migration", "redirect-rules"))).sort(),
+    ["apache", "netlify", "nginx", "vercel"]
+  );
+
+  const readme = await readFile(join(site, "README.md"), "utf8");
+  assert.match(readme, /migration\/redirect-rules\//);
+  assert.match(readme, /2 with no route or rule/);
+});
+
+test("demo checks the bundled sitemap unless the caller supplies live URLs", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-demo-live-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+
+  const bundled = runCli(["demo", "--out", join(workspace, "demo"), "--json"], workspace);
+  assert.equal(bundled.status, 0, bundled.stderr);
+  const bundledDocument = JSON.parse(bundled.stdout);
+  assert.equal(bundledDocument.coverage.checked, true);
+  assert.equal(bundledDocument.coverage.liveUrls, 17);
+  assert.deepEqual(
+    JSON.parse(await readFile(join(workspace, "demo", "astro-site", "migration", "coverage.json"), "utf8")).summary,
+    bundledDocument.coverage
+  );
+
+  const own = join(workspace, "own-urls.txt");
+  await writeFile(own, "https://brightpath.example/services/\n", "utf8");
+  const custom = runCli(["demo", "--out", join(workspace, "demo-custom"), "--live-urls", own, "--json"], workspace);
+  assert.equal(custom.status, 0, custom.stderr);
+  const customDocument = JSON.parse(custom.stdout);
+  assert.equal(customDocument.coverage.liveUrls, 1);
+  assert.equal(customDocument.coverage.uncovered, 0);
 });

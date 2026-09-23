@@ -186,3 +186,52 @@ test("rewrites every href spelling and preserves queries, fragments and other at
     assert.doesNotMatch(artifact, /private-user|private-password|private-query|#Team#Team/);
   }
 });
+
+test("ships the coverage check and the rule files without source credentials", async (context) => {
+  const output = await mkdtemp(join(tmpdir(), "wp-migrate-core-coverage-"));
+  context.after(() => rm(output, { recursive: true, force: true }));
+
+  const fixture = (await readFile(demoFixturePath, "utf8"))
+    .replaceAll("https://brightpath.example", "https://private-user:private-password@brightpath.example");
+  const project = parseWxr(fixture, {
+    liveUrlSource: {
+      urls: [
+        "https://private-user:private-password@brightpath.example/services/",
+        "https://private-user:private-password@brightpath.example/guides/stop-a-leaking-tap",
+        "https://private-user:private-password@brightpath.example/gone/",
+        "https://private-user:private-password@brightpath.example/gone/?private-query=secret",
+        "ftp://private-user:private-password@brightpath.example/file"
+      ],
+      sitemapRefs: ["https://private-user:private-password@brightpath.example/sitemap.xml?private-query=secret"]
+    }
+  });
+  await generateAstroProject(project, output);
+
+  const coverage = await readFile(join(output, "migration", "coverage.json"), "utf8");
+  const rules = await Promise.all([
+    readFile(join(output, "migration/redirect-rules/netlify/_redirects"), "utf8"),
+    readFile(join(output, "migration/redirect-rules/vercel/vercel.json"), "utf8"),
+    readFile(join(output, "migration/redirect-rules/nginx/redirects.conf"), "utf8"),
+    readFile(join(output, "migration/redirect-rules/apache/.htaccess"), "utf8")
+  ]);
+  const report = renderReport(project);
+
+  const summary = JSON.parse(coverage).summary;
+  assert.equal(summary.checked, true);
+  assert.equal(summary.routed, 1);
+  assert.equal(summary.redirected, 1, "the exported path without a trailing slash still gets a rule");
+  assert.equal(summary.uncovered, 1);
+  assert.equal(summary.invalid, 1, "an unreadable entry is counted without being echoed");
+  assert.equal(JSON.parse(coverage).entries.filter((entry: { hasQuery: boolean }) => entry.hasQuery).length, 1);
+
+  for (const artifact of [coverage, report, ...rules]) {
+    assert.doesNotMatch(
+      artifact,
+      /private-user|private-password|private-query|secret/,
+      "credentials and queries must never reach a coverage artifact"
+    );
+  }
+
+  assert.match(coverage, /"url": "https:\/\/brightpath\.example\/services\/"/);
+  assert.match(rules[0]!, /# Handled by Pretty URLs: \/guides\/stop-a-leaking-tap -> \/guides\/stop-a-leaking-tap\//);
+});

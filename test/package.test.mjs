@@ -32,6 +32,9 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   }
 
   const metadata = JSON.parse(await readFile(join(repository, "package.json"), "utf8"));
+  const lockfile = JSON.parse(await readFile(join(repository, "package-lock.json"), "utf8"));
+  assert.equal(lockfile.version, metadata.version);
+  assert.equal(lockfile.packages[""].version, metadata.version);
   const [packed] = JSON.parse(runNpm(["pack", "--json", "--pack-destination", workspace], repository));
   assert.equal(packed.name, metadata.name);
   assert.equal(packed.version, metadata.version);
@@ -55,10 +58,20 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
 
   execFileSync(process.execPath, ["--input-type=module", "--eval", `
     import assert from "node:assert/strict";
-    import { parseWxr, generateAstroProject, renderReport } from "wp-migrate-core";
+    import {
+      parseWxr,
+      generateAstroProject,
+      renderReport,
+      parseLiveUrlSource,
+      mergeLiveUrlSources,
+      redirectRuleFiles
+    } from "wp-migrate-core";
     assert.equal(typeof parseWxr, "function");
     assert.equal(typeof generateAstroProject, "function");
     assert.equal(typeof renderReport, "function");
+    assert.equal(typeof parseLiveUrlSource, "function");
+    assert.equal(typeof mergeLiveUrlSources, "function");
+    assert.equal(typeof redirectRuleFiles, "function");
   `], { cwd: consumer, env, encoding: "utf8", timeout: 30_000 });
 
   runNpm(["exec", "--offline", "--", "wp-migrate-core", "demo", "--out", "demo output"], consumer);
@@ -78,17 +91,31 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   const media = JSON.parse(await readFile(join(output, "astro-site/migration/media.json"), "utf8"));
   const redirects = JSON.parse(await readFile(join(output, "astro-site/migration/redirects.json"), "utf8"));
   const links = JSON.parse(await readFile(join(output, "astro-site/migration/links.json"), "utf8"));
+  const coverage = JSON.parse(await readFile(join(output, "astro-site/migration/coverage.json"), "utf8"));
   // Inventory formats are versioned on their own, so they only move when
   // their shape changes.
   assert.equal(media.schemaVersion, "0.2");
   assert.equal(redirects.schemaVersion, "0.2");
   assert.equal(media.summary.assets, 5);
   assert.equal(redirects.summary.generated, manifest.redirects.summary.generated);
-  assert.equal(links.schemaVersion, manifest.schemaVersion);
-  assert.equal(manifest.schemaVersion, "0.3");
+  assert.equal(links.schemaVersion, "0.3");
+  assert.equal(coverage.schemaVersion, "0.4");
+  assert.equal(manifest.schemaVersion, "0.4");
   assert.equal(links.rewrites.length, manifest.links.summary.needsRewrite);
   assert.equal(manifest.media.file, "migration/media.json");
   assert.equal(manifest.redirects.file, "migration/redirects.json");
   assert.equal(manifest.links.file, "migration/links.json");
+  // The bundled demo ships a sitemap so the packaged install exercises the
+  // coverage check and the rule files outside the checkout.
+  assert.equal(manifest.coverage.file, "migration/coverage.json");
+  assert.deepEqual(manifest.coverage.summary, coverage.summary);
+  assert.equal(coverage.summary.checked, true);
+  assert.equal(coverage.summary.liveUrls, 17);
+  assert.equal(coverage.summary.uncovered, 2);
+  const netlifyRules = await readFile(join(output, "astro-site/migration/redirect-rules/netlify/_redirects"), "utf8");
+  assert.match(netlifyRules, /# Handled by Pretty URLs: \/guides\/stop-a-leaking-tap -> \/guides\/stop-a-leaking-tap\//);
+  const vercelRules = JSON.parse(await readFile(join(output, "astro-site/migration/redirect-rules/vercel/vercel.json"), "utf8"));
+  assert.equal(vercelRules.redirects.length, redirects.redirects.length);
+  assert.equal(vercelRules.redirects[0].source, "/(guides/stop-a-leaking-tap$)");
   context.diagnostic(`Verified wp-migrate-core@${metadata.version}: installed executable, ESM exports, types, bundled demo, and handoff version.`);
 });

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-23
+
+This release closes the URL loop. It compares the URLs the live site already serves with the routes this plan generates, and it writes the redirect rules the plan calls for in the formats common hosts expect.
+
+- Adds `--live-urls <file>` to `inspect`, `convert`, `report` and `demo`. It reads a downloaded XML sitemap, a sitemap index, or a plain list with one URL or path per line, and the option can be repeated to check several files at once. It reads local files only: a URL on the command line is refused, and nothing is fetched.
+- Adds a live URL coverage inventory at `migration/coverage.json` (schema version `0.4`), a coverage section in the HTML report, a coverage line in the CLI summary, and a `coverage` block in `--json`.
+- Classifies every live URL as served by a generated route, covered by a proposed redirect rule that still has to be published, declared by the export without a confirmed route, a WordPress shape no static route serves (feeds, uploads, endpoints, category and tag archives, date archives, author archives, paginated archives and query-string URLs), on another host, unreadable, or uncovered.
+- Creates one warning per uncovered URL so `--fail-on warning` can gate a migration that would drop URLs, and one warning when the supplied source lists no page URLs at all, such as a sitemap index passed on its own.
+- Keeps a trailing slash part of the URL: a live path is matched exactly against a generated route or a rule, so a route that serves `/guides/tap/` does not silently cover `/guides/tap`.
+- Writes redirect configuration from the same redirect map the report shows: `migration/redirect-rules/netlify/_redirects`, `vercel/vercel.json`, `nginx/redirects.conf` and `apache/.htaccess`. Netlify slash-only changes defer to Pretty URLs; Vercel patterns avoid matching their own destinations. nginx and Apache match original request paths, preserving encoded separators and repeated slashes. Configuration delimiters, Unicode, bare percent signs and replacement syntax are escaped per host, and no file is written when the plan needs no rule.
+- Updates the manifest to schema version `0.4` with a `coverage` block. Media and the redirect map stay at `0.2`, and the link inventory stays at `0.3`.
+- Keeps live URLs out of review artifacts: credentials, query strings and fragments never reach the coverage inventory, the plan, the report or a rule file, and an entry that cannot be read is never echoed.
+- Extends the bundled demo with a fictional sitemap, so the packaged install exercises the coverage check and the rule files, and refreshes the README with the coverage and rule-file workflow.
+- Reads namespace-prefixed sitemaps, ignores XML comments and extension URLs, preserves literal CDATA and decodes entities once. Rejects truncated XML and invalid UTF-8 instead of checking corrupted or partial input.
+- Keeps distinct query URLs during deduplication, normalizes relative paths consistently, and counts generated routes even when an exported query permalink still needs a decision. Warns when every supplied entry is unreadable.
+- Prevents the HTML report from claiming complete coverage while excluded or unreadable entries remain, and keeps unsupported URL schemes out of review artifacts.
+- Synchronizes the package lockfile with version `0.4.0` and adds screenshots captured from the fictional demo report.
+
 ## [0.3.0] - 2026-09-18
 
 - Adds a link inventory to inspection plans, HTML reports, CLI summaries, and generated projects at `migration/links.json`.
@@ -59,7 +77,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/lame13/wp-migrate-core/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/lame13/wp-migrate-core/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lame13/wp-migrate-core/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/lame13/wp-migrate-core/compare/v0.1.2...v0.1.3

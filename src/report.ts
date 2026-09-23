@@ -6,6 +6,8 @@ import { packageVersion } from "./version.js";
 import type {
   ContentRecord,
   LinkReferenceStatus,
+  LiveUrlShape,
+  LiveUrlStatus,
   MediaReferenceKind,
   MediaReferenceStatus,
   MigrationIssue,
@@ -355,6 +357,37 @@ const linkStatusLabels: Readonly<Record<LinkReferenceStatus, string>> = {
   external: "External"
 };
 
+const liveUrlStatusLabels: Readonly<Record<LiveUrlStatus, string>> = {
+  routed: "Served",
+  redirected: "Rule proposed",
+  unresolved: "Needs a decision",
+  "excluded-shape": "Not a static route",
+  "external-host": "Another host",
+  "invalid-url": "Unreadable entry",
+  uncovered: "No route or rule"
+};
+
+const liveUrlStatusClasses: Readonly<Record<LiveUrlStatus, string>> = {
+  routed: "badge--ok",
+  redirected: "badge--ok",
+  unresolved: "badge--notice",
+  "excluded-shape": "badge--status",
+  "external-host": "badge--status",
+  "invalid-url": "badge--status",
+  uncovered: "badge--notice"
+};
+
+const liveUrlShapeLabels: Readonly<Record<LiveUrlShape, string>> = {
+  feed: "Feed",
+  "media-file": "Upload file",
+  "wordpress-endpoint": "WordPress endpoint",
+  "taxonomy-archive": "Category or tag archive",
+  "date-archive": "Date archive",
+  "author-archive": "Author archive",
+  paged: "Paginated archive",
+  "query-url": "Query-string URL"
+};
+
 function renderLinkSection(project: MigrationProject): string {
   const { summary, references } = project.links;
   const recordsById = new Map(project.records.map((record) => [record.sourceId, record]));
@@ -570,6 +603,149 @@ function renderUrlSection(project: MigrationProject): string {
           </ul>
           ${withoutTarget.length > shownWithoutTarget.length ? `<p class="inventory-note">Showing ${shownWithoutTarget.length} of ${withoutTarget.length} URLs without a target.</p>` : ""}
           <p class="inventory-note">Resolve these URLs before publishing. A proposed route alone does not resolve a query-string permalink or a collision; excluded and skipped items may need a replacement page or a redirect.</p>
+        </article>`}
+    </section>`;
+}
+
+/**
+ * Coverage answers the question the rest of the report cannot: of the URLs the
+ * live site answers today, which ones does this plan serve, which ones does a
+ * rule cover, and which ones does nothing account for.
+ */
+function renderCoverageSection(project: MigrationProject): string {
+  const { summary, entries } = project.coverage;
+
+  if (!summary.checked) {
+    return `
+    <section class="section" aria-labelledby="coverage-heading">
+      <div class="section-heading">
+        <h2 id="coverage-heading">Live URL coverage</h2>
+        <p>How the URLs the live site serves today compare with the routes and rules in this plan. Nothing is fetched to work that out: the check reads a sitemap or a list you supply.</p>
+      </div>
+
+      <div class="empty-state">
+        <h3>No live URL source was checked</h3>
+        <p>This plan was built from the export alone, so it says nothing about the URLs the live site answers today, such as archives, feeds, attachment pages and content this export does not carry. Save the sitemap and run the scan again with <code>--live-urls sitemap.xml</code>, or pass a plain list with one URL per line.</p>
+      </div>
+    </section>`;
+  }
+
+  const actionable = entries.filter((entry) => entry.status === "uncovered" || entry.status === "unresolved");
+  const shaped = entries.filter((entry) => entry.status === "excluded-shape");
+  const others = entries.filter((entry) => entry.status === "external-host" || entry.status === "invalid-url");
+  const shownActionable = actionable.slice(0, inventoryRowLimit);
+  const shownShaped = shaped.slice(0, inventoryRowLimit);
+  const shownOthers = others.slice(0, inventoryRowLimit);
+
+  const shapeCounts = new Map<LiveUrlShape, number>();
+  for (const entry of shaped) {
+    if (entry.shape !== undefined) {
+      shapeCounts.set(entry.shape, (shapeCounts.get(entry.shape) ?? 0) + 1);
+    }
+  }
+  const shapeBreakdown = [...shapeCounts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .map(([shape, count]) => `<li><span>${escapeHtml(liveUrlShapeLabels[shape])}</span><strong>${count}</strong></li>`)
+    .join("\n");
+
+  const actionableRows = shownActionable
+    .map((entry) => `<tr>
+      <td><code>${escapeHtml(entry.url ?? entry.path ?? "Unreadable entry")}</code></td>
+      <td><span class="badge ${liveUrlStatusClasses[entry.status]}">${escapeHtml(liveUrlStatusLabels[entry.status])}</span></td>
+      <td>${escapeHtml(entry.reason)}</td>
+    </tr>`)
+    .join("\n");
+
+  const shapedList = shownShaped
+    .map((entry) => {
+      const shape = entry.shape === undefined ? "Recognized" : liveUrlShapeLabels[entry.shape];
+      return `<li><code>${escapeHtml(entry.path ?? entry.url ?? "")}</code><span>${escapeHtml(`${shape} — ${entry.reason}`)}</span></li>`;
+    })
+    .join("\n");
+
+  const otherList = shownOthers
+    .map((entry) => {
+      const label = entry.url ?? entry.path ?? "Unreadable entry";
+      return `<li><code>${escapeHtml(label)}</code><span>${escapeHtml(`${liveUrlStatusLabels[entry.status]} — ${entry.reason}`)}</span></li>`;
+    })
+    .join("\n");
+
+  const actionableNote = summary.unresolved === 0
+    ? "Give each one a generated route or a redirect rule, or confirm that retiring the page is intentional."
+    : `${summary.uncovered} of these ${actionable.length} ${actionable.length === 1 ? "URL has" : "URLs have"} no generated route and no redirect rule, and ${summary.unresolved} came from the export without a confirmed route. Give each one a route or a rule, or confirm that retiring the page is intentional.`;
+
+  const primaryPanel = summary.liveUrls === 0
+    ? `<div class="empty-state">
+        <h3>No live URLs were read</h3>
+        <p>${summary.sitemapRefs === 0
+          ? "The source you supplied lists no URLs, so nothing was compared with this plan."
+          : `The source you supplied is a sitemap index naming ${summary.sitemapRefs} child sitemap${summary.sitemapRefs === 1 ? "" : "s"}, and this tool does not fetch them.`} Pass a file that lists page URLs, or a plain list with one URL per line.</p>
+      </div>`
+    : actionable.length === 0 && shaped.length === 0 && others.length === 0
+      ? `<div class="empty-state">
+        <h3>Every live URL you supplied is accounted for</h3>
+        <p>Each one is either served by a generated route or covered by a proposed redirect rule. Publishing those rules, and verifying the result against the live site, is still your step.</p>
+      </div>`
+      : actionable.length === 0
+        ? `<div class="empty-state">
+          <h3>Some entries still need review</h3>
+          <p>${summary.routed} URLs are served by a generated route and ${summary.redirected} are covered by a proposed redirect rule. The WordPress URLs and entries this check could not compare are listed below; they are not confirmed as covered.</p>
+        </div>`
+        : `<article class="panel">
+          <h3>Live URLs to resolve before publishing</h3>
+          <div class="inventory-scroll">
+            <table class="inventory-table">
+              <thead>
+                <tr><th scope="col">Live URL</th><th scope="col">Status</th><th scope="col">Why</th></tr>
+              </thead>
+              <tbody>
+                ${actionableRows}
+              </tbody>
+            </table>
+          </div>
+          ${actionable.length > shownActionable.length ? `<p class="inventory-note">Showing ${shownActionable.length} of ${actionable.length} URLs that need a decision. The full list is in the inspection plan or the generated <code>migration/coverage.json</code>.</p>` : ""}
+          <p class="inventory-note">${escapeHtml(actionableNote)}</p>
+        </article>`;
+
+  return `
+    <section class="section" aria-labelledby="coverage-heading">
+      <div class="section-heading">
+        <h2 id="coverage-heading">Live URL coverage</h2>
+        <p>Every URL from the source you supplied, compared with the routes this plan generates and the rules it proposes. The check is a path comparison, so it cannot say whether a live URL still returns a page, what it redirects to today, or what a URL serves that you did not supply.</p>
+      </div>
+
+      <div class="metric-grid">
+        <article class="metric"><span>Live URLs checked</span><strong>${summary.liveUrls}</strong><small>Distinct, readable URLs from the source you supplied</small></article>
+        <article class="metric"><span>Served by a route</span><strong>${summary.routed}</strong><small>A generated page already answers this path</small></article>
+        <article class="metric"><span>Covered by a rule</span><strong>${summary.redirected}</strong><small>A redirect rule is proposed; it still has to be published on the host</small></article>
+        <article class="metric"><span>Nothing serves it</span><strong>${summary.uncovered}</strong><small>Live URLs with no generated route and no redirect rule</small></article>
+      </div>
+
+      ${summary.sitemapRefs === 0 || summary.liveUrls === 0 ? "" : `<p class="inventory-note">One of the supplied sources is a sitemap index naming ${summary.sitemapRefs} child sitemap${summary.sitemapRefs === 1 ? "" : "s"}, which this tool does not fetch. Pass each of those files with <code>--live-urls</code> as well.</p>`}
+
+      ${primaryPanel}
+
+      ${shaped.length === 0 ? "" : `
+        <article class="panel">
+          <h3>WordPress URLs that have no static route</h3>
+          <ul class="source-breakdown">
+            ${shapeBreakdown}
+          </ul>
+          <ul class="inventory-list">
+            ${shapedList}
+          </ul>
+          ${shaped.length > shownShaped.length ? `<p class="inventory-note">Showing ${shownShaped.length} of ${shaped.length} recognized URLs.</p>` : ""}
+          <p class="inventory-note">Feeds, uploads, endpoints, archives and query-string URLs are listed so the decision is explicit. Retire them, redirect them, or rebuild them deliberately; this handoff does not serve them.</p>
+        </article>`}
+
+      ${others.length === 0 ? "" : `
+        <article class="panel">
+          <h3>Entries this check could not compare</h3>
+          <ul class="inventory-list">
+            ${otherList}
+          </ul>
+          ${others.length > shownOthers.length ? `<p class="inventory-note">Showing ${shownOthers.length} of ${others.length} entries.</p>` : ""}
+          <p class="inventory-note">URLs on another host belong to a different site, and an unreadable entry is never echoed here. Neither is compared with this plan's routes.</p>
         </article>`}
     </section>`;
 }
@@ -1022,6 +1198,8 @@ export function renderReport(project: MigrationProject): string {
     ${renderMediaSection(project)}
 
     ${renderUrlSection(project)}
+
+    ${renderCoverageSection(project)}
 
     ${renderLinkSection(project)}
 

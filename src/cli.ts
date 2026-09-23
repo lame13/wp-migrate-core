@@ -6,10 +6,13 @@ import { fileURLToPath } from "node:url";
 import { assertTargetEnabled, targetAvailability } from "./adapters.js";
 import { linkRewrites, parseWxr, sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
 import { generateAstroProject } from "./generate.js";
+import { coverageEntryRecords, mergeLiveUrlSources, parseLiveUrlSource } from "./live-urls.js";
+import { redirectRuleFiles } from "./redirect-rules.js";
 import { writeReport } from "./report.js";
 import { packageVersion } from "./version.js";
 import type {
   ContentRecord,
+  LiveUrlSource,
   MigrationIssue,
   MigrationNode,
   MigrationProject,
@@ -28,6 +31,7 @@ interface CliOptions {
   readonly target: OutputTarget;
   readonly includeDrafts: boolean;
   readonly keepSourceLinks: boolean;
+  readonly liveUrlPaths: readonly string[];
   readonly json: boolean;
   readonly failOn: FailureThreshold;
 }
@@ -46,6 +50,8 @@ Options:
   --version, -v         show the installed package version
   --include-drafts      also read items that are skipped by default
   --keep-source-links   keep exported link targets instead of rewriting them
+  --live-urls <file>     compare a downloaded sitemap or URL list with the plan;
+                        repeat the option to check several files at once
   --json                print one JSON document instead of the summary
   --fail-on <severity>  fail on warning or blocker; none disables the gate (default)
 
@@ -55,6 +61,9 @@ Targets:
   nuxt   planned, not implemented
 
 This is a deliberately incomplete demonstration. It does not modify WordPress.
+
+--live-urls reads a local file. Save the sitemap yourself; this tool makes no
+network requests.
 
 --fail-on never changes what is written; it only sets the exit status so a
 caller can gate on the repair queue.`;
@@ -73,6 +82,7 @@ function parseArguments(argv: readonly string[]): CliOptions {
   let target: OutputTarget = "astro";
   let includeDrafts = false;
   let keepSourceLinks = false;
+  const liveUrlPaths: string[] = [];
   let json = false;
   let failOn: FailureThreshold = "none";
 
@@ -86,6 +96,15 @@ function parseArguments(argv: readonly string[]): CliOptions {
       includeDrafts = true;
     } else if (value === "--keep-source-links") {
       keepSourceLinks = true;
+    } else if (value === "--live-urls") {
+      const candidate = optionValue(value, argv[index + 1]);
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
+        throw new Error(
+          "--live-urls reads a local file. Download the sitemap first and pass the saved file; this tool makes no network requests."
+        );
+      }
+      liveUrlPaths.push(candidate);
+      index += 1;
     } else if (value === "--json") {
       json = true;
     } else if (value === "--out") {
@@ -121,6 +140,7 @@ function parseArguments(argv: readonly string[]): CliOptions {
     target,
     includeDrafts,
     keepSourceLinks,
+    liveUrlPaths,
     json,
     failOn
   };
@@ -136,7 +156,37 @@ function optionValue(option: string, value: string | undefined): string {
 
 async function loadProject(inputPath: string, options: CliOptions): Promise<MigrationProject> {
   const xml = await readFile(resolve(inputPath), "utf8");
-  return parseWxr(xml, { includeDrafts: options.includeDrafts });
+  const liveUrlSource = await loadLiveUrlSource(options.liveUrlPaths);
+  return parseWxr(xml, {
+    includeDrafts: options.includeDrafts,
+    ...(liveUrlSource === undefined ? {} : { liveUrlSource })
+  });
+}
+
+/**
+ * Read the live URLs the caller supplied. They come from files only: the
+ * coverage check never requests a sitemap, so a URL on the command line is a
+ * mistake worth reporting rather than something to fetch.
+ */
+async function loadLiveUrlSource(paths: readonly string[]): Promise<LiveUrlSource | undefined> {
+  if (paths.length === 0) {
+    return undefined;
+  }
+
+  const sources: LiveUrlSource[] = [];
+  for (const path of paths) {
+    let contents: Buffer;
+    try {
+      contents = await readFile(resolve(path));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Cannot read the --live-urls source ${path}: ${message}`);
+    }
+
+    sources.push(parseLiveUrlSource(contents, { sourcePath: path }));
+  }
+
+  return mergeLiveUrlSources(sources);
 }
 
 /**
@@ -202,6 +252,10 @@ function createMigrationPlan(project: MigrationProject): object {
         status: reference.status,
         reason: reference.reason
       }))
+    },
+    coverage: {
+      summary: project.coverage.summary,
+      entries: coverageEntryRecords(project.coverage)
     },
     summary: project.summary
   };
@@ -318,6 +372,15 @@ function printSummary(project: MigrationProject): void {
       `${summary.links.external} external`
   );
 
+  if (project.coverage.summary.checked) {
+    const coverage = project.coverage.summary;
+    console.log(
+      `  live urls: ${coverage.liveUrls} ${pluralize(coverage.liveUrls, "URL")} checked, ` +
+        `${coverage.routed} served by a route, ${coverage.redirected} covered by a proposed rule, ` +
+        `${coverage.uncovered} with no route or rule`
+    );
+  }
+
   if (project.issues.length > 0) {
     console.log("\nRepair queue");
     for (const issue of project.issues) {
@@ -362,6 +425,7 @@ function createJsonDocument(
     scan: { includeDrafts: options.includeDrafts },
     source: project.source.title === undefined ? {} : { title: project.source.title },
     summary: project.summary,
+    coverage: project.coverage.summary,
     issues: project.issues.map(createPlanIssue),
     outputs,
     failed
@@ -438,22 +502,35 @@ async function run(): Promise<void> {
   if (options.command === "demo") {
     assertTargetEnabled(options.target);
     const fixture = fileURLToPath(new URL("../../fixtures/demo-wordpress.xml", import.meta.url));
-    const project = await loadProject(fixture, options);
+    // The demo also shows the coverage check, unless the caller supplied their own URLs.
+    const demoSitemap = fileURLToPath(new URL("../../fixtures/demo-sitemap.xml", import.meta.url));
+    const project = await loadProject(fixture, {
+      ...options,
+      liveUrlPaths: options.liveUrlPaths.length > 0 ? options.liveUrlPaths : [demoSitemap]
+    });
     const output = resolve(options.output ?? "wp-migrate-core-demo");
     const plan = await inspect(project, resolve(output, "migration-plan"));
     const site = resolve(output, "astro-site");
+    const ruleFiles = redirectRuleFiles(project);
     await generateAstroProject(project, site, { rewriteLinks: !options.keepSourceLinks });
     await writeReport(project, resolve(site, "migration", "report.html"));
     finishCommand(project, options, {
       command: "demo",
-      outputs: { plan: plan.plan, report: plan.report, site },
+      outputs: {
+        plan: plan.plan,
+        report: plan.report,
+        site,
+        ...(ruleFiles.length === 0 ? {} : { redirectRules: resolve(site, "migration", "redirect-rules") })
+      },
       humanLines: [
         `\nPlan: ${plan.plan}`,
         `Report: ${plan.report}`,
         `Astro demo: ${site}`,
         `Media inventory: ${resolve(site, "migration", "media.json")}`,
         `URL and redirect map: ${resolve(site, "migration", "redirects.json")}`,
-        `Link inventory: ${resolve(site, "migration", "links.json")}`
+        `Link inventory: ${resolve(site, "migration", "links.json")}`,
+        `Coverage check: ${resolve(site, "migration", "coverage.json")}`,
+        ...(ruleFiles.length === 0 ? [] : [`Redirect rules: ${resolve(site, "migration", "redirect-rules")}`])
       ]
     });
     return;
@@ -491,6 +568,7 @@ async function run(): Promise<void> {
     assertTargetEnabled(options.target);
     if (!options.output) throw new Error("convert requires --out <new-site>.");
     const output = resolve(options.output);
+    const ruleFiles = redirectRuleFiles(project);
     await generateAstroProject(project, output, { rewriteLinks: !options.keepSourceLinks });
     await writeReport(project, resolve(output, "migration", "report.html"));
     finishCommand(project, options, {
@@ -502,13 +580,17 @@ async function run(): Promise<void> {
         media: resolve(output, "migration", "media.json"),
         redirects: resolve(output, "migration", "redirects.json"),
         links: resolve(output, "migration", "links.json"),
+        coverage: resolve(output, "migration", "coverage.json"),
+        ...(ruleFiles.length === 0 ? {} : { redirectRules: resolve(output, "migration", "redirect-rules") }),
         report: resolve(output, "migration", "report.html")
       },
       humanLines: [
         `\nGenerated ${targetAvailability[options.target].label} project: ${output}`,
         `Media inventory: ${resolve(output, "migration", "media.json")}`,
         `URL and redirect map: ${resolve(output, "migration", "redirects.json")}`,
-        `Link inventory: ${resolve(output, "migration", "links.json")}`
+        `Link inventory: ${resolve(output, "migration", "links.json")}`,
+        `Coverage check: ${resolve(output, "migration", "coverage.json")}`,
+        ...(ruleFiles.length === 0 ? [] : [`Redirect rules: ${resolve(output, "migration", "redirect-rules")}`])
       ]
     });
     return;

@@ -2,6 +2,8 @@ import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, parse, resolve } from "node:path";
 
 import { linkRewrites, normalizeRoute, readHtmlAttribute, sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
+import { coverageEntryRecords } from "./live-urls.js";
+import { redirectRuleFiles } from "./redirect-rules.js";
 import type { ContentRecord, MigrationIssue, MigrationNode, MigrationProject } from "./types.js";
 import { packageVersion } from "./version.js";
 
@@ -46,9 +48,14 @@ export async function generateAstroProject(
     ["migration/media.json", renderMedia(project)],
     ["migration/redirects.json", renderRedirects(project)],
     ["migration/links.json", renderLinks(project)],
+    ["migration/coverage.json", renderCoverage(project)],
     ["migration/manifest.json", renderManifest(project, records)],
     ["README.md", renderReadme(project, options.rewriteLinks !== false)]
   ]);
+
+  for (const ruleFile of redirectRuleFiles(project)) {
+    files.set(ruleFile.path, ruleFile.contents);
+  }
 
   for (const generated of records) {
     files.set(
@@ -327,7 +334,7 @@ function renderIssues(issues: readonly MigrationIssue[]): string {
 function renderManifest(project: MigrationProject, records: readonly GeneratedRecord[]): string {
   const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   return renderJson({
-    schemaVersion: "0.3",
+    schemaVersion: "0.4",
     generator: {
       name: GENERATOR_NAME,
       version: packageVersion,
@@ -354,6 +361,10 @@ function renderManifest(project: MigrationProject, records: readonly GeneratedRe
     links: {
       file: "migration/links.json",
       summary: project.links.summary
+    },
+    coverage: {
+      file: "migration/coverage.json",
+      summary: project.coverage.summary
     },
     records: records.map(({ record, collection, fileName, route, sourceUrl }) => ({
       sourceId: record.sourceId,
@@ -476,8 +487,29 @@ function renderLinks(project: MigrationProject): string {
   });
 }
 
+/**
+ * The coverage inventory is the result of comparing the live URLs the caller
+ * supplied with the routes and rules this plan proposes. Nothing was fetched:
+ * a URL is compared by path, and `checked: false` means no live URL source was
+ * supplied for this run.
+ */
+function renderCoverage(project: MigrationProject): string {
+  return renderJson({
+    schemaVersion: "0.4",
+    generator: {
+      name: GENERATOR_NAME,
+      version: packageVersion,
+      target: "astro"
+    },
+    summary: project.coverage.summary,
+    entries: coverageEntryRecords(project.coverage)
+  });
+}
+
 function renderReadme(project: MigrationProject, rewriteLinks: boolean): string {
   const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
+  const hasRuleFiles = redirectRuleFiles(project).length > 0;
+  const coverage = project.coverage.summary;
   return `# ${project.site.title} — Astro migration handoff
 
 Generated from ${siteUrl ?? "a WordPress export"} by ${GENERATOR_NAME} ${packageVersion}.
@@ -495,16 +527,23 @@ npm run dev
 
 1. Open \`migration/issues.json\` and resolve every blocker.
 2. Work through \`migration/media.json\` and import each referenced asset, then write its alternative text. Nothing was downloaded for you.
-3. Publish the rules in \`migration/redirects.json\` on whatever hosts this site, and decide what happens to the source URLs listed there without a target.
-4. Read \`migration/links.json\` and check every link this export could not vouch for, along with the proposed rewrites.
-5. Review warnings and accepted legacy HTML instead of assuming conversion fidelity.
-6. Compare every generated route with the original WordPress route on desktop and mobile.
-7. Replace forms, dynamic widgets, shortcodes and plugin behavior deliberately.
-8. Run \`npm run build\` only after the repair queue is understood.
+3. Publish the redirect rules on whatever hosts the new site.${hasRuleFiles
+    ? " Files for Netlify, Vercel, nginx and Apache are in `migration/redirect-rules/`. Netlify slash-only changes rely on Pretty URLs and are recorded as comments. Apache requires mod_rewrite; encoded slashes also require AllowEncodedSlashes NoDecode in the server configuration."
+    : " This plan needs no path rule, so no rule files were written."} Then decide what happens to the source URLs in \`migration/redirects.json\` that have no target.
+4. Check \`migration/coverage.json\`.${coverage.checked
+    ? ` The live URLs you supplied were compared with this plan: ${coverage.routed} served by a generated route, ${coverage.redirected} covered by a proposed rule, ${coverage.uncovered} with no route or rule. Add a route or a rule for every uncovered URL before publishing, and review excluded, unresolved and unreadable entries separately.`
+    : " No live URL source was supplied, so no live URL was compared with this plan. Save the sitemap of the live site and run the scan again with `--live-urls sitemap.xml` to see which routes you would lose."}
+5. Read \`migration/links.json\` and check every link this export could not vouch for, along with the proposed rewrites.
+6. Review warnings and accepted legacy HTML instead of assuming conversion fidelity.
+7. Compare every generated route with the original WordPress route on desktop and mobile.
+8. Replace forms, dynamic widgets, shortcodes and plugin behavior deliberately.
+9. Run \`npm run build\` only after the repair queue is understood.
 
-Generated content lives in \`src/content/pages\` and \`src/content/posts\`. Route mappings and source IDs live in \`migration/manifest.json\`; the media inventory is \`migration/media.json\`, the URL and redirect map is \`migration/redirects.json\`, and the link inventory is \`migration/links.json\`.
+Generated content lives in \`src/content/pages\` and \`src/content/posts\`. Route mappings and source IDs live in \`migration/manifest.json\`; the media inventory is \`migration/media.json\`, the URL and redirect map is \`migration/redirects.json\`, the link inventory is \`migration/links.json\`, and the live URL coverage check is \`migration/coverage.json\`.
 
 No media was downloaded, copied or rewritten. Every asset in the inventory still has to be imported from the source site, described, and verified against the original page.
+
+The coverage check compares the paths you supplied with the routes and rules in this plan. It requested nothing over the network, so it cannot tell you whether a live URL still returns a page or where it redirects today.
 
 ${rewriteLinks
     ? "Automatic link rewriting was enabled for this handoff. Supported same-site links use the generated routes."
