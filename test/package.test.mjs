@@ -42,8 +42,10 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   const consumer = join(workspace, "consumer");
   await mkdir(consumer);
   await writeFile(join(consumer, "package.json"), JSON.stringify({ private: true, type: "module" }));
+  // The dependency is resolved from the registry: the tarball no longer stands
+  // alone, so this install cannot be offline.
   runNpm([
-    "install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false",
+    "install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false",
     join(workspace, packed.filename)
   ], consumer);
 
@@ -64,7 +66,8 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
       renderReport,
       parseLiveUrlSource,
       mergeLiveUrlSources,
-      redirectRuleFiles
+      redirectRuleFiles,
+      verifySite
     } from "wp-migrate-core";
     assert.equal(typeof parseWxr, "function");
     assert.equal(typeof generateAstroProject, "function");
@@ -72,7 +75,30 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
     assert.equal(typeof parseLiveUrlSource, "function");
     assert.equal(typeof mergeLiveUrlSources, "function");
     assert.equal(typeof redirectRuleFiles, "function");
+    assert.equal(typeof verifySite, "function");
   `], { cwd: consumer, env, encoding: "utf8", timeout: 30_000 });
+
+  const help = runNpm(["exec", "--offline", "--", "wp-migrate-core", "--help"], consumer);
+  assert.match(help, /wp-migrate-core verify <export\.xml> --html-dir/);
+
+  const verificationText = "This migrated page contains enough original words to verify that its content arrived in the built site successfully.";
+  await writeFile(join(consumer, "verify.xml"), `<rss><channel><link>https://example.invalid/</link><item>
+    <title>Verified</title><link>https://example.invalid/verified/</link>
+    <wp:post_id>1</wp:post_id><wp:post_type>page</wp:post_type><wp:status>publish</wp:status>
+    <wp:post_name>verified</wp:post_name><content:encoded><![CDATA[<p>${verificationText}</p>]]></content:encoded>
+    </item></channel></rss>`);
+  await mkdir(join(consumer, "built"));
+  await writeFile(join(consumer, "built/verified.html"), `<p>${verificationText}</p>`);
+  const verified = JSON.parse(runNpm([
+    "exec", "--offline", "--", "wp-migrate-core", "verify", "verify.xml", "--html-dir", "built",
+    "--json", "--fail-on", "warning"
+  ], consumer));
+  assert.equal(verified.failed, false);
+  assert.equal(verified.summary.verified, 1);
+  const verificationFile = JSON.parse(await readFile(join(consumer, "migration-verification.json"), "utf8"));
+  assert.equal(verificationFile.schemaVersion, "0.5");
+  assert.equal(verificationFile.generator.version, metadata.version);
+  assert.deepEqual(verificationFile.summary, verified.summary);
 
   runNpm(["exec", "--offline", "--", "wp-migrate-core", "demo", "--out", "demo output"], consumer);
   const output = join(consumer, "demo output");
@@ -117,5 +143,5 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   const vercelRules = JSON.parse(await readFile(join(output, "astro-site/migration/redirect-rules/vercel/vercel.json"), "utf8"));
   assert.equal(vercelRules.redirects.length, redirects.redirects.length);
   assert.equal(vercelRules.redirects[0].source, "/(guides/stop-a-leaking-tap$)");
-  context.diagnostic(`Verified wp-migrate-core@${metadata.version}: installed executable, ESM exports, types, bundled demo, and handoff version.`);
+  context.diagnostic(`Verified wp-migrate-core@${metadata.version}: installed executable, ESM exports, types, content verification, bundled demo, and handoff version.`);
 });

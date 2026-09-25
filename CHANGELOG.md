@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-25
+
+Once you've built your new site, `verify` helps you check that the WordPress content made it across. Point it at your build folder or a saved RouteLint report; everything is read locally.
+
+- Run `wp-migrate-core verify export.xml --html-dir dist`, or use `--routelint-report report.json` for a site you've already crawled. Both Astro HTML output formats are supported, and crawl reports can use a staging domain.
+- Find missing pages, nearly empty pages, and text that has shrunk or changed substantially. Use `--fail-on blocker` to stop on missing content, or `--fail-on warning` to catch changed text too. The results are saved to `migration-verification.json` without copying page text into the report.
+- Check Elementor text stored in widget settings as well as regular post content. Short records are left for manual review, but a missing page still gets flagged. Failed crawls and redirects to another page cannot pass the check.
+- Catch conflicting build files, duplicate routes and empty exports before they produce a misleading result. The README covers the comparison's limits: passing this check still leaves layout, images and behavior to review.
+- Requires **Node.js 22.12 or later**. RouteLint is now a runtime dependency and is installed with the package. The migration commands still make no network requests.
+
 ## [0.4.0] - 2026-09-23
 
 This release closes the URL loop. It compares the URLs the live site already serves with the routes this plan generates, and it writes the redirect rules the plan calls for in the formats common hosts expect.
@@ -77,7 +87,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/lame13/wp-migrate-core/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/lame13/wp-migrate-core/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/lame13/wp-migrate-core/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lame13/wp-migrate-core/compare/v0.1.3...v0.2.0

@@ -430,3 +430,55 @@ export interface InspectOptions {
    */
   readonly liveUrlSource?: LiveUrlSource;
 }
+
+/**
+ * How one planned route compares with the page someone built or crawled.
+ * `verified` means the page carries the record's text within tolerance,
+ * `diverged` means noticeably less or substantially different text,
+ * `missing-content` means almost none of it, `route-missing` means no page
+ * was found or successfully fetched at the route, and
+ * `skipped` means the record carried too little text, or the observed source
+ * carried no evidence, for a judgement to be worth making.
+ */
+export type VerificationStatus =
+  | "verified"
+  | "diverged"
+  | "missing-content"
+  | "route-missing"
+  | "skipped";
+
+export interface VerifiedRoute {
+  readonly id: string;
+  readonly sourceId: string;
+  readonly route: string;
+  readonly status: VerificationStatus;
+  /** Words in the text the export carries for this record. */
+  readonly sourceWords: number;
+  /** Words in the observed page, when a page was found. */
+  readonly observedWords?: number;
+  /** Hamming distance between the two SimHashes, when both were available. */
+  readonly simhashDistance?: number;
+  readonly reason: string;
+  readonly requiredAction?: string;
+}
+
+export interface VerificationSummary {
+  readonly routes: number;
+  readonly verified: number;
+  readonly diverged: number;
+  readonly missingContent: number;
+  readonly routeMissing: number;
+  readonly skipped: number;
+  /** Observed pages that carry no `<title>`. */
+  readonly withoutTitle: number;
+  /** Observed pages that carry no `<h1>`. */
+  readonly withoutHeading: number;
+}
+
+export interface SiteVerification {
+  readonly observed: "html-directory" | "routelint-report";
+  /** The local directory or report file the comparison read. */
+  readonly source: string;
+  readonly routes: readonly VerifiedRoute[];
+  readonly summary: VerificationSummary;
+}

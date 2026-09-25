@@ -9,6 +9,7 @@ import { generateAstroProject } from "./generate.js";
 import { coverageEntryRecords, mergeLiveUrlSources, parseLiveUrlSource } from "./live-urls.js";
 import { redirectRuleFiles } from "./redirect-rules.js";
 import { writeReport } from "./report.js";
+import { verifySite } from "./verify.js";
 import { packageVersion } from "./version.js";
 import type {
   ContentRecord,
@@ -17,7 +18,10 @@ import type {
   MigrationNode,
   MigrationProject,
   MigrationSummary,
-  OutputTarget
+  OutputTarget,
+  SiteVerification,
+  VerificationStatus,
+  VerificationSummary
 } from "./types.js";
 
 type FailureThreshold = "none" | "warning" | "blocker";
@@ -32,6 +36,8 @@ interface CliOptions {
   readonly includeDrafts: boolean;
   readonly keepSourceLinks: boolean;
   readonly liveUrlPaths: readonly string[];
+  readonly htmlDirectory?: string;
+  readonly routelintReport?: string;
   readonly json: boolean;
   readonly failOn: FailureThreshold;
 }
@@ -43,6 +49,8 @@ Usage:
   wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro]
   wp-migrate-core convert <export.xml> --out <new-site> [--target astro]
   wp-migrate-core report <export.xml> [--out migration-report.html]
+  wp-migrate-core verify <export.xml> --html-dir <built-site> [--out migration-verification.json]
+  wp-migrate-core verify <export.xml> --routelint-report <report.json>
   wp-migrate-core demo [--out wp-migrate-core-demo]
 
 Options:
@@ -52,6 +60,10 @@ Options:
   --keep-source-links   keep exported link targets instead of rewriting them
   --live-urls <file>     compare a downloaded sitemap or URL list with the plan;
                         repeat the option to check several files at once
+  --html-dir <dir>      verify a local build by reading its HTML files
+  --routelint-report <file>
+                        verify a site that RouteLint already crawled, using its
+                        saved JSON report instead of a local build
   --json                print one JSON document instead of the summary
   --fail-on <severity>  fail on warning or blocker; none disables the gate (default)
 
@@ -65,13 +77,16 @@ This is a deliberately incomplete demonstration. It does not modify WordPress.
 --live-urls reads a local file. Save the sitemap yourself; this tool makes no
 network requests.
 
+--html-dir and --routelint-report read local files only. Build or crawl the
+site first, then point the check at the result.
+
 --fail-on never changes what is written; it only sets the exit status so a
 caller can gate on the repair queue.`;
 }
 
 function parseArguments(argv: readonly string[]): CliOptions {
   const command = argv[0] ?? "help";
-  if (!["inspect", "convert", "report", "demo", "help", "--help", "-h", "--version", "-v"].includes(command)) {
+  if (!["inspect", "convert", "report", "verify", "demo", "help", "--help", "-h", "--version", "-v"].includes(command)) {
     throw new Error(`Unknown command: ${command}.\n\n${usage()}`);
   }
 
@@ -83,6 +98,8 @@ function parseArguments(argv: readonly string[]): CliOptions {
   let includeDrafts = false;
   let keepSourceLinks = false;
   const liveUrlPaths: string[] = [];
+  let htmlDirectory: string | undefined;
+  let routelintReport: string | undefined;
   let json = false;
   let failOn: FailureThreshold = "none";
 
@@ -104,6 +121,12 @@ function parseArguments(argv: readonly string[]): CliOptions {
         );
       }
       liveUrlPaths.push(candidate);
+      index += 1;
+    } else if (value === "--html-dir") {
+      htmlDirectory = optionValue(value, argv[index + 1]);
+      index += 1;
+    } else if (value === "--routelint-report") {
+      routelintReport = optionValue(value, argv[index + 1]);
       index += 1;
     } else if (value === "--json") {
       json = true;
@@ -131,6 +154,15 @@ function parseArguments(argv: readonly string[]): CliOptions {
     }
   }
 
+  if (!help && !version) {
+    if (command !== "verify" && (htmlDirectory !== undefined || routelintReport !== undefined)) {
+      throw new Error("--html-dir and --routelint-report are only supported by verify.");
+    }
+    if (command === "verify" && (htmlDirectory !== undefined) === (routelintReport !== undefined)) {
+      throw new Error("Verification requires one observed source: pass --html-dir or --routelint-report.");
+    }
+  }
+
   return {
     command,
     help,
@@ -141,6 +173,8 @@ function parseArguments(argv: readonly string[]): CliOptions {
     includeDrafts,
     keepSourceLinks,
     liveUrlPaths,
+    ...(htmlDirectory === undefined ? {} : { htmlDirectory }),
+    ...(routelintReport === undefined ? {} : { routelintReport }),
     json,
     failOn
   };
@@ -458,6 +492,114 @@ function finishCommand(project: MigrationProject, options: CliOptions, result: C
   }
 }
 
+interface VerificationRouteRecord {
+  readonly id: string;
+  readonly sourceId: string;
+  readonly route: string;
+  readonly status: VerificationStatus;
+  readonly sourceWords: number;
+  readonly observedWords?: number;
+  readonly simhashDistance?: number;
+  readonly reason: string;
+  readonly requiredAction?: string;
+}
+
+function verificationRouteRecords(verification: SiteVerification): readonly VerificationRouteRecord[] {
+  return verification.routes.map((route) => ({
+    id: route.id,
+    sourceId: route.sourceId,
+    route: route.route,
+    status: route.status,
+    sourceWords: route.sourceWords,
+    ...(route.observedWords === undefined ? {} : { observedWords: route.observedWords }),
+    ...(route.simhashDistance === undefined ? {} : { simhashDistance: route.simhashDistance }),
+    reason: route.reason,
+    ...(route.requiredAction === undefined ? {} : { requiredAction: route.requiredAction })
+  }));
+}
+
+/**
+ * The verification artefact carries routes, counts and fingerprint distances. Neither
+ * side of the comparison is stored as text.
+ */
+function createVerificationDocument(verification: SiteVerification): object {
+  return {
+    schemaVersion: "0.5",
+    generator: { name: "wp-migrate-core", version: packageVersion },
+    observed: { kind: verification.observed, source: verification.source },
+    routes: verificationRouteRecords(verification),
+    summary: verification.summary
+  };
+}
+
+function verificationThresholdTripped(summary: VerificationSummary, threshold: FailureThreshold): boolean {
+  if (threshold === "none") return false;
+  const blockers = summary.missingContent + summary.routeMissing;
+  if (threshold === "blocker") return blockers > 0;
+  return blockers > 0 || summary.diverged > 0;
+}
+
+function verificationMarker(status: VerificationStatus): string {
+  if (status === "missing-content") return "NO CONTENT";
+  if (status === "route-missing") return "NO PAGE";
+  if (status === "diverged") return "DIFFERENT";
+  return status.toUpperCase();
+}
+
+function printVerification(verification: SiteVerification, output: string): void {
+  const { summary } = verification;
+  const observedLabel = verification.observed === "html-directory" ? "built HTML" : "a RouteLint report";
+
+  console.log(`\nVerification against ${observedLabel}`);
+  console.log(`  observed: ${verification.source}`);
+  console.log(
+    `  ${summary.routes} ${pluralize(summary.routes, "route")} checked: ` +
+      `${summary.verified} verified, ${summary.diverged} differ from the export, ` +
+      `${summary.missingContent} with no content, ${summary.routeMissing} with no page, ` +
+      `${summary.skipped} not judged`
+  );
+  console.log(
+    `  pages without a title: ${summary.withoutTitle}; pages without a heading: ${summary.withoutHeading}`
+  );
+
+  const problems = verification.routes.filter(
+    (route) =>
+      route.status === "missing-content" || route.status === "route-missing" || route.status === "diverged"
+  );
+
+  if (problems.length > 0) {
+    console.log("\nVerification queue");
+    for (const route of problems) {
+      console.log(`  [${verificationMarker(route.status)}] ${route.route}: ${route.reason}`);
+    }
+  }
+
+  console.log(`\nVerification: ${output}`);
+}
+
+function finishVerification(verification: SiteVerification, options: CliOptions, output: string): void {
+  const failed = verificationThresholdTripped(verification.summary, options.failOn);
+  const document = createVerificationDocument(verification);
+
+  if (options.json) {
+    console.log(
+      JSON.stringify({ ...document, command: "verify", outputs: { verification: output }, failed }, null, 2)
+    );
+  } else {
+    printVerification(verification, output);
+  }
+
+  if (failed) {
+    const blockers = verification.summary.missingContent + verification.summary.routeMissing;
+    const warnings = options.failOn === "warning" ? verification.summary.diverged : 0;
+    process.exitCode = 1;
+    console.error(
+      `wp-migrate-core: --fail-on ${options.failOn} matched ${blockers} route(s) with missing content or no page` +
+        `${warnings > 0 ? ` and ${warnings} differing page(s)` : ""}. Review the verification queue before publishing.`
+    );
+  }
+}
+
 async function inspect(
   project: MigrationProject,
   outputDirectory: string
@@ -593,6 +735,17 @@ async function run(): Promise<void> {
         ...(ruleFiles.length === 0 ? [] : [`Redirect rules: ${resolve(output, "migration", "redirect-rules")}`])
       ]
     });
+    return;
+  }
+
+  if (options.command === "verify") {
+    const verification = await verifySite(project, {
+      ...(options.htmlDirectory === undefined ? {} : { htmlDirectory: options.htmlDirectory }),
+      ...(options.routelintReport === undefined ? {} : { routelintReportPath: options.routelintReport })
+    });
+    const output = resolve(options.output ?? "migration-verification.json");
+    await writeNewFile(output, `${JSON.stringify(createVerificationDocument(verification), null, 2)}\n`);
+    finishVerification(verification, options, output);
     return;
   }
 

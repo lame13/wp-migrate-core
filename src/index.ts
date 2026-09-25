@@ -5,3 +5,4 @@ export * from "./redirect-rules.js";
 export * from "./adapters.js";
 export * from "./generate.js";
 export * from "./report.js";
+export * from "./verify.js";
