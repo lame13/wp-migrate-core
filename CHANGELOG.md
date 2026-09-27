@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-27
+
+The npm package homepage now points to [wp-migrate-core on NikoCodes](https://nikocodes.com/software/wp-migrate-core/). No changes to migration behavior.
+
 ## [0.6.0] - 2026-09-27
 
 Check how your rebuilt site responds to visitors and crawlers before moving DNS. This release adds saved SSRWire audits to the existing content checks, including a comparison with your WordPress site.
@@ -101,7 +105,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/lame13/wp-migrate-core/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/lame13/wp-migrate-core/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/lame13/wp-migrate-core/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/lame13/wp-migrate-core/compare/v0.3.0...v0.4.0

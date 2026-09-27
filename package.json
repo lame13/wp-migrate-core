@@ -1,6 +1,6 @@
 {
   "name": "wp-migrate-core",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Turn a WordPress WXR export into an Astro handoff, with media, URL and link inventories, and a repair queue for the parts that still need a human.",
   "keywords": [
     "wordpress",
@@ -58,7 +58,7 @@
   "bugs": {
     "url": "https://github.com/lame13/wp-migrate-core/issues"
   },
-  "homepage": "https://indexlane.dev",
+  "homepage": "https://nikocodes.com/software/wp-migrate-core/",
   "publishConfig": {
     "access": "public",
     "tag": "latest"
