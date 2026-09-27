@@ -1,10 +1,12 @@
 # wp-migrate-core
 
-Moving a WordPress site to Astro? Start by finding out what you can carry over and what you need to rebuild.
+Plan a WordPress migration, generate an Astro starting point, and check the result before publishing.
 
-`wp-migrate-core` reads a WordPress XML export (WXR) and gives you a local review report, an inventory of referenced images, a map of old URLs to proposed routes, and a link map of what the generated content will actually point at. Save the sitemap of the live site and it also checks every live URL against those routes, so you can see which URLs the new site would stop serving. It can generate an Astro project with your content, visible reminders where work remains, and redirect rules for Netlify, Vercel, nginx and Apache.
+`wp-migrate-core` reads a WordPress XML export (WXR) and shows you the content, images, URLs and links you need to account for. Give it a saved sitemap to find pages the migration would leave behind. When you're ready, it generates an Astro project with your content, reminders for unfinished work, and redirect rules for Netlify, Vercel, nginx and Apache.
 
-This is an early migration tool. Expect a starting point for rebuilding your site: themes, layouts, forms, and plugin behavior still need your attention. Astro is the only supported output target. After you build the project, `verify` compares each planned route with the page that was built for it and reports the ones that arrived empty.
+After a build, `verify` checks for missing or substantially changed content. Add a saved SSRWire audit to check responses, metadata and indexing too.
+
+This is an early tool, and Astro is the only supported output. You'll still need to rebuild your theme, forms and plugin behavior, bring over your media, and review the generated site.
 
 ## Try it with the demo
 
@@ -15,7 +17,7 @@ npm install --save-dev wp-migrate-core
 npx wp-migrate-core demo --out wp-migrate-core-demo
 ```
 
-Open `wp-migrate-core-demo/migration-plan/report.html` in your browser. The fictional Bright Path Plumbing site includes Gutenberg content, Elementor widgets, images, features that need rebuilding, and a sitemap with URLs the export does not carry. The generated Astro project, its coverage check and its redirect rules are in `wp-migrate-core-demo/astro-site/`.
+Open `wp-migrate-core-demo/migration-plan/report.html` in your browser. The fictional Bright Path Plumbing site includes Gutenberg and Elementor content, missing features, and URLs that need attention. Explore the generated project and its checks in `wp-migrate-core-demo/astro-site/`.
 
 ![Version 0.4.0 migration report for the fictional Bright Path Plumbing site, showing blockers and the source summary.](https://raw.githubusercontent.com/lame13/wp-migrate-core/v0.4.0/docs/screenshots/demo-report.png)
 
@@ -64,10 +66,12 @@ Alongside the generated content in `src/content/pages/` and `src/content/posts/`
 | `migration/redirects.json` | Review old page/post permalinks, proposed routes, path redirect rules, and URLs needing a decision. |
 | `migration/links.json` | Check recognized content links, their routes, proposed rewrites, and targets this export cannot vouch for. |
 | `migration/coverage.json` | Compare every live URL you supplied with the routes and rules this plan has. |
+| `migration/checks/` | Audit WordPress and your preview with matching SSRWire checks. |
 | `migration/redirect-rules/` | Publish the redirect rules in the format your host expects: Netlify, Vercel, nginx or Apache. |
 | `migration/manifest.json` | Connect WordPress IDs to generated files and routes. |
+| `public/sitemap.xml` | List the generated routes, using the site URL from the export. |
 
-The media inventory and redirect map use `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, the manifest and coverage check use `"0.4"`, and the verification artefact uses `"0.5"`. These describe each file's data format separately from the npm package version.
+The media inventory and redirect map use `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, the manifest and coverage check use `"0.4"`, and the verification artefact uses `"0.6"`. These describe each file's data format separately from the npm package version.
 
 ### Images
 
@@ -141,7 +145,57 @@ Pass `--routelint-report` instead when the site is already crawled: [RouteLint](
 
 Every planned route is classified as `verified`, `diverged` (substantially less or different text), `missing-content`, `route-missing`, or `skipped` (too little source text or no observed content evidence). Missing pages remain blockers even for short records. `--fail-on blocker` gates on missing pages and nearly empty content; `--fail-on warning` also gates on diverged text. The summary separately counts observed pages without a `<title>` and without an `<h1>`.
 
-RouteLint measures normalized text; the comparison uses word counts and 64-bit SimHash distances. Records below 12 words are not compared. A page with no words or less than 10% of the source word count is a blocker; less than 60% or a SimHash distance above 12 bits is a warning. These are heuristics: navigation and boilerplate can affect the result, so review both passing pages and findings. `migration-verification.json` (schema version `0.5`) stores counts and fingerprint distances, never either side's text. Routes and local file paths remain visible. Layout, media and behavior still need separate review.
+RouteLint measures normalized text; the comparison uses word counts and 64-bit SimHash distances. Records below 12 words are not compared. A page with no words or less than 10% of the source word count is a blocker; less than 60% or a SimHash distance above 12 bits is a warning. These are heuristics: navigation and boilerplate can affect the result, so review both passing pages and findings. `migration-verification.json` (schema version `0.6`) stores counts, fingerprint distances, delivery finding codes and indexing decisions, and never the text of either page. Routes and local file paths remain visible. Layout, media and behavior still need separate review.
+
+### Check responses and metadata
+
+A build folder tells you what was generated. To check what your server actually sends, save an [SSRWire](https://www.npmjs.com/package/ssrwire) audit and pass it to `verify` alongside `--html-dir` or `--routelint-report`.
+
+The generated Astro project includes two check files under `migration/checks/`. One targets the WordPress URLs; the other targets your preview at `http://localhost:4321`. They use matching IDs so the reports can compare the same pages across different domains.
+
+Capture the WordPress site **before moving DNS**:
+
+```bash
+cd new-site
+npm install
+npm run check:source
+```
+
+Then build and start your preview:
+
+```bash
+npm run build
+npm run preview
+```
+
+In another terminal, from `new-site`, capture the preview and compare both reports:
+
+```bash
+npm run check:preview
+npx wp-migrate-core verify ../export.xml --html-dir dist \
+  --ssrwire-report ssrwire-preview.json --ssrwire-baseline ssrwire-source.json
+```
+
+The scripts write `ssrwire-source.json` and `ssrwire-preview.json`. They save findings without failing on them, but still fail if the audit cannot complete. `verify --fail-on` controls which findings stop your migration check. You can omit `--ssrwire-baseline` if you only have a preview audit.
+
+Both checks ask for a title, description, canonical URL, H1, main text, Open Graph tags and Twitter Card tags. If WordPress served `og:image` and the new page loses it, the report names that tag and the affected routes. A shared layout problem is grouped into one finding where possible.
+
+| Finding | What needs attention |
+| --- | --- |
+| `INDEXING_BLOCKED` | A meta robots tag or `X-Robots-Tag` header tells search engines not to index the page. |
+| `DELIVERY_FAILED` | At least one request returned an unsuccessful status. |
+| `DELIVERY_INCOMPLETE` | A request timed out, was truncated, or otherwise failed to finish. |
+| `DELIVERY_CONTRACT` | The response failed a configured SSRWire check, such as a required canonical URL. |
+| `DELIVERY_REGRESSION` | The comparison found a new problem, slower delivery or lost social metadata. |
+| `DELIVERY_UNOBSERVED` | Some routes have no audit evidence, or their source audit is unusable. |
+
+The generated checks cover the **first 50 planned routes**. Edit both files to cover more pages or point the preview check at a deployed site. Partial coverage produces a warning; a report that covers none of the plan is a blocker. A missing or unsuccessful source capture produces a warning and cannot establish a regression. Problems observed on the new site still count.
+
+`--fail-on blocker` fails on missing content or pages, blocked indexing, failed responses and delivery findings marked as blockers. `--fail-on warning` also includes changed content, contract warnings, timing regressions, lost social tags and incomplete audit coverage.
+
+The generated site starts with `noindex, nofollow` in its layout and `Disallow: /` in `public/robots.txt`. Remove both before publishing. **`verify` detects page and response indexing directives; it does not check `robots.txt`.**
+
+`verify` reads saved files and never runs a browser or requests a URL. Keep the original SSRWire reports for full timings and metadata values; the migration report includes only the details needed to review the findings.
 
 ## Commands and options
 
@@ -151,12 +205,14 @@ wp-migrate-core convert <export.xml> --out <new-site> [--target astro] [--live-u
 wp-migrate-core report <export.xml> [--out migration-report.html] [--live-urls sitemap.xml]
 wp-migrate-core verify <export.xml> --html-dir dist [--out migration-verification.json]
 wp-migrate-core verify <export.xml> --routelint-report routelint.json
+wp-migrate-core verify <export.xml> --html-dir dist --ssrwire-report ssrwire-preview.json
+wp-migrate-core verify <export.xml> --html-dir dist --ssrwire-report ssrwire-preview.json --ssrwire-baseline ssrwire-source.json
 wp-migrate-core demo [--out wp-migrate-core-demo] [--live-urls sitemap.xml]
 wp-migrate-core --version
 wp-migrate-core inspect --help
 ```
 
-`report` writes just the HTML report. `verify` compares a built site, or a saved RouteLint report, with the export. `demo` runs inspection and conversion using the bundled fixture. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `next` and `nuxt` are planned targets and currently return an error.
+`report` writes just the HTML report. `verify` compares a built site, or a saved RouteLint report, with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `next` and `nuxt` are planned targets and currently return an error.
 
 | Option | What it does |
 | --- | --- |
@@ -165,6 +221,8 @@ wp-migrate-core inspect --help
 | `--live-urls <file>` | Compares a downloaded sitemap, sitemap index, or URL list with the routes and rules in the plan. Repeat it to check several files. It reads local files only and never fetches one. |
 | `--html-dir <dir>` | Compares every planned route with the page built for it in a local directory, such as Astro's `dist`. |
 | `--routelint-report <file>` | Reads a saved RouteLint JSON report instead of a local build, for a site that is already crawled. |
+| `--ssrwire-report <file>` | Adds delivery evidence from a saved SSRWire JSON audit: response status, metadata and crawler delivery per planned route. |
+| `--ssrwire-baseline <file>` | Compares that audit with one taken before the migration. The two reports pair up on their target ids. |
 | `--json` | Prints one JSON result instead of the terminal summary, with scan settings, counts for every inventory, sanitized issues, output paths, and a `failed` flag. Full inventories are in the output files. |
 | `--fail-on none\|warning\|blocker` | Exits unsuccessfully for findings at or above the chosen severity, after writing the output. Defaults to `none`. |
 
@@ -180,19 +238,32 @@ Argument, input, and write errors go to stderr without a JSON result. A successf
 
 The parser supports a limited subset of Gutenberg blocks and Elementor data. It keeps classic HTML for review and flags dynamic blocks, unsupported shortcodes, forms, queries, and unknown widgets. Items with missing, invalid, or duplicate WordPress IDs are skipped and reported.
 
-The tool does not reproduce your theme or responsive layouts, migrate plugin behavior, or replace forms, search, comments, memberships, or ecommerce. `verify` compares a built site with the export, but only when you point it at a local build or a saved report, and only for text: it does not compare layout, styling, media, or behavior, and it never checks a link or a live URL over the network. Coverage only reflects the URLs you supplied: a sitemap that omits a page hides that page, and a sitemap index has to be expanded by hand. It also does not publish the redirect rules it writes. Verify content, routes, redirects, links, media, metadata, accessibility, and behavior before deployment.
+You'll need to rebuild the theme, responsive layouts and features such as forms, search, comments, memberships and ecommerce. Content verification compares text; review layout, images and behavior yourself. URL coverage is limited to the files you supply, so include every relevant sitemap.
+
+SSRWire audits capture one point in time using crawler user-agent strings. They don't prove what a real search engine will receive or how a shared link will look. Repeat the preview audit after changing your layout or host, and check browser behavior, accessibility and social previews manually. Review and publish the generated redirect rules on your host.
 
 ## Your data stays local
 
-The migration commands read the files you provide — the export, for coverage a sitemap or URL list you saved yourself, and for verification a built site directory or a saved RouteLint report — and write to your filesystem. They make no network calls, require no WordPress credentials, and do not modify WordPress or your host configuration. Installing the tool or the generated project's dependencies uses npm as usual.
+The migration commands read your export, saved sitemaps, build output and reports, then write local files. They make no network requests and don't change WordPress or your hosting configuration. Installing dependencies uses npm, and running the generated SSRWire scripts makes requests to the sites listed in their check files.
 
-Treat the export and generated files as potentially confidential. They can contain private content, names, source URLs, HTML, and post metadata. The review plan, report, and inventory URL fields omit credentials and query strings; link fields retain fragments. These files are not anonymized. Generated content retains supported source markup and link query strings, with same-site hrefs rewritten by default. Review outputs before committing, sharing, or deploying them.
+Exports and generated files can contain private content, names, URLs and post metadata. Review them before committing, sharing or deploying them. Plan, report and inventory URLs omit credentials and query strings; link fields retain fragments. Generated content can still contain source markup and link query strings, so these files are not anonymized.
+
+The verification JSON stores content counts, fingerprint distances, finding codes, field names, crawler profiles, metadata presence and numeric timings. It does not copy page text or the metadata values compared by SSRWire. Keep the original audits locally if you need those details.
 
 ## Use it from JavaScript
 
 ```js
 import { readFile } from 'node:fs/promises';
-import { linkRewrites, parseLiveUrlSource, parseWxr, redirectRuleFiles, verifySite } from 'wp-migrate-core';
+import {
+  deliveryCheckFiles,
+  deliveryLaunchFindings,
+  linkRewrites,
+  parseLiveUrlSource,
+  parseWxr,
+  readDeliveryEvidence,
+  redirectRuleFiles,
+  verifySite
+} from 'wp-migrate-core';
 
 const xml = await readFile('export.xml', 'utf8');
 const liveUrlSource = parseLiveUrlSource(await readFile('sitemap.xml'));
@@ -204,10 +275,26 @@ console.log(project.links.summary);
 console.log(project.coverage.summary);
 console.log(linkRewrites(project.links));
 console.log(redirectRuleFiles(project));
-console.log((await verifySite(project, { htmlDirectory: 'new-site/dist' })).summary);
+console.log(deliveryCheckFiles(project).map((file) => file.path));
+
+// The same check the CLI runs: content evidence plus both audits.
+const verification = await verifySite(project, {
+  htmlDirectory: 'new-site/dist',
+  ssrwireReportPath: 'ssrwire-preview.json',
+  ssrwireBaselinePath: 'ssrwire-source.json'
+});
+console.log(verification.summary);
+console.log(verification.launch);
+
+// Or read the delivery evidence on its own.
+const delivery = await readDeliveryEvidence(project, { reportPath: 'ssrwire-preview.json' });
+console.log(delivery.summary);
+console.log(deliveryLaunchFindings(delivery));
 ```
 
 Pass `{ includeDrafts: true }` as the second argument to include non-published content, and `parseLiveUrlSource(contents, { sourcePath: 'sitemap.xml' })` to name the file in an error message. `mergeLiveUrlSources([...])` combines several files, and `coverageEntryRecords(project.coverage)` is the sanitized shape the CLI writes. `generateAstroProject(project, directory, { rewriteLinks: false })` is the library equivalent of `--keep-source-links`. The library model also retains raw source content, link targets, and metadata; handle it with the same care as the export.
+
+`verifySite()` requires either `htmlDirectory` or `routelintReportPath`; the SSRWire report and baseline are optional additions. Its `launch` list contains the publishing findings. Use `readDeliveryEvidence()` and `deliveryLaunchFindings()` when you only need the audit results. For custom integrations, `deliveryCheckTargets()` maps routes to audit targets, and `launchFindings({ indexing, delivery })` combines audit results with indexing evidence from `indexingFromSignals()`.
 
 ## Development
 

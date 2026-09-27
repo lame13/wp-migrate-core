@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-27
+
+Check how your rebuilt site responds to visitors and crawlers before moving DNS. This release adds saved SSRWire audits to the existing content checks, including a comparison with your WordPress site.
+
+- Add `--ssrwire-report <file>` to `verify` alongside `--html-dir` or `--routelint-report` to check response status, metadata and indexing directives. Add `--ssrwire-baseline <file>` to see what changed since the source audit. `verify` reads these files locally.
+- Generated Astro projects include matching source and preview check files, plus `npm run check:source` and `npm run check:preview`. Capture the source report while WordPress is still online. The checks cover the first 50 planned routes; you can extend the lists.
+- Lost Open Graph and Twitter Card tags are reported by name, such as `og:image`, with the affected routes and crawler profiles. Shared problems are grouped to keep the repair list readable.
+- Publishing checks flag blocked indexing, failed or incomplete responses, unmet SSRWire checks and regressions. A report covering no planned routes is a blocker; partial coverage is a warning. Missing or unsuccessful baseline captures are reported without hiding problems in the new site.
+- Conversion writes `public/sitemap.xml` and sets Astro's `site` URL when the export provides one. Sitemap dates omit invalid WordPress values and avoid guessing a timezone.
+- Verification JSON now uses schema `0.6`, with `delivery` and `launch` sections and publishing blocker/warning counts. It preserves metadata presence and numeric timings without copying page text or metadata values, and keeps differing crawler results separate.
+- Adds SSRWire as a dependency and exports helpers for generating checks, reading audits and building publishing findings. Regression tests cover the new checks, saved reports, CLI gates and generated files.
+
+The generated site still starts with `noindex, nofollow` and a `robots.txt` crawl block. Remove both before publishing. `verify` detects the page's indexing directives; review `robots.txt` separately.
+
 ## [0.5.0] - 2026-09-25
 
 Once you've built your new site, `verify` helps you check that the WordPress content made it across. Point it at your build folder or a saved RouteLint report; everything is read locally.
@@ -87,7 +101,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/lame13/wp-migrate-core/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/lame13/wp-migrate-core/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/lame13/wp-migrate-core/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/lame13/wp-migrate-core/compare/v0.2.0...v0.3.0

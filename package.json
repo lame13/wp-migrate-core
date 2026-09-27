@@ -1,6 +1,6 @@
 {
   "name": "wp-migrate-core",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Turn a WordPress WXR export into an Astro handoff, with media, URL and link inventories, and a repair queue for the parts that still need a human.",
   "keywords": [
     "wordpress",
@@ -43,7 +43,8 @@
     "node": ">=22.12.0"
   },
   "dependencies": {
-    "routelint": "^0.4.0"
+    "routelint": "^0.4.0",
+    "ssrwire": "^0.5.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

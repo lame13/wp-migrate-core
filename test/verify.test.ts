@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { contentEvidenceFromText, extractContentEvidence } from "routelint";
 import type { PageSnapshot } from "routelint";
+import { AUDIT_SCHEMA_VERSION } from "ssrwire";
 import { parseWxr } from "../src/core.js";
 import { sourceContentEvidence, verifySite } from "../src/verify.js";
 
@@ -167,6 +168,87 @@ function statuses(verification: Awaited<ReturnType<typeof verifySite>>) {
 
 function runCli(args: readonly string[], cwd: string) {
   return spawnSync(process.execPath, [cliPath, ...args], { cwd, encoding: "utf8" });
+}
+
+interface AuditTargetFixture {
+  readonly id?: string;
+  readonly url: string;
+  readonly title?: string;
+  readonly robots?: readonly {
+    readonly audience: "robots" | "googlebot" | "bingbot";
+    readonly value: string;
+    readonly location: "head" | "body";
+  }[];
+  readonly xRobotsTag?: string;
+  readonly status?: number;
+  readonly findings?: readonly {
+    readonly code: string;
+    readonly severity: "info" | "warning" | "error";
+    readonly message: string;
+    readonly agent?: string;
+  }[];
+}
+
+/** The smallest SSRWire audit report its own parser accepts. */
+function ssrwireReport(targets: readonly AuditTargetFixture[]) {
+  return {
+    schemaVersion: AUDIT_SCHEMA_VERSION,
+    version: "0.5.0",
+    generatedAt: "2026-09-27T00:00:00.000Z",
+    durationMs: 1,
+    results: targets.map((target) => ({
+      target: {
+        ...(target.id === undefined ? {} : { id: target.id }),
+        url: target.url,
+        expectations: {
+          statuses: [200],
+          requireTitle: true,
+          requireDescription: true,
+          requireCanonical: true,
+          requireH1: true,
+          requireMainText: true
+        }
+      },
+      probes: [
+        {
+          requestedUrl: target.url,
+          finalUrl: target.url,
+          agent: {
+            key: "browser",
+            label: "Browser",
+            userAgent: "verification-fixture/1",
+            requiresHeadMetadata: false
+          },
+          status: target.status ?? 200,
+          redirects: [],
+          headers: {
+            values: target.xRobotsTag === undefined ? {} : { "x-robots-tag": target.xRobotsTag },
+            setCookiePresent: false
+          },
+          timings: { headersMs: 1 },
+          bytesRead: 1,
+          signals: {
+            titles: [{ value: target.title ?? "Fixture title", atMs: 1, observedByByte: 1, location: "head" as const }],
+            descriptions: [],
+            canonicals: [],
+            robots: (target.robots ?? []).map((signal) => ({ ...signal, atMs: 1, observedByByte: 1 })),
+            h1s: [],
+            jsonLd: []
+          },
+          completion: "complete" as const
+        }
+      ],
+      findings: (target.findings ?? []).map((finding) => ({ ...finding, url: target.url }))
+    })),
+    summary: {
+      targets: targets.length,
+      probes: targets.length,
+      errors: 0,
+      warnings: 0,
+      info: 0,
+      incomplete: 0
+    }
+  };
 }
 
 test("verify compares built pages with the records the export carries", async (context) => {
@@ -416,7 +498,7 @@ test("the CLI writes a verification artefact and gates on missing content", asyn
 
   const document = JSON.parse(gated.stdout);
   assert.equal(document.command, "verify");
-  assert.equal(document.schemaVersion, "0.5");
+  assert.equal(document.schemaVersion, "0.6");
   assert.equal(document.failed, true);
   assert.equal(document.summary.missingContent, 1);
   assert.equal(document.outputs.verification, output);
@@ -425,6 +507,7 @@ test("the CLI writes a verification artefact and gates on missing content", asyn
   assert.equal(written.observed.kind, "html-directory");
   assert.equal(written.routes.length, 5);
   assert.equal(written.summary.routeMissing, 1);
+  assert.deepEqual(written.launch, { blockers: 0, warnings: 0, findings: [] });
 
   const again = runCli(["verify", exportPath, "--html-dir", site, "--out", output], workspace);
   assert.equal(again.status, 1);
@@ -439,4 +522,287 @@ test("the CLI writes a verification artefact and gates on missing content", asyn
 
   const help = runCli(["--help"], workspace);
   assert.match(help.stdout, /wp-migrate-core verify <export\.xml> --html-dir/);
+});
+
+test("verify reports a build that still asks crawlers not to index it", async (context) => {
+  const site = await mkdtemp(join(tmpdir(), "wp-migrate-core-verify-indexing-"));
+  context.after(() => rm(site, { recursive: true, force: true }));
+
+  const directory = join(site, "carried");
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "index.html"),
+    `<!doctype html><html lang="en"><head><meta name="robots" content="noindex, nofollow"><title>Carried</title></head><body><h1>Carried</h1><p>${carried}</p></body></html>`,
+    "utf8"
+  );
+
+  const verification = await verifySite(fixtureProject(), { htmlDirectory: site });
+  assert.equal(statuses(verification).get("/carried/"), "verified");
+
+  const blocked = verification.launch.filter((finding) => finding.code === "INDEXING_BLOCKED");
+  assert.equal(blocked.length, 1);
+  assert.equal(blocked[0]?.route, "/carried/");
+  assert.equal(blocked[0]?.severity, "blocker");
+  assert.equal(blocked[0]?.source, "html-directory");
+  assert.match(blocked[0]?.id ?? "", /^launch:indexing-blocked:html-directory:\/carried\/$/);
+  assert.equal(verification.summary.launchBlockers, 1);
+  assert.equal(verification.summary.launchWarnings, 0);
+});
+
+test("the indexing gate reads the crawl report too, including response headers", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-verify-indexing-report-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const reportPath = join(workspace, "report.json");
+
+  const report = routeLintReport([
+    {
+      url: "https://example.invalid/carried/",
+      html: `<p>${carried}</p>`,
+      title: "Carried",
+      snapshot: {
+        signals: {
+          titles: [{ value: "Carried", location: "head" }],
+          descriptions: [],
+          canonicals: [],
+          robots: [{ value: "noindex", location: "head", audience: "robots", source: "meta" }],
+          h1s: [{ value: "Carried", location: "body" }],
+          links: [],
+          hreflangs: []
+        }
+      }
+    },
+    {
+      url: "https://example.invalid/shrunk/",
+      html: `<p>${carried}</p>`,
+      title: "Shrunk",
+      snapshot: {
+        signals: {
+          titles: [{ value: "Shrunk", location: "head" }],
+          descriptions: [],
+          canonicals: [],
+          robots: [{ value: "googlebot: none", location: "head", audience: "robots", source: "header" }],
+          h1s: [{ value: "Shrunk", location: "body" }],
+          links: [],
+          hreflangs: []
+        }
+      }
+    }
+  ]);
+
+  await writeFile(reportPath, JSON.stringify(report), "utf8");
+
+  const verification = await verifySite(fixtureProject(), { routelintReportPath: reportPath });
+  const blocked = verification.launch.filter((finding) => finding.code === "INDEXING_BLOCKED");
+  assert.deepEqual(
+    blocked.map((finding) => [finding.route, finding.source]),
+    [
+      ["/carried/", "routelint-report"],
+      ["/shrunk/", "routelint-report"]
+    ]
+  );
+  assert.deepEqual(verification.delivery, undefined);
+});
+
+test("verify folds SSRWire delivery evidence into the publishing gate", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-verify-ssrwire-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const site = join(workspace, "dist");
+  await writeBuiltSite(site);
+
+  const reportPath = join(workspace, "preview.json");
+  const baselinePath = join(workspace, "source.json");
+
+  await writeFile(
+    reportPath,
+    JSON.stringify(
+      ssrwireReport([
+        { id: "carried", url: "https://example.invalid/carried/", status: 404, xRobotsTag: "noindex" },
+        {
+          id: "shrunk",
+          url: "https://example.invalid/shrunk/",
+          findings: [
+            {
+              code: "missing-canonical",
+              severity: "warning",
+              message: "no canonical was observed",
+              agent: "googlebot"
+            }
+          ]
+        }
+      ])
+    ),
+    "utf8"
+  );
+
+  await writeFile(
+    baselinePath,
+    JSON.stringify(
+      ssrwireReport([
+        { id: "carried", url: "https://staging.invalid/carried/" },
+        { id: "shrunk", url: "https://staging.invalid/shrunk/" }
+      ])
+    ),
+    "utf8"
+  );
+
+  const verification = await verifySite(fixtureProject(), {
+    htmlDirectory: site,
+    ssrwireReportPath: reportPath,
+    ssrwireBaselinePath: baselinePath
+  });
+
+  assert.equal(verification.delivery?.source, reportPath);
+  assert.equal(verification.delivery?.summary.covered, 2);
+  assert.equal(verification.delivery?.summary.failed, 1);
+  assert.equal(verification.delivery?.summary.unobserved, 3);
+  assert.equal(verification.delivery?.summary.blockedIndexing, 1);
+
+  const comparison = verification.delivery?.comparison;
+  assert.ok(comparison !== undefined);
+  assert.equal(comparison.baselineSource, baselinePath);
+  assert.equal(comparison.summary.matchedTargets, 2);
+
+  const codes = verification.launch.map((finding) => finding.code).sort();
+  assert.deepEqual(codes, [
+    "DELIVERY_FAILED",
+    "DELIVERY_REGRESSION",
+    "DELIVERY_UNOBSERVED",
+    "INDEXING_BLOCKED"
+  ]);
+  assert.equal(verification.summary.launchBlockers, 2);
+  assert.equal(verification.summary.launchWarnings, 2);
+
+  // The candidate-only contract warning is reported once, as the regression
+  // the comparison found, rather than twice.
+  const regression = verification.launch.find((finding) => finding.code === "DELIVERY_REGRESSION");
+  assert.equal(regression?.sourceCode, "missing-canonical");
+  assert.equal(regression?.severity, "warning");
+  assert.equal(regression?.route, "/shrunk/");
+
+  // Two of the five planned routes are in the report: the other three are
+  // named as uncovered rather than passed over.
+  const unobserved = verification.launch.find((finding) => finding.code === "DELIVERY_UNOBSERVED");
+  assert.equal(unobserved?.severity, "warning");
+  assert.deepEqual(unobserved?.routes, ["/absent/", "/blank/", "/tiny/"]);
+  assert.match(unobserved?.message ?? "", /Affected: \/absent\/, \/blank\/, \/tiny\/\./);
+
+  // The build itself cannot see any of this: the delivery findings come from
+  // the saved audit, and the content comparison is unchanged by them.
+  assert.equal(statuses(verification).get("/carried/"), "verified");
+});
+
+test("delivery flags are verify-only and a baseline needs a report", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-verify-flags-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  await writeFile(join(workspace, "export.xml"), fixtureXml(), "utf8");
+  await writeFile(join(workspace, "audit.json"), JSON.stringify(ssrwireReport([])), "utf8");
+
+  const inspect = runCli(["inspect", "export.xml", "--ssrwire-report", "audit.json"], workspace);
+  assert.equal(inspect.status, 1);
+  assert.match(inspect.stderr, /only supported by verify/);
+
+  const baselineOnly = runCli(
+    ["verify", "export.xml", "--html-dir", ".", "--ssrwire-baseline", "audit.json"],
+    workspace
+  );
+  assert.equal(baselineOnly.status, 1);
+  assert.match(baselineOnly.stderr, /--ssrwire-baseline compares two audits/);
+  assert.match(baselineOnly.stderr, /Pass --ssrwire-report/);
+
+  const bothSources = runCli(
+    ["verify", "export.xml", "--html-dir", ".", "--routelint-report", "audit.json", "--ssrwire-report", "audit.json"],
+    workspace
+  );
+  assert.equal(bothSources.status, 1);
+  assert.match(bothSources.stderr, /one observed source/);
+
+  const empty = runCli(["verify", "export.xml", "--ssrwire-report", "audit.json"], workspace);
+  assert.equal(empty.status, 1);
+  assert.match(empty.stderr, /one observed source/);
+
+  const missing = runCli(
+    ["verify", "export.xml", "--html-dir", ".", "--ssrwire-report", "missing.json"],
+    workspace
+  );
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /Cannot read the --ssrwire-report file/);
+});
+
+test("the CLI gates on a build that blocks indexing and writes the evidence", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-verify-launch-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+
+  const site = join(workspace, "dist");
+  const directory = join(site, "carried");
+  await mkdir(directory, { recursive: true });
+  for (const slug of ["carried", "shrunk", "blank", "tiny"]) {
+    const target = join(site, slug);
+    await mkdir(target, { recursive: true });
+    await writeFile(
+      join(target, "index.html"),
+      `<!doctype html><html lang="en"><head><meta name="robots" content="noindex"><title>${slug}</title></head><body><h1>${slug}</h1><p>${carried}</p></body></html>`,
+      "utf8"
+    );
+  }
+
+  const exportPath = join(workspace, "export.xml");
+  await writeFile(exportPath, fixtureXml(), "utf8");
+  const reportPath = join(workspace, "preview.json");
+  await writeFile(reportPath, JSON.stringify(ssrwireReport([{ id: "carried", url: "https://example.invalid/carried/" }])), "utf8");
+
+  const gated = runCli(
+    ["verify", "export.xml", "--html-dir", site, "--ssrwire-report", reportPath, "--fail-on", "blocker", "--json"],
+    workspace
+  );
+  assert.equal(gated.status, 1, gated.stderr);
+  assert.match(gated.stderr, /publishing blocker/);
+
+  const document = JSON.parse(gated.stdout);
+  assert.equal(document.failed, true);
+  // Four pages block indexing, but that is one thing to fix, so it is one
+  // finding naming the four routes.
+  assert.equal(document.summary.launchBlockers, 1);
+  assert.equal(document.summary.launchWarnings, 1);
+  assert.equal(document.delivery.summary.covered, 1);
+  assert.equal(document.delivery.summary.unobserved, 4);
+  assert.equal(document.launch.findings.length, 2);
+
+  const indexing = document.launch.findings.find(
+    (finding: { code: string }) => finding.code === "INDEXING_BLOCKED"
+  );
+  assert.deepEqual(indexing.routes, ["/blank/", "/carried/", "/shrunk/", "/tiny/"]);
+  assert.match(indexing.message, /^The built pages carry robots directives that block indexing \(meta\)\./);
+  assert.match(indexing.message, /Affected: \/blank\/, \/carried\/, \/shrunk\/ and 1 more\./);
+
+  const unobserved = document.launch.findings.find(
+    (finding: { code: string }) => finding.code === "DELIVERY_UNOBSERVED"
+  );
+  assert.equal(unobserved.severity, "warning");
+  assert.equal(unobserved.routes.length, 4);
+  assert.doesNotMatch(gated.stdout, /Carried|Fixture title/);
+});
+
+test("CLI comparison artifacts retain metadata presence without its text", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-presence-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  await writeBuiltSite(join(workspace, "dist"));
+  await writeFile(join(workspace, "export.xml"), fixtureXml());
+  await writeFile(join(workspace, "source.json"), JSON.stringify(ssrwireReport([
+    { id: "carried", url: "https://example.invalid/carried/", title: "Private source title" }
+  ])));
+  await writeFile(join(workspace, "preview.json"), JSON.stringify(ssrwireReport([
+    { id: "carried", url: "https://preview.invalid/carried/", title: "" }
+  ])));
+  const result = runCli([
+    "verify", "export.xml", "--html-dir", "dist", "--ssrwire-report", "preview.json",
+    "--ssrwire-baseline", "source.json", "--json"
+  ], workspace);
+  assert.equal(result.status, 0, result.stderr);
+  const document = JSON.parse(await readFile(join(workspace, "migration-verification.json"), "utf8"));
+  const change = document.delivery.comparison.routes[0].changes.find(
+    (entry: { code: string; field?: string }) => entry.code === "metadata-value-changed" && entry.field === "title"
+  );
+  assert.equal(change.baselinePresent, true);
+  assert.equal(change.candidatePresent, false);
+  assert.doesNotMatch(JSON.stringify(document), /Private source title/);
 });

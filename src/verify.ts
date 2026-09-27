@@ -9,8 +9,16 @@ import {
 } from "routelint";
 import type { PageContentEvidence } from "routelint";
 import { normalizeRoute, sanitizeSourceUrl } from "./core.js";
+import {
+  indexingFromSignals,
+  launchFindings,
+  readDeliveryEvidence
+} from "./delivery.js";
+import type { ContentIndexing } from "./delivery.js";
 import type {
   ContentRecord,
+  IndexingEvidence,
+  LaunchFinding,
   MigrationNode,
   MigrationProject,
   SiteVerification,
@@ -57,6 +65,19 @@ export interface VerifyOptions {
    * be crawled again.
    */
   readonly routelintReportPath?: string;
+  /**
+   * A saved SSRWire JSON audit of the site that was built or deployed, as
+   * written by `ssrwire check --format json`. It carries the response status,
+   * the metadata a crawler receives, and whether the page may be indexed: none
+   * of which a file on disk can show.
+   */
+  readonly ssrwireReportPath?: string;
+  /**
+   * A saved SSRWire audit of the same routes taken before the migration. The
+   * two reports are compared on their target ids, which is why the check files
+   * this tool generates share them.
+   */
+  readonly ssrwireBaselinePath?: string;
   /** Origin used to resolve routes. Defaults to the report's base URL, or the export's site URL for HTML. */
   readonly siteUrl?: string;
 }
@@ -67,6 +88,8 @@ interface ObservedPage {
   readonly evidence?: PageContentEvidence;
   readonly titles: number;
   readonly headings: number;
+  /** What this page says about indexing, for the publishing gate. */
+  readonly indexing: IndexingEvidence;
   readonly unavailableReason?: string;
 }
 
@@ -77,7 +100,8 @@ interface PlannedRoute {
 
 /**
  * Compare every route the plan generates with the page that was built or
- * crawled for it. Exactly one observed source has to be supplied.
+ * crawled for it. Exactly one content source has to be supplied, and saved
+ * delivery evidence can be added to it.
  */
 export async function verifySite(
   project: MigrationProject,
@@ -89,6 +113,12 @@ export async function verifySite(
   if (hasHtmlDirectory === hasReport) {
     throw new Error(
       "Verification reads one observed source at a time: pass --html-dir for a built site, or --routelint-report for a saved report."
+    );
+  }
+
+  if (options.ssrwireBaselinePath !== undefined && options.ssrwireReportPath === undefined) {
+    throw new Error(
+      "Verification compares a baseline with the site it checks, so --ssrwire-baseline also needs --ssrwire-report."
     );
   }
 
@@ -122,18 +152,40 @@ export async function verifySite(
     if (!byHref.has(page.href)) byHref.set(page.href, page);
   }
 
+  const delivery =
+    options.ssrwireReportPath === undefined
+      ? undefined
+      : await readDeliveryEvidence(project, {
+          reportPath: options.ssrwireReportPath,
+          ...(options.ssrwireBaselinePath === undefined
+            ? {}
+            : { baselinePath: options.ssrwireBaselinePath })
+        });
+
   const routes: VerifiedRoute[] = [];
+  const indexing: ContentIndexing[] = [];
+
   for (const entry of planned) {
     const href = normalizeUrl(entry.route, base);
     const page = href === undefined ? undefined : byHref.get(href);
     routes.push(classifyRoute(entry, page, routes.length + 1));
+    if (page !== undefined) {
+      indexing.push({ route: entry.route, source: kind, evidence: page.indexing });
+    }
   }
+
+  const launch: readonly LaunchFinding[] = launchFindings({
+    indexing,
+    ...(delivery === undefined ? {} : { delivery })
+  });
 
   return {
     observed: kind,
     source,
     routes,
-    summary: summarizeVerification(routes, [...byHref.values()])
+    summary: summarizeVerification(routes, [...byHref.values()], launch),
+    ...(delivery === undefined ? {} : { delivery }),
+    launch
   };
 }
 
@@ -245,7 +297,8 @@ function classifyRoute(
 
 function summarizeVerification(
   routes: readonly VerifiedRoute[],
-  observed: readonly ObservedPage[]
+  observed: readonly ObservedPage[],
+  launch: readonly LaunchFinding[]
 ): VerificationSummary {
   const count = (status: VerificationStatus): number =>
     routes.filter((route) => route.status === status).length;
@@ -258,7 +311,9 @@ function summarizeVerification(
     routeMissing: count("route-missing"),
     skipped: count("skipped"),
     withoutTitle: observed.filter((page) => page.unavailableReason === undefined && page.titles === 0).length,
-    withoutHeading: observed.filter((page) => page.unavailableReason === undefined && page.headings === 0).length
+    withoutHeading: observed.filter((page) => page.unavailableReason === undefined && page.headings === 0).length,
+    launchBlockers: launch.filter((finding) => finding.severity === "blocker").length,
+    launchWarnings: launch.filter((finding) => finding.severity === "warning").length
   };
 }
 
@@ -310,7 +365,8 @@ async function readHtmlDirectory(directory: string, base: string): Promise<reado
       href,
       evidence: extractContentEvidence(html),
       titles: signals.titles.length,
-      headings: signals.h1s.length
+      headings: signals.h1s.length,
+      indexing: indexingFromSignals(signals.robots)
     });
   }
 
@@ -385,13 +441,18 @@ async function readRouteLintPages(
             ? "The crawl ended at a different URL, so its content cannot verify this route."
             : undefined;
     const content = snapshot?.content;
+    const indexing: IndexingEvidence =
+      unavailableReason === undefined && snapshot !== undefined
+        ? indexingFromSignals(snapshot.signals.robots)
+        : { status: "unknown", sources: [] };
 
     pages.push({
       href,
       ...(unavailableReason === undefined ? {} : { unavailableReason }),
       ...(content === undefined ? {} : { evidence: content }),
       titles: snapshot?.signals.titles.length ?? 0,
-      headings: snapshot?.signals.h1s.length ?? 0
+      headings: snapshot?.signals.h1s.length ?? 0,
+      indexing
     });
   }
 

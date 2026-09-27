@@ -2,10 +2,17 @@ import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, parse, resolve } from "node:path";
 
 import { linkRewrites, normalizeRoute, readHtmlAttribute, sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
+import {
+  absoluteOnOrigin,
+  deliveryCheckFiles,
+  deliveryCheckTargetLimit,
+  deliveryCheckTargets,
+  siteOrigin
+} from "./delivery.js";
 import { coverageEntryRecords } from "./live-urls.js";
 import { redirectRuleFiles } from "./redirect-rules.js";
 import type { ContentRecord, MigrationIssue, MigrationNode, MigrationProject } from "./types.js";
-import { packageVersion } from "./version.js";
+import { packageVersion, ssrwireDependency } from "./version.js";
 
 const GENERATOR_NAME = "wp-migrate-core";
 const SAFE_ELEMENTOR_HREF_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
@@ -37,7 +44,7 @@ export async function generateAstroProject(
 
   const files = new Map<string, string>([
     ["package.json", renderPackageJson(project)],
-    ["astro.config.mjs", renderAstroConfig()],
+    ["astro.config.mjs", renderAstroConfig(project)],
     ["tsconfig.json", renderTsConfig()],
     ["src/content.config.ts", renderContentConfig()],
     ["src/pages/[...slug].astro", renderCatchAllPage()],
@@ -53,8 +60,17 @@ export async function generateAstroProject(
     ["README.md", renderReadme(project, options.rewriteLinks !== false)]
   ]);
 
+  const origin = siteOrigin(project);
+  if (origin !== undefined) {
+    files.set("public/sitemap.xml", renderSitemap(records, origin));
+  }
+
   for (const ruleFile of redirectRuleFiles(project)) {
     files.set(ruleFile.path, ruleFile.contents);
+  }
+
+  for (const checkFile of deliveryCheckFiles(project)) {
+    files.set(checkFile.path, checkFile.contents);
   }
 
   for (const generated of records) {
@@ -167,20 +183,39 @@ function renderPackageJson(project: MigrationProject): string {
     scripts: {
       dev: "astro dev",
       build: "astro build",
-      preview: "astro preview"
+      preview: "astro preview",
+      // The reports are the artifact; wp-migrate-core verify is the gate, so
+      // these runs only fail when the audit itself could not complete.
+      "check:source":
+        "ssrwire check --config migration/checks/ssrwire-source.yml --format json --output ssrwire-source.json --fail-on never",
+      "check:preview":
+        "ssrwire check --config migration/checks/ssrwire-preview.yml --format json --output ssrwire-preview.json --fail-on never"
     },
     dependencies: {
       astro: "^5.13.0"
+    },
+    devDependencies: {
+      ssrwire: ssrwireDependency
     }
   });
 }
 
-function renderAstroConfig(): string {
+/**
+ * Astro resolves canonical URLs and sitemap entries against `site`, so the
+ * source origin is carried over as the default. A migration that also moves
+ * domains has to change this line and `public/sitemap.xml` together.
+ */
+function renderAstroConfig(project: MigrationProject): string {
+  const site = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   return `import { defineConfig } from "astro/config";
 
 export default defineConfig({
   output: "static",
-  trailingSlash: "always"
+  trailingSlash: "always"${site === undefined
+    ? ""
+    : `,
+  // Carried over from the WordPress site. Change it if the new site answers elsewhere.
+  site: ${JSON.stringify(site)}`}
 });
 `;
 }
@@ -313,6 +348,40 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 function renderRobotsTxt(): string {
   return "User-agent: *\nDisallow: /\n";
+}
+
+/**
+ * A static sitemap of the routes this plan generates. It is written from the
+ * plan rather than from a build, so it doubles as the target list another
+ * checker can be pointed at while the site is still being rebuilt.
+ */
+function renderSitemap(records: readonly GeneratedRecord[], origin: string): string {
+  const entries = records.map((generated) => {
+    const lastModified = sitemapLastModified(generated.record.modifiedAt);
+    return `  <url>
+    <loc>${escapeHtml(absoluteOnOrigin(origin, generated.route))}</loc>${lastModified === undefined
+      ? ""
+      : `\n    <lastmod>${lastModified}</lastmod>`}
+  </url>`;
+  });
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${entries.join("\n")}
+</urlset>
+`;
+}
+
+/**
+ * modifiedAt may contain either a GMT or a local WordPress timestamp. Keep
+ * the date without inventing a timezone, and omit unset or invalid dates.
+ */
+function sitemapLastModified(value: string | undefined): string | undefined {
+  const date = /^(\d{4}-\d{2}-\d{2})[ T]\d{2}:\d{2}:\d{2}$/.exec(value ?? "")?.[1];
+  if (date === undefined || date.startsWith("0000-")) return undefined;
+  const timestamp = new Date(`${date}T00:00:00Z`);
+  return Number.isFinite(timestamp.getTime()) && timestamp.toISOString().slice(0, 10) === date
+    ? date : undefined;
 }
 
 function renderIssues(issues: readonly MigrationIssue[]): string {
@@ -510,6 +579,7 @@ function renderReadme(project: MigrationProject, rewriteLinks: boolean): string 
   const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   const hasRuleFiles = redirectRuleFiles(project).length > 0;
   const coverage = project.coverage.summary;
+  const checkTargets = Math.min(deliveryCheckTargets(project).length, deliveryCheckTargetLimit);
   return `# ${project.site.title} — Astro migration handoff
 
 Generated from ${siteUrl ?? "a WordPress export"} by ${GENERATOR_NAME} ${packageVersion}.
@@ -536,10 +606,24 @@ npm run dev
 5. Read \`migration/links.json\` and check every link this export could not vouch for, along with the proposed rewrites.
 6. Review warnings and accepted legacy HTML instead of assuming conversion fidelity.
 7. Compare every generated route with the original WordPress route on desktop and mobile.
-8. Replace forms, dynamic widgets, shortcodes and plugin behavior deliberately.
-9. Run \`npm run build\` only after the repair queue is understood.
+8. ${checkTargets === 0
+    ? "This export produced no routes, so no SSRWire check files were written. Fix the export before publishing anything from this handoff."
+    : `Run \`npm run check:source\` while WordPress is still online, before moving DNS. Then run \`npm run build\`, start \`npm run preview\` in one terminal, and run \`npm run check:preview\` in another. Compare the saved reports:
 
-Generated content lives in \`src/content/pages\` and \`src/content/posts\`. Route mappings and source IDs live in \`migration/manifest.json\`; the media inventory is \`migration/media.json\`, the URL and redirect map is \`migration/redirects.json\`, the link inventory is \`migration/links.json\`, and the live URL coverage check is \`migration/coverage.json\`.
+   \`\`\`bash
+   npx wp-migrate-core verify ../export.xml --html-dir dist \\
+     --ssrwire-report ssrwire-preview.json --ssrwire-baseline ssrwire-source.json
+   \`\`\`
+
+   The files in \`migration/checks/\` use matching IDs for the WordPress and preview URLs. They check content metadata and social tags, and cover the first ${checkTargets} planned ${checkTargets === 1 ? "route" : "routes"}. Edit both files to cover more pages. SSRWire makes the requests; \`verify\` reads the saved reports and groups problems for review.`}
+9. Replace forms, dynamic widgets, shortcodes and plugin behavior deliberately.
+10. Run \`npm run build\` only after the repair queue is understood.
+
+Generated content lives in \`src/content/pages\` and \`src/content/posts\`. Route mappings and source IDs live in \`migration/manifest.json\`; the media inventory is \`migration/media.json\`, the URL and redirect map is \`migration/redirects.json\`, the link inventory is \`migration/links.json\`, the live URL coverage check is \`migration/coverage.json\`, and the SSRWire check files are in \`migration/checks/\`.
+
+This handoff asks crawlers to stay away: \`public/robots.txt\` disallows crawling and the layout sets \`noindex, nofollow\`. Remove both before publishing. \`wp-migrate-core verify\` flags the layout's indexing directive; it does not check \`robots.txt\`.${siteUrl === undefined
+    ? " No sitemap was generated because the export carries no site URL; add one with the routes in `src/content/`."
+    : ` \`public/sitemap.xml\` lists every generated route at ${siteUrl}. Change \`site\` in \`astro.config.mjs\` and that sitemap together if the new site answers on another origin.`}
 
 No media was downloaded, copied or rewritten. Every asset in the inventory still has to be imported from the source site, described, and verified against the original page.
 

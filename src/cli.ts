@@ -13,6 +13,9 @@ import { verifySite } from "./verify.js";
 import { packageVersion } from "./version.js";
 import type {
   ContentRecord,
+  DeliveryComparison,
+  DeliveryEvidence,
+  LaunchFinding,
   LiveUrlSource,
   MigrationIssue,
   MigrationNode,
@@ -38,6 +41,8 @@ interface CliOptions {
   readonly liveUrlPaths: readonly string[];
   readonly htmlDirectory?: string;
   readonly routelintReport?: string;
+  readonly ssrwireReport?: string;
+  readonly ssrwireBaseline?: string;
   readonly json: boolean;
   readonly failOn: FailureThreshold;
 }
@@ -51,6 +56,8 @@ Usage:
   wp-migrate-core report <export.xml> [--out migration-report.html]
   wp-migrate-core verify <export.xml> --html-dir <built-site> [--out migration-verification.json]
   wp-migrate-core verify <export.xml> --routelint-report <report.json>
+  wp-migrate-core verify <export.xml> --html-dir <built-site> --ssrwire-report <audit.json>
+  wp-migrate-core verify <export.xml> --html-dir <built-site> --ssrwire-report <audit.json> --ssrwire-baseline <audit.json>
   wp-migrate-core demo [--out wp-migrate-core-demo]
 
 Options:
@@ -64,6 +71,13 @@ Options:
   --routelint-report <file>
                         verify a site that RouteLint already crawled, using its
                         saved JSON report instead of a local build
+  --ssrwire-report <file>
+                        add SSRWire delivery evidence to the check: response
+                        status, metadata and crawler delivery from a saved JSON
+                        audit of the site you built
+  --ssrwire-baseline <file>
+                        compare that audit with one taken before the migration;
+                        the two audits pair up on their target ids
   --json                print one JSON document instead of the summary
   --fail-on <severity>  fail on warning or blocker; none disables the gate (default)
 
@@ -77,11 +91,14 @@ This is a deliberately incomplete demonstration. It does not modify WordPress.
 --live-urls reads a local file. Save the sitemap yourself; this tool makes no
 network requests.
 
---html-dir and --routelint-report read local files only. Build or crawl the
-site first, then point the check at the result.
+--html-dir, --routelint-report, --ssrwire-report and --ssrwire-baseline read
+local files only. Build, crawl or audit the site first, then point the check at
+the result.
 
 --fail-on never changes what is written; it only sets the exit status so a
-caller can gate on the repair queue.`;
+caller can gate on the repair queue. The verification gate covers missing
+content, missing pages, a page that still blocks indexing, a route that answered
+badly, and any delivery or metadata regression against a baseline audit.`;
 }
 
 function parseArguments(argv: readonly string[]): CliOptions {
@@ -100,6 +117,8 @@ function parseArguments(argv: readonly string[]): CliOptions {
   const liveUrlPaths: string[] = [];
   let htmlDirectory: string | undefined;
   let routelintReport: string | undefined;
+  let ssrwireReport: string | undefined;
+  let ssrwireBaseline: string | undefined;
   let json = false;
   let failOn: FailureThreshold = "none";
 
@@ -128,6 +147,12 @@ function parseArguments(argv: readonly string[]): CliOptions {
     } else if (value === "--routelint-report") {
       routelintReport = optionValue(value, argv[index + 1]);
       index += 1;
+    } else if (value === "--ssrwire-report") {
+      ssrwireReport = optionValue(value, argv[index + 1]);
+      index += 1;
+    } else if (value === "--ssrwire-baseline") {
+      ssrwireBaseline = optionValue(value, argv[index + 1]);
+      index += 1;
     } else if (value === "--json") {
       json = true;
     } else if (value === "--out") {
@@ -155,11 +180,22 @@ function parseArguments(argv: readonly string[]): CliOptions {
   }
 
   if (!help && !version) {
-    if (command !== "verify" && (htmlDirectory !== undefined || routelintReport !== undefined)) {
-      throw new Error("--html-dir and --routelint-report are only supported by verify.");
+    const hasDelivery = ssrwireReport !== undefined || ssrwireBaseline !== undefined;
+    if (
+      command !== "verify" &&
+      (htmlDirectory !== undefined || routelintReport !== undefined || hasDelivery)
+    ) {
+      throw new Error(
+        "--html-dir, --routelint-report, --ssrwire-report and --ssrwire-baseline are only supported by verify."
+      );
     }
     if (command === "verify" && (htmlDirectory !== undefined) === (routelintReport !== undefined)) {
       throw new Error("Verification requires one observed source: pass --html-dir or --routelint-report.");
+    }
+    if (ssrwireBaseline !== undefined && ssrwireReport === undefined) {
+      throw new Error(
+        "--ssrwire-baseline compares two audits. Pass --ssrwire-report for the site you just checked."
+      );
     }
   }
 
@@ -175,6 +211,8 @@ function parseArguments(argv: readonly string[]): CliOptions {
     liveUrlPaths,
     ...(htmlDirectory === undefined ? {} : { htmlDirectory }),
     ...(routelintReport === undefined ? {} : { routelintReport }),
+    ...(ssrwireReport === undefined ? {} : { ssrwireReport }),
+    ...(ssrwireBaseline === undefined ? {} : { ssrwireBaseline }),
     json,
     failOn
   };
@@ -519,24 +557,122 @@ function verificationRouteRecords(verification: SiteVerification): readonly Veri
 }
 
 /**
- * The verification artefact carries routes, counts and fingerprint distances. Neither
- * side of the comparison is stored as text.
+ * The verification artefact carries routes, counts, delivery evidence and
+ * fingerprint distances. Neither side of the comparison is stored as text, and
+ * the delivery section keeps tool finding codes rather than page metadata.
  */
 function createVerificationDocument(verification: SiteVerification): object {
   return {
-    schemaVersion: "0.5",
+    schemaVersion: "0.6",
     generator: { name: "wp-migrate-core", version: packageVersion },
     observed: { kind: verification.observed, source: verification.source },
     routes: verificationRouteRecords(verification),
-    summary: verification.summary
+    summary: verification.summary,
+    ...(verification.delivery === undefined
+      ? {}
+      : { delivery: deliveryEvidenceRecord(verification.delivery) }),
+    launch: launchRecord(verification.launch)
+  };
+}
+
+function deliveryEvidenceRecord(evidence: DeliveryEvidence): object {
+  return {
+    observed: evidence.observed,
+    source: evidence.source,
+    version: evidence.version,
+    generatedAt: evidence.generatedAt,
+    summary: evidence.summary,
+    routes: evidence.routes.map((route) => ({
+      id: route.id,
+      sourceId: route.sourceId,
+      route: route.route,
+      ...(route.targetId === undefined ? {} : { targetId: route.targetId }),
+      status: route.status,
+      ...(route.httpStatus === undefined ? {} : { httpStatus: route.httpStatus }),
+      agents: route.agents,
+      indexing: route.indexing,
+      ...(route.indexingSources.length === 0 ? {} : { indexingSources: route.indexingSources }),
+      ...(route.socialMetadata.length === 0 ? {} : { socialMetadata: route.socialMetadata }),
+      findings: route.findings.map((finding) => ({
+        code: finding.code,
+        severity: finding.severity,
+        ...(finding.agent === undefined ? {} : { agent: finding.agent })
+      })),
+      reason: route.reason,
+      ...(route.requiredAction === undefined ? {} : { requiredAction: route.requiredAction })
+    })),
+    ...(evidence.comparison === undefined
+      ? {}
+      : { comparison: deliveryComparisonRecord(evidence.comparison) })
+  };
+}
+
+/**
+ * The comparison keeps change codes, fields, agents, finding severities and
+ * numeric values. The metadata text SSRWire compared never reaches this file.
+ */
+function deliveryComparisonRecord(comparison: DeliveryComparison): object {
+  return {
+    source: comparison.source,
+    baselineSource: comparison.baselineSource,
+    candidate: comparison.candidate,
+    baseline: comparison.baseline,
+    summary: comparison.summary,
+    unmatched: comparison.unmatched,
+    routes: comparison.routes.map((route) => ({
+      id: route.id,
+      route: route.route,
+      status: route.status,
+      baselineComplete: route.baselineComplete,
+      regressions: route.regressions,
+      fixed: route.fixed,
+      changed: route.changed,
+      changes: route.changes.map((change) => ({
+        id: change.id,
+        kind: change.kind,
+        scope: change.scope,
+        code: change.code,
+        ...(change.field === undefined ? {} : { field: change.field }),
+        ...(change.agents.length === 0 ? {} : { agents: change.agents }),
+        ...(change.baselineSeverity === undefined ? {} : { baselineSeverity: change.baselineSeverity }),
+        ...(change.candidateSeverity === undefined ? {} : { candidateSeverity: change.candidateSeverity }),
+        ...(change.baselineValue === undefined ? {} : { baselineValue: change.baselineValue }),
+        ...(change.candidateValue === undefined ? {} : { candidateValue: change.candidateValue }),
+        ...(change.baselinePresent === undefined ? {} : { baselinePresent: change.baselinePresent }),
+        ...(change.candidatePresent === undefined ? {} : { candidatePresent: change.candidatePresent }),
+        message: change.message
+      }))
+    }))
+  };
+}
+
+function launchRecord(findings: readonly LaunchFinding[]): object {
+  return {
+    blockers: findings.filter((finding) => finding.severity === "blocker").length,
+    warnings: findings.filter((finding) => finding.severity === "warning").length,
+    findings: findings.map((finding) => ({
+      id: finding.id,
+      severity: finding.severity,
+      code: finding.code,
+      ...(finding.route === undefined ? {} : { route: finding.route }),
+      ...(finding.routes === undefined ? {} : { routes: finding.routes }),
+      source: finding.source,
+      ...(finding.agent === undefined ? {} : { agent: finding.agent }),
+      ...(finding.field === undefined ? {} : { field: finding.field }),
+      ...(finding.fields === undefined ? {} : { fields: finding.fields }),
+      ...(finding.sourceCode === undefined ? {} : { sourceCode: finding.sourceCode }),
+      title: finding.title,
+      message: finding.message,
+      requiredAction: finding.requiredAction
+    }))
   };
 }
 
 function verificationThresholdTripped(summary: VerificationSummary, threshold: FailureThreshold): boolean {
   if (threshold === "none") return false;
-  const blockers = summary.missingContent + summary.routeMissing;
+  const blockers = summary.missingContent + summary.routeMissing + summary.launchBlockers;
   if (threshold === "blocker") return blockers > 0;
-  return blockers > 0 || summary.diverged > 0;
+  return blockers > 0 || summary.diverged > 0 || summary.launchWarnings > 0;
 }
 
 function verificationMarker(status: VerificationStatus): string {
@@ -562,6 +698,41 @@ function printVerification(verification: SiteVerification, output: string): void
     `  pages without a title: ${summary.withoutTitle}; pages without a heading: ${summary.withoutHeading}`
   );
 
+  const delivery = verification.delivery;
+  if (delivery !== undefined) {
+    console.log(`\nDelivery evidence from ${delivery.source}`);
+    console.log(
+      `  ${delivery.summary.covered} of ${summary.routes} ${pluralize(summary.routes, "route")} observed: ` +
+        `${delivery.summary.delivered} delivered, ${delivery.summary.failed} answered with an error, ` +
+        `${delivery.summary.incomplete} did not complete, ${delivery.summary.unobserved} unobserved`
+    );
+    console.log(
+      `  ${delivery.summary.blockedIndexing} blocking indexing; ` +
+        `${delivery.summary.errors} SSRWire ${pluralize(delivery.summary.errors, "error")}, ` +
+        `${delivery.summary.warnings} ${pluralize(delivery.summary.warnings, "warning")}` +
+        `${delivery.summary.unmatchedTargets === 0
+          ? ""
+          : `; ${delivery.summary.unmatchedTargets} ${pluralize(delivery.summary.unmatchedTargets, "target")} outside this plan`}`
+    );
+
+    const comparison = delivery.comparison;
+    if (comparison !== undefined) {
+      console.log(
+        `  compared with ${comparison.baselineSource}: SSRWire counted ` +
+          `${comparison.summary.regressions} ${pluralize(comparison.summary.regressions, "regression")}, ` +
+          `${comparison.summary.fixed} fixed and ${comparison.summary.changed} changed; ` +
+          "the findings below group them per route"
+      );
+      if (comparison.summary.unusableBaselines > 0) {
+        const count = comparison.summary.unusableBaselines;
+        console.log(
+          `  ${count} ${pluralize(count, "route")} had no usable source audit, ` +
+            `so ${count === 1 ? "its" : "their"} changes are not counted as losses`
+        );
+      }
+    }
+  }
+
   const problems = verification.routes.filter(
     (route) =>
       route.status === "missing-content" || route.status === "route-missing" || route.status === "diverged"
@@ -571,6 +742,17 @@ function printVerification(verification: SiteVerification, output: string): void
     console.log("\nVerification queue");
     for (const route of problems) {
       console.log(`  [${verificationMarker(route.status)}] ${route.route}: ${route.reason}`);
+    }
+  }
+
+  if (verification.launch.length > 0) {
+    console.log("\nPublishing findings");
+    for (const finding of verification.launch) {
+      const marker = finding.severity === "blocker" ? "BLOCKED" : "REVIEW";
+      const routes = finding.routes;
+      const label = finding.route ??
+        (routes === undefined ? "site-wide" : `${routes.length} ${pluralize(routes.length, "route")}`);
+      console.log(`  [${marker}] ${label}: ${finding.title} — ${finding.message}`);
     }
   }
 
@@ -590,12 +772,18 @@ function finishVerification(verification: SiteVerification, options: CliOptions,
   }
 
   if (failed) {
-    const blockers = verification.summary.missingContent + verification.summary.routeMissing;
-    const warnings = options.failOn === "warning" ? verification.summary.diverged : 0;
+    const missing = verification.summary.missingContent + verification.summary.routeMissing;
+    const differing = options.failOn === "warning" ? verification.summary.diverged : 0;
+    const launchBlockers = verification.summary.launchBlockers;
+    const launchWarnings = options.failOn === "warning" ? verification.summary.launchWarnings : 0;
     process.exitCode = 1;
     console.error(
-      `wp-migrate-core: --fail-on ${options.failOn} matched ${blockers} route(s) with missing content or no page` +
-        `${warnings > 0 ? ` and ${warnings} differing page(s)` : ""}. Review the verification queue before publishing.`
+      `wp-migrate-core: --fail-on ${options.failOn} matched ` +
+        `${missing} route(s) with missing content or no page` +
+        `${differing === 0 ? "" : ` and ${differing} differing route(s)`}` +
+        `${launchBlockers === 0 ? "" : ` and ${launchBlockers} publishing blocker(s)`}` +
+        `${launchWarnings === 0 ? "" : ` and ${launchWarnings} delivery warning(s)`}. ` +
+        "Review the verification queue before publishing."
     );
   }
 }
@@ -741,7 +929,9 @@ async function run(): Promise<void> {
   if (options.command === "verify") {
     const verification = await verifySite(project, {
       ...(options.htmlDirectory === undefined ? {} : { htmlDirectory: options.htmlDirectory }),
-      ...(options.routelintReport === undefined ? {} : { routelintReportPath: options.routelintReport })
+      ...(options.routelintReport === undefined ? {} : { routelintReportPath: options.routelintReport }),
+      ...(options.ssrwireReport === undefined ? {} : { ssrwireReportPath: options.ssrwireReport }),
+      ...(options.ssrwireBaseline === undefined ? {} : { ssrwireBaselinePath: options.ssrwireBaseline })
     });
     const output = resolve(options.output ?? "migration-verification.json");
     await writeNewFile(output, `${JSON.stringify(createVerificationDocument(verification), null, 2)}\n`);

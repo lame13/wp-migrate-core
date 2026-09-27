@@ -96,7 +96,7 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   assert.equal(verified.failed, false);
   assert.equal(verified.summary.verified, 1);
   const verificationFile = JSON.parse(await readFile(join(consumer, "migration-verification.json"), "utf8"));
-  assert.equal(verificationFile.schemaVersion, "0.5");
+  assert.equal(verificationFile.schemaVersion, "0.6");
   assert.equal(verificationFile.generator.version, metadata.version);
   assert.deepEqual(verificationFile.summary, verified.summary);
 
@@ -143,5 +143,20 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   const vercelRules = JSON.parse(await readFile(join(output, "astro-site/migration/redirect-rules/vercel/vercel.json"), "utf8"));
   assert.equal(vercelRules.redirects.length, redirects.redirects.length);
   assert.equal(vercelRules.redirects[0].source, "/(guides/stop-a-leaking-tap$)");
+  // The handoff ships the paired SSRWire checks and a sitemap built from the
+  // plan, so the installed package exercises the delivery workflow too.
+  const sourceCheck = await readFile(join(output, "astro-site/migration/checks/ssrwire-source.yml"), "utf8");
+  const previewCheck = await readFile(join(output, "astro-site/migration/checks/ssrwire-preview.yml"), "utf8");
+  const sitemap = await readFile(join(output, "astro-site/public/sitemap.xml"), "utf8");
+  assert.match(sourceCheck, /url: "https:\/\/brightpath\.example\/guides\/stop-a-leaking-tap"/);
+  assert.match(previewCheck, /url: "http:\/\/localhost:4321\/guides\/stop-a-leaking-tap\/"/);
+  assert.equal(
+    [...previewCheck.matchAll(/^  - id: "(.+)"$/gm)].length,
+    plan.records.length,
+    "every planned route is a delivery target"
+  );
+  assert.match(sitemap, /<loc>https:\/\/brightpath\.example\/guides\/stop-a-leaking-tap\/<\/loc>/);
+  const astroConfig = await readFile(join(output, "astro-site/astro.config.mjs"), "utf8");
+  assert.match(astroConfig, /site: "https:\/\/brightpath\.example\/"/);
   context.diagnostic(`Verified wp-migrate-core@${metadata.version}: installed executable, ESM exports, types, content verification, bundled demo, and handoff version.`);
 });

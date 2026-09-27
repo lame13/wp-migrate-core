@@ -473,6 +473,215 @@ export interface VerificationSummary {
   readonly withoutTitle: number;
   /** Observed pages that carry no `<h1>`. */
   readonly withoutHeading: number;
+  /** Findings that gate publishing at blocker severity. */
+  readonly launchBlockers: number;
+  /** Findings that need review before publishing. */
+  readonly launchWarnings: number;
+}
+
+/**
+ * `delivered` means all probes returned complete successful responses,
+ * `failed` means a probe answered with a status outside the successful range,
+ * `incomplete` means a probe did not finish, and `unobserved` means the
+ * report carries no target for this route.
+ */
+export type DeliveryStatus = "delivered" | "failed" | "incomplete" | "unobserved";
+
+/** Whether a delivered page lets a crawler index it. */
+export type IndexingStatus = "indexable" | "blocked" | "unknown";
+
+/** The part of a response that carries robots directives. */
+export type IndexingSource = "meta" | "header";
+
+/** What one response said about indexing, and which part of it said so. */
+export interface IndexingEvidence {
+  readonly status: IndexingStatus;
+  readonly sources: readonly IndexingSource[];
+}
+
+/** One SSRWire finding, reduced to what a migration gate needs. */
+export interface DeliveryFinding {
+  readonly code: string;
+  readonly severity: DeliverySeverity;
+  readonly agent?: string;
+}
+
+export type DeliverySeverity = "info" | "warning" | "error";
+
+/** One planned route and what a saved delivery audit said about it. */
+export interface RouteDelivery {
+  readonly id: string;
+  readonly sourceId: string;
+  readonly route: string;
+  /** The SSRWire target id, when the report carried one. */
+  readonly targetId?: string;
+  readonly status: DeliveryStatus;
+  readonly httpStatus?: number;
+  /** Distinct user-agent profiles the report observed for this route. */
+  readonly agents: number;
+  readonly indexing: IndexingStatus;
+  /** The parts of the response that block indexing, when any do. */
+  readonly indexingSources: readonly IndexingSource[];
+  /** Open Graph and Twitter Card properties the response carried, by name. */
+  readonly socialMetadata: readonly string[];
+  /** Distinct SSRWire findings for this route, ordered by code. */
+  readonly findings: readonly DeliveryFinding[];
+  readonly reason: string;
+  readonly requiredAction?: string;
+}
+
+export interface DeliverySummary {
+  /** True when a delivery report was supplied to the check. */
+  readonly checked: boolean;
+  /** Planned routes the supplied report covers. */
+  readonly covered: number;
+  readonly delivered: number;
+  readonly failed: number;
+  readonly incomplete: number;
+  /** Planned routes the report says nothing about. */
+  readonly unobserved: number;
+  /** Covered routes whose delivered page blocks indexing. */
+  readonly blockedIndexing: number;
+  /** Targets in the report that no planned route accounts for. */
+  readonly unmatchedTargets: number;
+  /** Errors and warnings SSRWire reported across the covered routes. */
+  readonly errors: number;
+  readonly warnings: number;
+}
+
+/**
+ * One difference SSRWire found between the site before the migration and the
+ * site after it. Codes, fields, agents, finding severities and numeric
+ * comparisons are kept; the metadata text itself never is.
+ */
+export interface DeliveryChange {
+  readonly id: string;
+  readonly route: string;
+  readonly kind: "regression" | "fixed" | "changed";
+  readonly scope: string;
+  readonly code: string;
+  readonly field?: string;
+  /** The user-agent profiles that saw this difference, sorted. */
+  readonly agents: readonly string[];
+  /** Finding severity before and after, when the change compares findings. */
+  readonly baselineSeverity?: DeliverySeverity;
+  readonly candidateSeverity?: DeliverySeverity;
+  /** Numeric and boolean comparisons, such as a status code. */
+  readonly baselineValue?: number | boolean;
+  readonly candidateValue?: number | boolean;
+  /**
+   * Whether the compared metadata was present on each side. The values
+   * themselves are never stored, but losing or gaining a tag is a different
+   * problem from changing it, and only the direction says which.
+   */
+  readonly baselinePresent?: boolean;
+  readonly candidatePresent?: boolean;
+  /** Wording this tool derives from the change, never the compared text. */
+  readonly message: string;
+}
+
+export interface RouteComparison {
+  readonly id: string;
+  readonly route: string;
+  readonly status: "matched" | "added" | "removed";
+  /**
+   * False when the baseline is absent or any of its probes failed, such as a
+   * source capture taken while the site was down or against the wrong host.
+   * The changes are kept as evidence, but nothing can be concluded from them.
+   */
+  readonly baselineComplete: boolean;
+  readonly changes: readonly DeliveryChange[];
+  readonly regressions: number;
+  readonly fixed: number;
+  readonly changed: number;
+}
+
+export interface DeliveryComparison {
+  /** The candidate report file the comparison was based on. */
+  readonly source: string;
+  /** The baseline report file it was compared with. */
+  readonly baselineSource: string;
+  readonly candidate: {
+    readonly version: string;
+    readonly generatedAt: string;
+  };
+  readonly baseline: {
+    readonly version: string;
+    readonly generatedAt: string;
+  };
+  /** Comparisons that map onto a planned route. */
+  readonly routes: readonly RouteComparison[];
+  /** Compared targets no planned route accounts for. */
+  readonly unmatched: number;
+  readonly summary: {
+    readonly matchedTargets: number;
+    readonly addedTargets: number;
+    readonly removedTargets: number;
+    readonly unchangedTargets: number;
+    readonly regressions: number;
+    readonly fixed: number;
+    readonly changed: number;
+    /** Routes whose baseline audit did not complete, so nothing can be concluded. */
+    readonly unusableBaselines: number;
+  };
+}
+
+/**
+ * Delivery evidence comes from a saved SSRWire audit, which is the only reason
+ * this comparison can see response status, streaming metadata and
+ * crawler-specific delivery at all: this tool never requests a URL.
+ */
+export interface DeliveryEvidence {
+  readonly observed: "ssrwire-report";
+  /** The local report file this evidence was read from. */
+  readonly source: string;
+  readonly version: string;
+  readonly generatedAt: string;
+  readonly routes: readonly RouteDelivery[];
+  readonly summary: DeliverySummary;
+  readonly comparison?: DeliveryComparison;
+}
+
+/**
+ * A finding that gates publishing rather than content fidelity: the built page
+ * blocks indexing, a route answered badly, or the rebuilt site lost something
+ * the source site delivered.
+ */
+export type LaunchFindingCode =
+  | "INDEXING_BLOCKED"
+  | "DELIVERY_FAILED"
+  | "DELIVERY_INCOMPLETE"
+  | "DELIVERY_CONTRACT"
+  | "DELIVERY_REGRESSION"
+  | "DELIVERY_UNOBSERVED";
+
+/** The local build or saved report a publishing finding was read from. */
+export type LaunchEvidenceSource = "html-directory" | "routelint-report" | "ssrwire-report";
+
+export interface LaunchFinding {
+  readonly id: string;
+  readonly severity: MigrationIssueSeverity;
+  readonly code: LaunchFindingCode;
+  /** The route this finding is about, when it is about exactly one. */
+  readonly route?: string;
+  /**
+   * Every route the finding covers. A problem the whole template causes is one
+   * thing to fix, so it is reported once with the routes it affects rather than
+   * once per page.
+   */
+  readonly routes?: readonly string[];
+  /** The local build or saved report this finding came from. */
+  readonly source: LaunchEvidenceSource;
+  readonly agent?: string;
+  /** The compared field behind this finding, such as a metadata key or a timing metric. */
+  readonly field?: string;
+  /** The compared fields behind this finding, when several were lost together. */
+  readonly fields?: readonly string[];
+  /** The underlying tool finding, such as `missing-canonical`. */
+  readonly sourceCode?: string;
+  readonly title: string;
+  readonly message: string;
+  readonly requiredAction: string;
 }
 
 export interface SiteVerification {
@@ -481,4 +690,8 @@ export interface SiteVerification {
   readonly source: string;
   readonly routes: readonly VerifiedRoute[];
   readonly summary: VerificationSummary;
+  /** Delivery evidence from a saved SSRWire report, when one was supplied. */
+  readonly delivery?: DeliveryEvidence;
+  /** Findings that gate publishing rather than content fidelity. */
+  readonly launch: readonly LaunchFinding[];
 }
