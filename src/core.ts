@@ -18,6 +18,7 @@ import type {
   MediaReferenceKind,
   MediaReferenceStatus,
   MediaSummary,
+  MigrationConfig,
   MigrationIssue,
   MigrationIssueCode,
   MigrationLinks,
@@ -172,6 +173,9 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
   const projectIssues: MigrationIssue[] = [];
   const seenWordPressIds = new Set<number>();
   const pendingRoutes: PendingRoute[] = [];
+  const config = options.config;
+  const includeDrafts = options.includeDrafts === true || config?.includeDrafts === true;
+  const matchedConfigKeys = { routes: new Set<string>(), exclusions: new Set<string>() };
   const channelHeader = xml.slice(0, xml.search(/<item\b/i) === -1 ? xml.length : xml.search(/<item\b/i));
   const items = readWxrItems(xml);
 
@@ -190,7 +194,7 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
 
     const sourceUrl = cleanOptionalField(readTag(itemXml, "link"));
     const status = normalizeStatus(cleanField(readTag(itemXml, "wp:status")));
-    if (!options.includeDrafts && status !== "publish") {
+    if (!includeDrafts && status !== "publish") {
       pendingRoutes.push({
         id: `route:${pendingRoutes.length + 1}`,
         sourceUrl,
@@ -248,16 +252,44 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
       continue;
     }
 
+    const sourceId = `wp:${postType}:${wordpressId}`;
+    const keyForms = configKeyForms(sourceUrl, sourceId);
+    const exclusion = firstConfiguredEntry(config?.exclude, keyForms);
+    if (exclusion !== undefined) {
+      matchedConfigKeys.exclusions.add(exclusion);
+      pendingRoutes.push({
+        id: `route:${pendingRoutes.length + 1}`,
+        sourceId,
+        sourceUrl,
+        status: "excluded",
+        reason: `The migration config excludes this item, which it names as "${configKeyLabel(exclusion)}".`
+      });
+      continue;
+    }
+
     seenWordPressIds.add(wordpressId);
-    const record = parseItem(itemXml, postType, status, wordpressId);
+    const override = configuredRoute(config?.routes, keyForms);
+    const parsedRecord = parseItem(itemXml, postType, status, wordpressId);
+    const record =
+      override === undefined ? parsedRecord : { ...parsedRecord, route: normalizeRoute(override.route) };
+    if (override !== undefined) {
+      matchedConfigKeys.routes.add(override.key);
+    }
+
     records.push(record);
     pendingRoutes.push({
       id: `route:${pendingRoutes.length + 1}`,
       sourceId: record.sourceId,
       sourceUrl,
       record,
+      ...(override === undefined ? {} : { override: override.route }),
       status: "generated",
-      reason: sourceUrl === undefined ? "Generated from the item slug because no permalink was exported." : "Generated from the exported permalink."
+      reason:
+        override === undefined
+          ? sourceUrl === undefined
+            ? "Generated from the item slug because no permalink was exported."
+            : "Generated from the exported permalink."
+          : `The migration config decides this route, which it names as "${configKeyLabel(override.key)}". The exported permalink now redirects to it unless it was a query permalink.`
     });
   }
 
@@ -293,25 +325,175 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
   const media = finalizeMedia(baseAssets, referencesByRecord.flat());
   const coverage = buildLiveUrlCoverage(options.liveUrlSource, routes, annotatedRecords, media.assets, siteUrl);
   const recordIssues = annotatedRecords.flatMap((record) => record.issues);
-  const issues = [...projectIssues, ...coverage.issues, ...recordIssues];
+  const configIssues = createConfigIssues(config, matchedConfigKeys);
+  const waivedCodes = new Set<string>(config?.ignoreIssues ?? []);
+  // A waived finding stays in the plan: a reviewer can see what the config
+  // accepted, while the summary and the `--fail-on` gate leave it out.
+  const waive = (issue: MigrationIssue): MigrationIssue =>
+    waivedCodes.has(issue.code) ? { ...issue, ignored: true } : issue;
+  const finalRecords = annotatedRecords.map((record) => ({
+    ...record,
+    issues: record.issues.map(waive)
+  }));
+  const issues = [...projectIssues, ...coverage.issues, ...recordIssues, ...configIssues].map(waive);
+  const ignoredIssues = issues.filter((issue) => issue.ignored === true).length;
+  const siteTargetUrl = config?.site?.url ?? siteUrl;
 
   return {
     site: {
-      title: source.title ?? "WordPress migration",
-      ...(siteUrl === undefined ? {} : { url: siteUrl })
+      title: config?.site?.title ?? source.title ?? "WordPress migration",
+      ...(siteTargetUrl === undefined ? {} : { url: siteTargetUrl })
     },
     source,
-    records: annotatedRecords,
+    records: finalRecords,
     issues,
     media,
     routes,
     links,
     coverage: coverage.coverage,
-    summary: summarize(annotatedRecords, issues, media.summary, routes.summary, links.summary)
+    ...(config === undefined
+      ? {}
+      : {
+          config: {
+            decisions: {
+              routes: matchedConfigKeys.routes.size,
+              exclusions: matchedConfigKeys.exclusions.size,
+              ignoredIssues,
+              ignoredIssueCodes: [...waivedCodes] as MigrationIssueCode[]
+            }
+          }
+        }),
+    summary: summarize(finalRecords, issues, media.summary, routes.summary, links.summary)
   };
 }
 
 export const inspectWxr = parseWxr;
+
+/**
+ * The names a migration config can use for one exported item: its content id,
+ * the permalink as exported, and the path or query the permalink carries.
+ *
+ * A query permalink offers its query and its path-plus-query, never its bare
+ * path: `?p=82` and the site root share a pathname, and letting the bare path
+ * stand in for a query permalink would silently move the home page.
+ */
+function configKeyForms(sourceUrl: string | undefined, sourceId: string): readonly string[] {
+  const forms = new Set<string>([sourceId]);
+  const trimmed = sourceUrl?.trim() ?? "";
+  if (trimmed === "") {
+    return [...forms];
+  }
+
+  forms.add(trimmed);
+  const sanitized = sanitizeSourceUrl(trimmed);
+
+  if (trimmed.includes("?")) {
+    const query = trimmed.slice(trimmed.indexOf("?"));
+    forms.add(query);
+    if (sanitized !== undefined) {
+      const path = sourcePath(sanitized);
+      if (path !== undefined) {
+        forms.add(`${path}${query}`);
+      }
+    }
+    return [...forms];
+  }
+
+  if (sanitized !== undefined) {
+    forms.add(sanitized);
+  }
+
+  const path = sourcePath(trimmed);
+  if (path !== undefined) {
+    forms.add(path);
+  }
+
+  return [...forms];
+}
+
+/** Show config keys without copying URL credentials or query strings into artifacts. */
+function configKeyLabel(key: string): string {
+  if (/^wp:(?:page|post):\d+$/.test(key)) return key;
+  if (/^[a-z][a-z0-9+.-]*:|^[/?\\]/i.test(key)) {
+    return sanitizeSourceUrl(key) ?? "query permalink or invalid URL";
+  }
+  return key;
+}
+
+/** The first configured entry that names this item, in config order. */
+function firstConfiguredEntry(
+  configured: readonly string[] | undefined,
+  keyForms: readonly string[]
+): string | undefined {
+  if (configured === undefined || configured.length === 0) {
+    return undefined;
+  }
+
+  return configured.find((key) => keyForms.includes(key));
+}
+
+/** The decided route for this item, when the config names it. */
+function configuredRoute(
+  routes: Readonly<Record<string, string>> | undefined,
+  keyForms: readonly string[]
+): { readonly key: string; readonly route: string } | undefined {
+  if (routes === undefined) {
+    return undefined;
+  }
+
+  for (const [key, route] of Object.entries(routes)) {
+    if (keyForms.includes(key)) {
+      return { key, route };
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * A config entry that matched nothing is a decision the plan never applied:
+ * usually a stale id, a permalink that has since been edited, or a typo. It is
+ * reported rather than dropped, because a config that quietly does nothing is
+ * the failure mode this file exists to prevent.
+ */
+function createConfigIssues(
+  config: MigrationConfig | undefined,
+  matched: {
+    readonly routes: ReadonlySet<string>;
+    readonly exclusions: ReadonlySet<string>;
+  }
+): MigrationIssue[] {
+  if (config === undefined) {
+    return [];
+  }
+
+  const issues: MigrationIssue[] = [];
+  const unmatched = (keys: ReadonlySet<string>, list: string): void => {
+    for (const key of keys) {
+      const message = `The migration config names "${configKeyLabel(key)}" in ${list}, and no exported item matches it.`;
+      issues.push({
+        id: `project:CONFIG_ENTRY_UNMATCHED:${issues.length + 1}`,
+        severity: "warning",
+        code: "CONFIG_ENTRY_UNMATCHED",
+        sourceId: "project",
+        title: "A migration config entry matched nothing",
+        message,
+        requiredAction: "Check the content id, path or permalink, or remove the entry so the config and the export agree."
+      });
+    }
+  };
+
+  unmatched(
+    new Set(Object.keys(config.routes ?? {}).filter((key) => !matched.routes.has(key))),
+    "routes"
+  );
+  unmatched(
+    new Set((config.exclude ?? []).filter((key) => !matched.exclusions.has(key))),
+    "exclude"
+  );
+
+  return issues;
+}
 
 function parseItem(
   itemXml: string,
@@ -558,8 +740,8 @@ function convertElementorElement(
     collector.add(
       "warning",
       "ELEMENTOR_IMAGE_REMOTE_MEDIA",
-      "Elementor image widgets are withheld until their media is added locally.",
-      "Download or import the image into local Astro assets, verify it, and rebuild this widget.",
+      "An Elementor image widget needs a file the generated site can serve.",
+      "Deliver the image from the uploads directory or media host you supply, confirm its alternative text, and rebuild this widget.",
       { nodeId }
     );
     return [node];
@@ -646,8 +828,8 @@ function reportGutenbergCompatibility(node: MutableNode, collector: IssueCollect
     collector.add(
       "warning",
       "GUTENBERG_MEDIA_UNSUPPORTED",
-      `Gutenberg ${node.sourceType === "core/image" ? "image" : "gallery"} media is withheld until local assets are added.`,
-      "Import approved local media, write appropriate alternative text, and rebuild this content deliberately.",
+      `Gutenberg ${node.sourceType === "core/image" ? "image" : "gallery"} media needs files the generated site can serve.`,
+      "Deliver the media from the uploads directory or media host you supply, then confirm every file against the original page.",
       { nodeId: node.id, evidence: node.sourceType }
     );
     return;
@@ -754,6 +936,8 @@ interface PendingRoute {
   readonly record?: ContentRecord | undefined;
   readonly status: RouteStatus;
   readonly reason: string;
+  /** The route a migration config decided, which overrides the permalink. */
+  readonly override?: string | undefined;
 }
 
 interface MediaAssetDraft {
@@ -1211,7 +1395,7 @@ function firstFilled(...values: readonly (string | undefined)[]): string | undef
 }
 
 /** Path of a source media reference, without query or fragment. */
-function mediaPath(value: string | undefined): string | undefined {
+export function mediaPath(value: string | undefined): string | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -1250,7 +1434,7 @@ function mediaKey(value: string | undefined): string | undefined {
   }
 }
 
-function stripMediaVariants(value: string): string {
+export function stripMediaVariants(value: string): string {
   let current = value;
   for (let pass = 0; pass < 3; pass += 1) {
     const next = current
@@ -1352,7 +1536,13 @@ function finalizeMedia(
 }
 
 function finalizeRoutes(pending: readonly PendingRoute[]): MigrationRoutes {
-  const targets = pending.map((entry) => (entry.record === undefined ? undefined : targetRouteFor(entry.record)));
+  const targets = pending.map((entry) =>
+    entry.override !== undefined
+      ? normalizeRoute(entry.override)
+      : entry.record === undefined
+        ? undefined
+        : targetRouteFor(entry.record)
+  );
   const targetCounts = new Map<string, number>();
   for (const target of targets) {
     if (target !== undefined) {
@@ -1367,7 +1557,10 @@ function finalizeRoutes(pending: readonly PendingRoute[]): MigrationRoutes {
     const targetRoute = targets[index];
     const exportedPath = sourcePath(pendingRoute.sourceUrl);
     const collides = targetRoute !== undefined && (targetCounts.get(targetRoute) ?? 0) > 1;
-    const ambiguous = statusIsAmbiguousUrl(pendingRoute.status, pendingRoute.sourceUrl);
+    // A configuration decision answers the permalink question, so a query URL
+    // it decided is no longer waiting on a human.
+    const ambiguous =
+      pendingRoute.override === undefined && statusIsAmbiguousUrl(pendingRoute.status, pendingRoute.sourceUrl);
     const status: RouteStatus = collides ? "duplicate-route" : ambiguous ? "ambiguous-url" : pendingRoute.status;
     const reason = collides
       ? `Another content item also maps to ${targetRoute ?? "this route"}, and the generated site can serve only one page per route.`
@@ -1385,7 +1578,15 @@ function finalizeRoutes(pending: readonly PendingRoute[]): MigrationRoutes {
       reason
     });
 
-    if (status === "generated" && exportedPath !== undefined && targetRoute !== undefined && exportedPath !== targetRoute) {
+    // A path rule cannot match a query string, so a decided query permalink
+    // gets its route without a redirect this tool could publish.
+    if (
+      status === "generated" &&
+      exportedPath !== undefined &&
+      targetRoute !== undefined &&
+      exportedPath !== targetRoute &&
+      !urlHasQuery(pendingRoute.sourceUrl)
+    ) {
       redirects.push({
         id: `redirect:${redirects.length + 1}`,
         ...optionalProperty("sourceId", pendingRoute.sourceId),
@@ -1410,7 +1611,11 @@ function finalizeRoutes(pending: readonly PendingRoute[]): MigrationRoutes {
 }
 
 function statusIsAmbiguousUrl(status: RouteStatus, sourceUrl: string | undefined): boolean {
-  return status === "generated" && sourceUrl !== undefined && /[?]/.test(sourceUrl);
+  return status === "generated" && urlHasQuery(sourceUrl);
+}
+
+function urlHasQuery(sourceUrl: string | undefined): boolean {
+  return sourceUrl !== undefined && sourceUrl.includes("?");
 }
 
 function sameRouteIgnoringTrailingSlash(left: string, right: string): boolean {
@@ -2374,8 +2579,9 @@ function summarize(
     reviewItems: nodes.filter(
       (node) => node.conversion === "manual" || node.conversion === "legacy-html" || node.conversion === "blocked"
     ).length,
-    warnings: issues.filter((issue) => issue.severity === "warning").length,
-    blockers: issues.filter((issue) => issue.severity === "blocker").length,
+    // Waived findings stay in the plan but not in the counts a gate reads.
+    warnings: issues.filter((issue) => issue.severity === "warning" && issue.ignored !== true).length,
+    blockers: issues.filter((issue) => issue.severity === "blocker" && issue.ignored !== true).length,
     media,
     routes,
     links

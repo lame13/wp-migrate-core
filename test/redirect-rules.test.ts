@@ -172,7 +172,7 @@ test("ships the coverage inventory and the rule files with the generated project
   assert.deepEqual(coverage.summary, project.coverage.summary);
 
   const manifest = JSON.parse(await readFile(join(output, "migration", "manifest.json"), "utf8"));
-  assert.equal(manifest.schemaVersion, "0.4");
+  assert.equal(manifest.schemaVersion, "0.7");
   assert.equal(manifest.coverage.file, "migration/coverage.json");
   assert.deepEqual(manifest.coverage.summary, coverage.summary);
 

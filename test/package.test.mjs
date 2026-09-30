@@ -67,7 +67,12 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
       parseLiveUrlSource,
       mergeLiveUrlSources,
       redirectRuleFiles,
-      verifySite
+      verifySite,
+      loadMigrationConfig,
+      parseMigrationConfig,
+      planMediaDelivery,
+      applyMediaDelivery,
+      mediaDeliveryRecord
     } from "wp-migrate-core";
     assert.equal(typeof parseWxr, "function");
     assert.equal(typeof generateAstroProject, "function");
@@ -76,6 +81,11 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
     assert.equal(typeof mergeLiveUrlSources, "function");
     assert.equal(typeof redirectRuleFiles, "function");
     assert.equal(typeof verifySite, "function");
+    assert.equal(typeof loadMigrationConfig, "function");
+    assert.equal(typeof parseMigrationConfig, "function");
+    assert.equal(typeof planMediaDelivery, "function");
+    assert.equal(typeof applyMediaDelivery, "function");
+    assert.equal(typeof mediaDeliveryRecord, "function");
   `], { cwd: consumer, env, encoding: "utf8", timeout: 30_000 });
 
   const help = runNpm(["exec", "--offline", "--", "wp-migrate-core", "--help"], consumer);
@@ -120,13 +130,13 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   const coverage = JSON.parse(await readFile(join(output, "astro-site/migration/coverage.json"), "utf8"));
   // Inventory formats are versioned on their own, so they only move when
   // their shape changes.
-  assert.equal(media.schemaVersion, "0.2");
+  assert.equal(media.schemaVersion, "0.7");
   assert.equal(redirects.schemaVersion, "0.2");
   assert.equal(media.summary.assets, 5);
   assert.equal(redirects.summary.generated, manifest.redirects.summary.generated);
   assert.equal(links.schemaVersion, "0.3");
   assert.equal(coverage.schemaVersion, "0.4");
-  assert.equal(manifest.schemaVersion, "0.4");
+  assert.equal(manifest.schemaVersion, "0.7");
   assert.equal(links.rewrites.length, manifest.links.summary.needsRewrite);
   assert.equal(manifest.media.file, "migration/media.json");
   assert.equal(manifest.redirects.file, "migration/redirects.json");
@@ -138,6 +148,24 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   assert.equal(coverage.summary.checked, true);
   assert.equal(coverage.summary.liveUrls, 17);
   assert.equal(coverage.summary.uncovered, 2);
+  // The demo ships a small uploads directory, so the packaged install
+  // exercises media delivery with real files rather than only planning it.
+  assert.equal(media.delivery.summary.copied, 5);
+  assert.equal(media.delivery.summary.remote, 2);
+  assert.equal(media.delivery.summary.missing, 0);
+  assert.equal(manifest.media.delivery.copied, media.delivery.summary.copied);
+  await readFile(join(output, "astro-site/public/wp-content/uploads/2026/05/hero.jpg"));
+  const services = await readFile(join(output, "astro-site/src/content/pages/services.md"), "utf8");
+  assert.match(services, /<img src="\/wp-content\/uploads\/2026\/05\/repair\.jpg"/);
+  assert.doesNotMatch(services, /src="https:\/\/brightpath\.example\/wp-content/);
+  // The upload URLs the demo sitemap lists are served once the files are
+  // copied, so the coverage check stops calling them an unserved shape.
+  assert.ok(
+    coverage.entries.some(
+      (entry) => entry.shape === "media-file" && entry.status === "routed"
+    ),
+    "a copied upload is served by the generated site"
+  );
   const netlifyRules = await readFile(join(output, "astro-site/migration/redirect-rules/netlify/_redirects"), "utf8");
   assert.match(netlifyRules, /# Handled by Pretty URLs: \/guides\/stop-a-leaking-tap -> \/guides\/stop-a-leaking-tap\//);
   const vercelRules = JSON.parse(await readFile(join(output, "astro-site/migration/redirect-rules/vercel/vercel.json"), "utf8"));

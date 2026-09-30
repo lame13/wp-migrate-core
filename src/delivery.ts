@@ -192,7 +192,9 @@ export function deliveryCheckTargets(project: MigrationProject): readonly Delive
     if (seenRoutes.has(route)) continue;
     seenRoutes.add(route);
 
-    const sourceUrl = sourceUrlFor(record.route, origin, route);
+    const exported = project.routes.entries.find((entry) => entry.sourceId === record.sourceId)?.sourceUrl
+      ?? record.route;
+    const sourceUrl = sourceUrlFor(exported, origin, route);
     const previewUrl = absoluteOnOrigin(previewOrigin, route);
     if (takenUrls.has(sourceUrl) || takenUrls.has(previewUrl)) continue;
     takenUrls.add(sourceUrl);
@@ -225,7 +227,9 @@ export function deliveryRouteIndex(project: MigrationProject): DeliveryRouteInde
 
   for (const record of project.records) {
     const route = normalizeRoute(record.route ?? `/${record.slug}/`);
-    const exported = exportedPath(record.route);
+    const exported = exportedPath(
+      project.routes.entries.find((entry) => entry.sourceId === record.sourceId)?.sourceUrl ?? record.route
+    );
     if (exported === undefined) continue;
     claim(byPath, exported, route);
     claim(byPath, withoutTrailingSlash(exported), route);
@@ -1402,7 +1406,7 @@ export function siteOrigin(project: MigrationProject): string | undefined {
 }
 
 function sourceOriginFor(project: MigrationProject): string {
-  return siteOrigin(project) ?? sourceOriginFallback;
+  return originOf(project.source.url) ?? siteOrigin(project) ?? sourceOriginFallback;
 }
 
 function originOf(value: string | undefined): string | undefined {

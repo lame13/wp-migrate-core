@@ -93,7 +93,7 @@ test("ships media, redirect and link inventories without source credentials", as
   ]);
 
   const inventory = JSON.parse(media);
-  assert.equal(inventory.schemaVersion, "0.2");
+  assert.equal(inventory.schemaVersion, "0.7");
   assert.equal(inventory.summary.assets, 5);
   assert.equal(inventory.summary.notInExport, 1);
   assert.ok(

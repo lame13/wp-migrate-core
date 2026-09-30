@@ -51,6 +51,17 @@ test("inspect publishes a complete new output directory and preserves an existin
   assert.ok((await readdir(workspace)).every((entry) => !entry.startsWith(stagingPrefix)));
 });
 
+test("convert with a media host reports only outputs it wrote", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-media-base-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const result = runCli([
+    "convert", demoFixturePath, "--out", "site", "--media-base", "https://media.example.test/uploads", "--json"
+  ], workspace);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).outputs.mediaCopies, undefined);
+  await assert.rejects(readFile(join(workspace, "site/public/wp-content/uploads/2026/05/hero.jpg")), { code: "ENOENT" });
+});
+
 for (const command of ["inspect", "convert", "report", "demo"]) {
   test(`${command} rejects incomplete options without creating output`, async (context) => {
     const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-options-"));

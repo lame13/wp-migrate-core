@@ -53,30 +53,39 @@ export interface MigrationNode {
 
 export type MigrationIssueSeverity = "warning" | "blocker";
 
-export type MigrationIssueCode =
-  | "WXR_NO_ITEMS"
-  | "WXR_ITEM_MISSING_ID"
-  | "WXR_ITEM_INVALID_ID"
-  | "WXR_ITEM_DUPLICATE_ID"
-  | "GUTENBERG_UNCLOSED_BLOCK"
-  | "GUTENBERG_UNMATCHED_CLOSE"
-  | "GUTENBERG_INVALID_ATTRIBUTES"
-  | "GUTENBERG_DYNAMIC_BLOCK"
-  | "GUTENBERG_MEDIA_UNSUPPORTED"
-  | "GUTENBERG_UNKNOWN_BLOCK"
-  | "SHORTCODE_UNSUPPORTED"
-  | "ELEMENTOR_INVALID_DATA"
-  | "ELEMENTOR_FORM_UNSUPPORTED"
-  | "ELEMENTOR_QUERY_UNSUPPORTED"
-  | "ELEMENTOR_IMAGE_REMOTE_MEDIA"
-  | "ELEMENTOR_BUTTON_UNSAFE_URL"
-  | "ELEMENTOR_WIDGET_UNKNOWN"
-  | "MEDIA_MISSING_ALT_TEXT"
-  | "MEDIA_MISSING_FROM_EXPORT"
-  | "LINK_TARGET_MISSING"
-  | "LINK_TARGET_OUTSIDE_EXPORT"
-  | "LIVE_URL_UNCOVERED"
-  | "LIVE_URL_SOURCE_EMPTY";
+/**
+ * Every finding this tool can report. A migration config can waive a code, so
+ * the list is a value as well as a type: validation and the union stay in step.
+ */
+export const MIGRATION_ISSUE_CODES = [
+  "WXR_NO_ITEMS",
+  "WXR_ITEM_MISSING_ID",
+  "WXR_ITEM_INVALID_ID",
+  "WXR_ITEM_DUPLICATE_ID",
+  "GUTENBERG_UNCLOSED_BLOCK",
+  "GUTENBERG_UNMATCHED_CLOSE",
+  "GUTENBERG_INVALID_ATTRIBUTES",
+  "GUTENBERG_DYNAMIC_BLOCK",
+  "GUTENBERG_MEDIA_UNSUPPORTED",
+  "GUTENBERG_UNKNOWN_BLOCK",
+  "SHORTCODE_UNSUPPORTED",
+  "ELEMENTOR_INVALID_DATA",
+  "ELEMENTOR_FORM_UNSUPPORTED",
+  "ELEMENTOR_QUERY_UNSUPPORTED",
+  "ELEMENTOR_IMAGE_REMOTE_MEDIA",
+  "ELEMENTOR_BUTTON_UNSAFE_URL",
+  "ELEMENTOR_WIDGET_UNKNOWN",
+  "MEDIA_MISSING_ALT_TEXT",
+  "MEDIA_MISSING_FROM_EXPORT",
+  "MEDIA_NOT_LOCAL",
+  "LINK_TARGET_MISSING",
+  "LINK_TARGET_OUTSIDE_EXPORT",
+  "LIVE_URL_UNCOVERED",
+  "LIVE_URL_SOURCE_EMPTY",
+  "CONFIG_ENTRY_UNMATCHED"
+] as const;
+
+export type MigrationIssueCode = (typeof MIGRATION_ISSUE_CODES)[number];
 
 export interface MigrationIssue {
   readonly id: string;
@@ -89,6 +98,12 @@ export interface MigrationIssue {
   readonly message: string;
   readonly evidence?: string;
   readonly requiredAction: string;
+  /**
+   * True when the migration config asked for this code to be ignored. The
+   * finding stays visible so a reviewer can see what was waived, but it does
+   * not count towards the summary or trip `--fail-on`.
+   */
+  readonly ignored?: boolean;
 }
 
 export interface WordPressTerm {
@@ -161,6 +176,12 @@ export interface MediaAsset {
   readonly referenceCount: number;
   /** Source record identifiers that reference this asset. */
   readonly referencedBy: readonly string[];
+  /**
+   * How the generated site serves this asset, once a delivery plan exists.
+   * Absent when the caller planned no media delivery, which leaves the
+   * handoff exactly as 0.6 wrote it.
+   */
+  readonly delivery?: MediaAssetDelivery;
 }
 
 /** One place a content record refers to media, deduplicated per record. */
@@ -189,12 +210,113 @@ export interface MediaSummary {
   readonly notInExport: number;
   /** Attachments no included content record refers to. */
   readonly unusedAssets: number;
+  /** Counts from the delivery plan, when the caller planned one. */
+  readonly delivery?: MediaDeliverySummary;
+}
+
+/**
+ * How one media file is served by the generated site.
+ *
+ * `copied` means a local file was supplied and the copy is written into the
+ * output. `linked` means the file stays on a media host the caller named, and
+ * the generated markup points there. `remote` means the source URL is left
+ * exactly as the export wrote it, which is what happens for media this export
+ * cannot vouch for. `missing` means the export carries the attachment but no
+ * local file and no media host were supplied, so nothing can be served.
+ */
+export type MediaDeliveryStatus = "copied" | "linked" | "remote" | "missing";
+
+/** Delivery state rolled up from the paths that point at one attachment. */
+export interface MediaAssetDelivery {
+  readonly status: MediaDeliveryStatus;
+  /** Path the generated site serves, when it serves the file itself. */
+  readonly outputPath?: string;
+}
+
+/**
+ * One file the plan will deliver, keyed by the path the source used. A resized
+ * variant the uploads directory does not carry can still be delivered by its
+ * original file: `sourcePath` is what the export referenced and `outputPath`
+ * is what the generated site serves in its place.
+ */
+export interface MediaDeliveryEntry {
+  readonly id: string;
+  /** Source path, such as /wp-content/uploads/2026/05/tap-768x512.jpg. */
+  readonly sourcePath: string;
+  /** Attachment the path resolved to, when the export carries one. */
+  readonly assetId?: string;
+  readonly status: MediaDeliveryStatus;
+  /** Site-relative path the generated site serves, when it serves it. */
+  readonly outputPath?: string;
+  /** Absolute URL the generated markup should use, when the file is not local. */
+  readonly url?: string;
+  /** Measured size of the local file, when one was supplied. */
+  readonly byteSize?: number;
+  readonly reason: string;
+}
+
+export interface MediaDeliverySummary {
+  /** True when the caller supplied a place for media to come from. */
+  readonly planned: boolean;
+  /** Distinct source paths the plan looked at. */
+  readonly files: number;
+  readonly copied: number;
+  readonly linked: number;
+  readonly remote: number;
+  readonly missing: number;
+  /** Bytes the copy step writes, measured from the files it found. */
+  readonly bytes: number;
+}
+
+/**
+ * What the generated site will do with each referenced media file. The plan is
+ * built from local files only: it reads an uploads directory, and it never
+ * requests the URLs it rewrites.
+ */
+export interface MediaDeliveryPlan {
+  /** Where the files come from, for a reader of the artifacts. */
+  readonly source: "uploads-directory" | "base-url" | "none";
+  /** The uploads directory root the plan read, when one was supplied. */
+  readonly uploadsDirectory?: string;
+  /** The media host the plan points at, when one was supplied. */
+  readonly baseUrl?: string;
+  readonly entries: readonly MediaDeliveryEntry[];
+  readonly summary: MediaDeliverySummary;
+  /**
+   * Local files to copy, keyed by the site-relative path they are written to.
+   * Kept separate from the entries so an artifact can describe the delivery
+   * without recording where the machine keeps its files.
+   */
+  readonly copies: readonly MediaCopy[];
+}
+
+/** One local file to write into the generated site. */
+export interface MediaCopy {
+  /** Absolute path of the local file that was found. */
+  readonly localPath: string;
+  /** Site-relative path, always under /wp-content/uploads/. */
+  readonly outputPath: string;
+  readonly byteSize: number;
+}
+
+export interface MediaDeliveryOptions {
+  /**
+   * A local copy of the source uploads directory. Files are matched by the
+   * path the export recorded, and nothing is ever fetched.
+   */
+  readonly uploadsDirectory?: string;
+  /** A media host that already serves the uploads, such as a CDN origin. */
+  readonly baseUrl?: string;
+  /** Also deliver attachments no included content record references. */
+  readonly copyUnusedAssets?: boolean;
 }
 
 export interface MigrationMedia {
   readonly assets: readonly MediaAsset[];
   readonly references: readonly MediaReference[];
   readonly summary: MediaSummary;
+  /** The delivery plan, present only when the caller planned one. */
+  readonly delivery?: MediaDeliveryPlan;
 }
 
 export type RouteStatus =
@@ -419,6 +541,62 @@ export interface MigrationProject {
   readonly links: MigrationLinks;
   readonly coverage: LiveUrlCoverage;
   readonly summary: MigrationSummary;
+  /** The decisions a migration config applied, when the run read one. */
+  readonly config?: MigrationConfigRecord;
+}
+
+/** The exit-status gate a command was given. */
+export type FailureThreshold = "none" | "warning" | "blocker";
+
+/**
+ * A migration config lets a caller decide what the export cannot: where an
+ * ambiguous permalink should land, which items to leave out, and which
+ * findings have been reviewed and waived. Every key is optional, and a key the
+ * parser does not know is an error rather than something silently ignored.
+ */
+export interface MigrationConfig {
+  readonly schemaVersion?: string;
+  readonly site?: {
+    readonly title?: string;
+    readonly url?: string;
+  };
+  readonly includeDrafts?: boolean;
+  readonly keepSourceLinks?: boolean;
+  readonly failOn?: FailureThreshold;
+  /**
+   * Decided routes, keyed by a WordPress content id such as `wp:page:12`, an
+   * exported path such as `/old-page/`, a query permalink such as `?p=123`, or
+   * the exported URL itself. The value is the route the item should generate.
+   */
+  readonly routes?: Readonly<Record<string, string>>;
+  /** Items to leave out of the handoff, by content id or exported URL. */
+  readonly exclude?: readonly string[];
+  /** Issue codes a reviewer has already looked at and accepted. */
+  readonly ignoreIssues?: readonly MigrationIssueCode[];
+  /** Where the files for the media inventory come from. */
+  readonly media?: {
+    readonly uploadsDir?: string;
+    readonly baseUrl?: string;
+    readonly copyUnused?: boolean;
+  };
+}
+
+/**
+ * What the config did, so a plan can be traced back to the decisions behind
+ * it. The file's own path stays in the caller's artifacts: the generated
+ * project records the counts, not where this machine keeps its files.
+ */
+export interface MigrationConfigRecord {
+  readonly decisions: {
+    /** Route overrides that matched an item in this export. */
+    readonly routes: number;
+    /** Items the config left out of the handoff. */
+    readonly exclusions: number;
+    /** Findings the config waived, counted after the scan. */
+    readonly ignoredIssues: number;
+    /** The issue codes the config asked to waive, whether or not they occurred. */
+    readonly ignoredIssueCodes: readonly MigrationIssueCode[];
+  };
 }
 
 export interface InspectOptions {
@@ -429,6 +607,11 @@ export interface InspectOptions {
    * touches the filesystem or the network.
    */
   readonly liveUrlSource?: LiveUrlSource;
+  /**
+   * Decisions the export cannot make on its own. Read the file yourself with
+   * `loadMigrationConfig`; the parser never touches the filesystem.
+   */
+  readonly config?: MigrationConfig;
 }
 
 /**

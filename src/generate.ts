@@ -1,7 +1,14 @@
 import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, parse, resolve } from "node:path";
 
-import { linkRewrites, normalizeRoute, readHtmlAttribute, sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
+import {
+  linkRewrites,
+  mediaPath,
+  normalizeRoute,
+  readHtmlAttribute,
+  sanitizeLinkHref,
+  sanitizeSourceUrl
+} from "./core.js";
 import {
   absoluteOnOrigin,
   deliveryCheckFiles,
@@ -10,8 +17,16 @@ import {
   siteOrigin
 } from "./delivery.js";
 import { coverageEntryRecords } from "./live-urls.js";
+import { deliverMedia, mediaDeliveryRecord } from "./media.js";
 import { redirectRuleFiles } from "./redirect-rules.js";
-import type { ContentRecord, MigrationIssue, MigrationNode, MigrationProject } from "./types.js";
+import type {
+  ContentRecord,
+  MediaAsset,
+  MediaDeliveryEntry,
+  MigrationIssue,
+  MigrationNode,
+  MigrationProject
+} from "./types.js";
 import { packageVersion, ssrwireDependency } from "./version.js";
 
 const GENERATOR_NAME = "wp-migrate-core";
@@ -41,6 +56,13 @@ export async function generateAstroProject(
   const outputDirectory = await prepareOutputDirectory(outDir);
   const records = prepareRecords(project);
   const linkRewritesByRecord = createLinkRewriteMap(project, options.rewriteLinks !== false);
+  const media = createMediaRenderer(project);
+
+  if (project.media.delivery !== undefined) {
+    // The plan already measured every file; this only writes the copies into
+    // the site's own `public/` tree, so the source upload paths keep serving.
+    await deliverMedia(project.media.delivery, outputDirectory);
+  }
 
   const files = new Map<string, string>([
     ["package.json", renderPackageJson(project)],
@@ -76,7 +98,7 @@ export async function generateAstroProject(
   for (const generated of records) {
     files.set(
       `src/content/${generated.collection}/${generated.fileName}`,
-      renderContentRecord(generated, linkRewritesByRecord.get(generated.record.sourceId))
+      renderContentRecord(generated, linkRewritesByRecord.get(generated.record.sourceId), media)
     );
   }
 
@@ -171,6 +193,145 @@ function prepareRecords(project: MigrationProject): GeneratedRecord[] {
       sourceUrl: sourceUrlFor(project, record, route)
     };
   });
+}
+
+/**
+ * The delivery plan, indexed for rendering. Two lookups matter: the path the
+ * source wrote, which is what markup carries, and the attachment id, which is
+ * what widget settings carry when they never spelled out a URL.
+ */
+interface MediaRenderer {
+  readonly byPath: ReadonlyMap<string, MediaDeliveryEntry>;
+  readonly byAssetId: ReadonlyMap<string, MediaDeliveryEntry>;
+  readonly assets: ReadonlyMap<string, MediaAsset>;
+}
+
+function createMediaRenderer(project: MigrationProject): MediaRenderer | undefined {
+  const plan = project.media.delivery;
+  if (plan === undefined) {
+    return undefined;
+  }
+
+  const rank = { copied: 0, linked: 1, remote: 2, missing: 3 } as const;
+  const byPath = new Map<string, MediaDeliveryEntry>();
+  const byAssetId = new Map<string, MediaDeliveryEntry>();
+
+  for (const entry of plan.entries) {
+    byPath.set(entry.sourcePath, entry);
+    if (entry.assetId !== undefined) {
+      const existing = byAssetId.get(entry.assetId);
+      if (existing === undefined || rank[entry.status] < rank[existing.status]) {
+        byAssetId.set(entry.assetId, entry);
+      }
+    }
+  }
+
+  return {
+    byPath,
+    byAssetId,
+    assets: new Map(project.media.assets.map((asset) => [asset.id, asset]))
+  };
+}
+
+/** Where the generated markup should point for a source URL, when the plan says. */
+function deliveredMediaUrl(
+  value: string,
+  media: MediaRenderer
+): { readonly url: string; readonly entry: MediaDeliveryEntry } | undefined {
+  const path = mediaPath(value);
+  const entry = path === undefined ? undefined : media.byPath.get(path);
+  if (entry === undefined) {
+    return undefined;
+  }
+  if (entry.status === "copied" && entry.outputPath !== undefined) {
+    return { url: encodedMediaPath(entry.outputPath), entry };
+  }
+  if (entry.status === "linked" && entry.url !== undefined) {
+    return { url: entry.url, entry };
+  }
+
+  // Remote and missing files keep the URL the source wrote: the plan says it
+  // cannot serve them, and inventing a path would be worse than saying so.
+  return undefined;
+}
+
+function encodedMediaPath(path: string): string {
+  return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}
+
+/** The same substitution for `srcset`, which carries one URL per candidate. */
+function deliveredSrcset(value: string, media: MediaRenderer): string | undefined {
+  if (/data:/i.test(value)) {
+    // A data URI can contain a comma, so a candidate split would corrupt it.
+    return undefined;
+  }
+
+  let changed = false;
+  const candidates = value.split(",").map((candidate) => {
+    const trimmed = candidate.trim();
+    const [url, ...descriptors] = trimmed.split(/\s+/);
+    if (url === undefined) {
+      return trimmed;
+    }
+    const target = deliveredMediaUrl(url, media);
+    if (target === undefined) {
+      return trimmed;
+    }
+    changed = true;
+    return [target.url, ...descriptors].join(" ");
+  });
+
+  return changed ? candidates.join(", ") : undefined;
+}
+
+/** What an Elementor image widget points at: a URL, an attachment id, or both. */
+function elementorMediaSource(node: MigrationNode): {
+  readonly url?: string | undefined;
+  readonly assetId?: string | undefined;
+} {
+  const value = node.attributes.image;
+  if (typeof value === "string" && value.trim() !== "") {
+    return { url: value.trim() };
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const settings = value as Record<string, unknown>;
+  const url = typeof settings.url === "string" && settings.url.trim() !== "" ? settings.url.trim() : undefined;
+  const id = typeof settings.id === "number" ? `media:${settings.id}` : undefined;
+  return {
+    ...(url === undefined ? {} : { url }),
+    ...(id === undefined ? {} : { assetId: id })
+  };
+}
+
+/**
+ * The target for one reference, preferring the path the source wrote and
+ * falling back to the attachment when the settings carried only an id.
+ */
+function resolveMediaTarget(
+  media: MediaRenderer,
+  target: { readonly url?: string | undefined; readonly assetId?: string | undefined }
+): { readonly url: string; readonly entry?: MediaDeliveryEntry | undefined } | undefined {
+  if (target.url !== undefined) {
+    const delivered = deliveredMediaUrl(target.url, media);
+    if (delivered !== undefined) {
+      return delivered;
+    }
+  }
+
+  if (target.assetId !== undefined) {
+    const entry = media.byAssetId.get(target.assetId);
+    if (entry?.status === "copied" && entry.outputPath !== undefined) {
+      return { url: encodedMediaPath(entry.outputPath), entry };
+    }
+    if (entry?.status === "linked" && entry.url !== undefined) {
+      return { url: entry.url, entry };
+    }
+  }
+
+  return target.url === undefined ? undefined : { url: target.url };
 }
 
 function renderPackageJson(project: MigrationProject): string {
@@ -393,6 +554,7 @@ function renderIssues(issues: readonly MigrationIssue[]): string {
       sourceId: issue.sourceId,
       ...(issue.route === undefined ? {} : { route: issue.route }),
       ...(issue.nodeId === undefined ? {} : { nodeId: issue.nodeId }),
+      ...(issue.ignored === undefined ? {} : { ignored: issue.ignored }),
       title: issue.title,
       message: issue.message,
       requiredAction: issue.requiredAction
@@ -403,7 +565,7 @@ function renderIssues(issues: readonly MigrationIssue[]): string {
 function renderManifest(project: MigrationProject, records: readonly GeneratedRecord[]): string {
   const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   return renderJson({
-    schemaVersion: "0.4",
+    schemaVersion: "0.7",
     generator: {
       name: GENERATOR_NAME,
       version: packageVersion,
@@ -421,8 +583,10 @@ function renderManifest(project: MigrationProject, records: readonly GeneratedRe
     },
     media: {
       file: "migration/media.json",
-      summary: project.media.summary
+      summary: project.media.summary,
+      ...(project.media.delivery === undefined ? {} : { delivery: project.media.delivery.summary })
     },
+    ...(project.config === undefined ? {} : { config: { applied: true, decisions: project.config.decisions } }),
     redirects: {
       file: "migration/redirects.json",
       summary: project.routes.summary
@@ -454,13 +618,16 @@ function renderManifest(project: MigrationProject, records: readonly GeneratedRe
  */
 function renderMedia(project: MigrationProject): string {
   return renderJson({
-    schemaVersion: "0.2",
+    schemaVersion: "0.7",
     generator: {
       name: GENERATOR_NAME,
       version: packageVersion,
       target: "astro"
     },
     summary: project.media.summary,
+    ...(project.media.delivery === undefined
+      ? {}
+      : { delivery: mediaDeliveryRecord(project.media.delivery) }),
     assets: project.media.assets.map((asset) => ({
       id: asset.id,
       wordpressId: asset.wordpressId,
@@ -474,7 +641,8 @@ function renderMedia(project: MigrationProject): string {
       ...(asset.width === undefined ? {} : { width: asset.width }),
       ...(asset.height === undefined ? {} : { height: asset.height }),
       referenceCount: asset.referenceCount,
-      referencedBy: asset.referencedBy
+      referencedBy: asset.referencedBy,
+      ...(asset.delivery === undefined ? {} : { delivery: asset.delivery })
     })),
     references: project.media.references.map((reference) => ({
       id: reference.id,
@@ -579,6 +747,7 @@ function renderReadme(project: MigrationProject, rewriteLinks: boolean): string 
   const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   const hasRuleFiles = redirectRuleFiles(project).length > 0;
   const coverage = project.coverage.summary;
+  const delivery = project.media.delivery;
   const checkTargets = Math.min(deliveryCheckTargets(project).length, deliveryCheckTargetLimit);
   return `# ${project.site.title} — Astro migration handoff
 
@@ -596,7 +765,9 @@ npm run dev
 ## Handoff sequence
 
 1. Open \`migration/issues.json\` and resolve every blocker.
-2. Work through \`migration/media.json\` and import each referenced asset, then write its alternative text. Nothing was downloaded for you.
+2. Work through \`migration/media.json\`.${delivery === undefined
+    ? " Nothing was copied for you: import each referenced asset from the source site, then write its alternative text."
+    : ` ${delivery.summary.copied} of ${delivery.summary.files} referenced ${delivery.summary.files === 1 ? "file was" : "files were"} copied into \`public/wp-content/uploads/\`, ${delivery.summary.linked} point at the media base URL, ${delivery.summary.remote} are left on the source site, and ${delivery.summary.missing} could not be found locally. Every file the source still serves has to come from somewhere before publishing, and alternative text still needs a human.`}
 3. Publish the redirect rules on whatever hosts the new site.${hasRuleFiles
     ? " Files for Netlify, Vercel, nginx and Apache are in `migration/redirect-rules/`. Netlify slash-only changes rely on Pretty URLs and are recorded as comments. Apache requires mod_rewrite; encoded slashes also require AllowEncodedSlashes NoDecode in the server configuration."
     : " This plan needs no path rule, so no rule files were written."} Then decide what happens to the source URLs in \`migration/redirects.json\` that have no target.
@@ -625,7 +796,9 @@ This handoff asks crawlers to stay away: \`public/robots.txt\` disallows crawlin
     ? " No sitemap was generated because the export carries no site URL; add one with the routes in `src/content/`."
     : ` \`public/sitemap.xml\` lists every generated route at ${siteUrl}. Change \`site\` in \`astro.config.mjs\` and that sitemap together if the new site answers on another origin.`}
 
-No media was downloaded, copied or rewritten. Every asset in the inventory still has to be imported from the source site, described, and verified against the original page.
+${delivery === undefined
+    ? "No media was downloaded, copied or rewritten: this run was not given a place for the files to come from, so every source image is a repair marker. Pass an uploads directory or a media base URL to convert the export again and have the generated pages carry real images."
+    : `Media delivery read local files only: ${delivery.source === "uploads-directory" ? "the uploads directory you supplied" : "the media base URL you named"} decided each path, and nothing was fetched over the network. Resized variants the uploads directory does not carry are served by the original file they were made from. Files marked \`remote\` still point at the source site and files marked \`missing\` are listed as findings; confirm every one of them against the original page.`}
 
 The coverage check compares the paths you supplied with the routes and rules in this plan. It requested nothing over the network, so it cannot tell you whether a live URL still returns a page or where it redirects today.
 
@@ -640,7 +813,8 @@ Astro is the only enabled renderer in this handoff. Next.js and Nuxt appear in t
 
 function renderContentRecord(
   generated: GeneratedRecord,
-  rewrites: ReadonlyMap<string, string> | undefined
+  rewrites: ReadonlyMap<string, string> | undefined,
+  media: MediaRenderer | undefined
 ): string {
   const { record, route } = generated;
   const frontmatter = [
@@ -655,7 +829,7 @@ function renderContentRecord(
     "---"
   ].join("\n");
 
-  const body = ensureTitleH1(rewriteInternalLinks(renderRecordBody(record), rewrites), record.title);
+  const body = ensureTitleH1(rewriteInternalLinks(renderRecordBody(record, media), rewrites), record.title);
   return `${frontmatter}\n\n${body.trim()}\n`;
 }
 
@@ -694,9 +868,9 @@ function replaceHtmlAttribute(tag: string, name: string, value: string): string 
   });
 }
 
-function renderRecordBody(record: ContentRecord): string {
+function renderRecordBody(record: ContentRecord, media: MediaRenderer | undefined): string {
   if (record.rawContent.trim().length > 0) {
-    const content = renderSafeRawHtml(record.rawContent);
+    const content = renderSafeRawHtml(record.rawContent, media);
     if (content === undefined) {
       return renderUnsafeMarkupRepair();
     }
@@ -705,7 +879,10 @@ function renderRecordBody(record: ContentRecord): string {
       : content;
   }
 
-  const renderedNodes = record.nodes.map(renderNode).filter(Boolean).join("\n\n");
+  const renderedNodes = record.nodes
+    .map((node) => renderNode(node, media))
+    .filter(Boolean)
+    .join("\n\n");
   if (renderedNodes.length > 0) {
     return renderedNodes;
   }
@@ -713,22 +890,25 @@ function renderRecordBody(record: ContentRecord): string {
   return renderRepairMarker("No renderable content was exported for this record.");
 }
 
-function renderNode(node: MigrationNode): string {
+function renderNode(node: MigrationNode, media: MediaRenderer | undefined): string {
   if (node.rawHtml?.trim()) {
-    return renderSafeRawHtml(node.rawHtml) ?? renderUnsafeMarkupRepair();
+    return renderSafeRawHtml(node.rawHtml, media) ?? renderUnsafeMarkupRepair();
   }
 
   if (
     node.source === "elementor" &&
-    (node.conversion === "native" || node.conversion === "legacy-html")
+    (node.conversion === "native" || node.conversion === "legacy-html" || node.sourceType === "image")
   ) {
-    const native = renderNativeElementorNode(node);
+    const native = renderNativeElementorNode(node, media);
     if (native !== undefined) {
       return native;
     }
   }
 
-  const children = node.children.map(renderNode).filter(Boolean).join("\n");
+  const children = node.children
+    .map((child) => renderNode(child, media))
+    .filter(Boolean)
+    .join("\n");
 
   if (node.conversion === "manual" || node.conversion === "blocked") {
     const marker = renderRepairMarker(repairMessageForNode(node));
@@ -742,8 +922,14 @@ function renderNode(node: MigrationNode): string {
   return renderRepairMarker(repairMessageForNode(node));
 }
 
-function renderNativeElementorNode(node: MigrationNode): string | undefined {
-  const children = node.children.map(renderNode).filter(Boolean).join("\n");
+function renderNativeElementorNode(
+  node: MigrationNode,
+  media: MediaRenderer | undefined
+): string | undefined {
+  const children = node.children
+    .map((child) => renderNode(child, media))
+    .filter(Boolean)
+    .join("\n");
 
   switch (node.sourceType) {
     case "container":
@@ -759,7 +945,7 @@ function renderNativeElementorNode(node: MigrationNode): string | undefined {
     }
     case "text-editor": {
       const content = getString(node.attributes, "editor");
-      return content === undefined ? undefined : renderSafeRawHtml(content) ?? renderUnsafeMarkupRepair();
+      return content === undefined ? undefined : renderSafeRawHtml(content, media) ?? renderUnsafeMarkupRepair();
     }
     case "button": {
       const text = getString(node.attributes, "text");
@@ -769,8 +955,20 @@ function renderNativeElementorNode(node: MigrationNode): string | undefined {
         ? `<p><a href="${escapeHtmlAttribute(safeHref)}">${escapeHtml(text)}</a></p>`
         : renderRepairMarker("This link needs review before publication.");
     }
-    case "image":
-      return renderRepairMarker("This image needs to be added from a verified local asset before publication.");
+    case "image": {
+      if (media === undefined) {
+        // Without a delivery plan the marker stays: nothing in this run found
+        // a local file, so the handoff must not pretend the image is there.
+        return renderRepairMarker("This image needs to be added from a verified local asset before publication.");
+      }
+      const target = resolveMediaTarget(media, elementorMediaSource(node));
+      return target === undefined || hasUnsafeRawMarkup(`<img src="${escapeHtmlAttribute(target.url)}">`)
+        ? renderRepairMarker("This image needs to be added from a verified local asset before publication.")
+        : `<img src="${escapeHtmlAttribute(target.url)}"${imageAttributes(
+            target.entry,
+            media
+          )} loading="lazy" decoding="async" />`;
+    }
     case "divider":
       return "<hr />";
     case "spacer":
@@ -818,15 +1016,114 @@ function hasH1(value: string): boolean {
   );
 }
 
-function renderSafeRawHtml(value: string): string | undefined {
-  return hasUnsafeRawMarkup(value) ? undefined : withholdSourceMedia(value);
+function renderSafeRawHtml(value: string, media: MediaRenderer | undefined): string | undefined {
+  return hasUnsafeRawMarkup(value) ? undefined : renderSourceMedia(value, media);
 }
 
-function withholdSourceMedia(value: string): string {
-  return value.replace(
-    /<(?:img|source)\b[^>]*>/gi,
-    () => renderRepairMarker("This source media needs to be added as a verified local asset before publication.")
-  );
+/**
+ * Source imagery, resolved through the delivery plan.
+ *
+ * Without a plan, every `img` and `source` becomes a repair marker, which is
+ * what 0.6 wrote: nothing was copied, so nothing may be promised. With a plan,
+ * a tag whose file the plan delivers is rewritten to the path the new site
+ * serves, a tag the plan leaves remote keeps the source URL, and a tag the plan
+ * could not find a file for keeps the source URL too: the finding in
+ * `migration/media.json` is what tells the reviewer, not a blank space in the
+ * middle of the page.
+ */
+function renderSourceMedia(value: string, media: MediaRenderer | undefined): string {
+  if (media === undefined) {
+    return value.replace(
+      /<(?:img|source)\b[^>]*>/gi,
+      () =>
+        renderRepairMarker(
+          "This source media needs to be added as a verified local asset before publication: run convert again with --uploads pointing at your media library, or --media-base at the host that already serves it."
+        )
+    );
+  }
+
+  return value.replace(/<(?:img|source)\b[^>]*>/gi, (tag) => renderMediaTag(tag, media));
+}
+
+function renderMediaTag(tag: string, media: MediaRenderer): string {
+  const source = readHtmlAttribute(tag, "src");
+  const target = source === undefined ? undefined : deliveredMediaUrl(source, media);
+  let rendered = tag;
+
+  if (target !== undefined) {
+    rendered = replaceHtmlAttribute(rendered, "src", target.url);
+  }
+
+  const srcset = readHtmlAttribute(rendered, "srcset");
+  if (srcset !== undefined) {
+    const delivered = deliveredSrcset(srcset, media);
+    if (delivered !== undefined) {
+      rendered = replaceHtmlAttribute(rendered, "srcset", delivered);
+    }
+  }
+
+  const entry = target?.entry ?? (source === undefined ? undefined : media.byPath.get(mediaPath(source) ?? ""));
+  return /^<img\b/i.test(tag) ? augmentImage(rendered, entry, media) : rendered;
+}
+
+/**
+ * Alt text and dimensions the export carries but the source markup left out.
+ * An `alt=""` already in the markup is a decision about a decorative image, so
+ * an existing attribute is never overwritten, and markup the source wrote is
+ * otherwise left exactly as it was.
+ */
+function augmentImage(
+  tag: string,
+  entry: MediaDeliveryEntry | undefined,
+  media: MediaRenderer
+): string {
+  const asset = entry?.assetId === undefined ? undefined : media.assets.get(entry.assetId);
+  if (asset === undefined) {
+    return tag;
+  }
+
+  let described = tag;
+  if (
+    !/\s+alt(?:\s*=|[\s/>])/i.test(described) &&
+    asset.altText !== undefined &&
+    asset.altText.trim() !== ""
+  ) {
+    described = addHtmlAttribute(described, "alt", asset.altText);
+  }
+  if (readHtmlAttribute(described, "width") === undefined && asset.width !== undefined) {
+    described = addHtmlAttribute(described, "width", String(asset.width));
+  }
+  if (readHtmlAttribute(described, "height") === undefined && asset.height !== undefined) {
+    described = addHtmlAttribute(described, "height", String(asset.height));
+  }
+
+  return described;
+}
+
+/** The attributes for an image this generator writes itself, rather than copies. */
+function imageAttributes(entry: MediaDeliveryEntry | undefined, media: MediaRenderer): string {
+  const asset = entry?.assetId === undefined ? undefined : media.assets.get(entry.assetId);
+  const attributes: string[] = [];
+  if (asset?.altText !== undefined && asset.altText.trim() !== "") {
+    attributes.push(` alt="${escapeHtmlAttribute(asset.altText)}"`);
+  }
+  if (asset?.width !== undefined) {
+    attributes.push(` width="${asset.width}"`);
+  }
+  if (asset?.height !== undefined) {
+    attributes.push(` height="${asset.height}"`);
+  }
+  return attributes.join("");
+}
+
+/** Add an attribute the markup is missing, keeping the tag's own ending. */
+function addHtmlAttribute(tag: string, name: string, value: string): string {
+  const attribute = ` ${name}="${escapeHtmlAttribute(value)}"`;
+  const trimmed = tag.trimEnd();
+  if (trimmed.endsWith("/>")) {
+    return `${trimmed.slice(0, -2)}${attribute} />`;
+  }
+  return trimmed.endsWith(">") ? `${trimmed.slice(0, -1)}${attribute}>` : `${trimmed}${attribute}`;
 }
 
 function replaceUnsupportedShortcodes(value: string): string {
@@ -940,13 +1237,15 @@ function ensureTrailingSlash(value: string): string {
 }
 
 function sourceUrlFor(project: MigrationProject, record: ContentRecord, route: string): string {
-  const candidate = record.route ?? route;
+  const candidate = project.routes.entries.find((entry) => entry.sourceId === record.sourceId)?.sourceUrl
+    ?? record.route ?? route;
   if (/^https?:\/\//i.test(candidate)) {
     return candidate;
   }
-  if (project.site.url !== undefined) {
+  const origin = project.source.url ?? project.site.url;
+  if (origin !== undefined) {
     try {
-      return new URL(candidate, ensureTrailingSlash(project.site.url)).toString();
+      return new URL(candidate, ensureTrailingSlash(origin)).toString();
     } catch {
       // Preserve the route below; malformed source URLs belong in the repair report.
     }

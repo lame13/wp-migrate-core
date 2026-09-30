@@ -4,9 +4,12 @@ import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertTargetEnabled, targetAvailability } from "./adapters.js";
+import { defaultMigrationConfigFileName, loadMigrationConfig } from "./config.js";
+import type { LoadedMigrationConfig } from "./config.js";
 import { linkRewrites, parseWxr, sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
 import { generateAstroProject } from "./generate.js";
 import { coverageEntryRecords, mergeLiveUrlSources, parseLiveUrlSource } from "./live-urls.js";
+import { applyMediaDelivery, mediaDeliveryRecord, planMediaDelivery } from "./media.js";
 import { redirectRuleFiles } from "./redirect-rules.js";
 import { writeReport } from "./report.js";
 import { verifySite } from "./verify.js";
@@ -15,8 +18,10 @@ import type {
   ContentRecord,
   DeliveryComparison,
   DeliveryEvidence,
+  FailureThreshold,
   LaunchFinding,
   LiveUrlSource,
+  MigrationConfig,
   MigrationIssue,
   MigrationNode,
   MigrationProject,
@@ -27,9 +32,7 @@ import type {
   VerificationSummary
 } from "./types.js";
 
-type FailureThreshold = "none" | "warning" | "blocker";
-
-interface CliOptions {
+interface ParsedOptions {
   readonly command: string;
   readonly help: boolean;
   readonly version: boolean;
@@ -43,7 +46,16 @@ interface CliOptions {
   readonly routelintReport?: string;
   readonly ssrwireReport?: string;
   readonly ssrwireBaseline?: string;
+  readonly configPath?: string;
+  readonly uploadsDirectory?: string;
+  readonly mediaBaseUrl?: string;
+  readonly copyUnusedMedia?: boolean;
   readonly json: boolean;
+  /** Absent when the caller did not ask for a gate, so config can set one. */
+  readonly failOn?: FailureThreshold;
+}
+
+interface CliOptions extends Omit<ParsedOptions, "failOn"> {
   readonly failOn: FailureThreshold;
 }
 
@@ -53,6 +65,8 @@ function usage(): string {
 Usage:
   wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro]
   wp-migrate-core convert <export.xml> --out <new-site> [--target astro]
+  wp-migrate-core convert <export.xml> --out <new-site> --uploads <uploads-dir>
+  wp-migrate-core convert <export.xml> --out <new-site> --media-base <https://cdn.example.com/uploads>
   wp-migrate-core report <export.xml> [--out migration-report.html]
   wp-migrate-core verify <export.xml> --html-dir <built-site> [--out migration-verification.json]
   wp-migrate-core verify <export.xml> --routelint-report <report.json>
@@ -65,6 +79,15 @@ Options:
   --version, -v         show the installed package version
   --include-drafts      also read items that are skipped by default
   --keep-source-links   keep exported link targets instead of rewriting them
+  --config <file>       read a migration config that decides routes, excludes
+                        items and waives reviewed findings; without this option
+                        a ${defaultMigrationConfigFileName} next to the export is used
+  --uploads <dir>       copy referenced media from a local uploads directory
+                        into the generated site (convert and demo)
+  --media-base <url>    point generated markup at a media host instead of
+                        copying the files (convert and demo)
+  --copy-unused-media   also deliver attachments no included content uses
+                        (convert and demo)
   --live-urls <file>     compare a downloaded sitemap or URL list with the plan;
                         repeat the option to check several files at once
   --html-dir <dir>      verify a local build by reading its HTML files
@@ -95,13 +118,16 @@ network requests.
 local files only. Build, crawl or audit the site first, then point the check at
 the result.
 
+--config and --uploads read local files only. Media is never fetched: files
+come from the directory you name, or from the media host you point at.
+
 --fail-on never changes what is written; it only sets the exit status so a
 caller can gate on the repair queue. The verification gate covers missing
 content, missing pages, a page that still blocks indexing, a route that answered
 badly, and any delivery or metadata regression against a baseline audit.`;
 }
 
-function parseArguments(argv: readonly string[]): CliOptions {
+function parseArguments(argv: readonly string[]): ParsedOptions {
   const command = argv[0] ?? "help";
   if (!["inspect", "convert", "report", "verify", "demo", "help", "--help", "-h", "--version", "-v"].includes(command)) {
     throw new Error(`Unknown command: ${command}.\n\n${usage()}`);
@@ -119,8 +145,12 @@ function parseArguments(argv: readonly string[]): CliOptions {
   let routelintReport: string | undefined;
   let ssrwireReport: string | undefined;
   let ssrwireBaseline: string | undefined;
+  let configPath: string | undefined;
+  let uploadsDirectory: string | undefined;
+  let mediaBaseUrl: string | undefined;
+  let copyUnusedMedia = false;
   let json = false;
-  let failOn: FailureThreshold = "none";
+  let failOn: FailureThreshold | undefined;
 
   for (let index = 1; index < argv.length; index += 1) {
     const value = argv[index];
@@ -132,6 +162,23 @@ function parseArguments(argv: readonly string[]): CliOptions {
       includeDrafts = true;
     } else if (value === "--keep-source-links") {
       keepSourceLinks = true;
+    } else if (value === "--config") {
+      configPath = optionValue(value, argv[index + 1]);
+      index += 1;
+    } else if (value === "--uploads") {
+      uploadsDirectory = optionValue(value, argv[index + 1]);
+      index += 1;
+    } else if (value === "--media-base") {
+      const candidate = optionValue(value, argv[index + 1]);
+      if (!/^https?:\/\//i.test(candidate)) {
+        throw new Error(
+          `--media-base needs an absolute http or https URL, not "${candidate}". Media is never fetched: this is the host that already serves your uploads.`
+        );
+      }
+      mediaBaseUrl = candidate;
+      index += 1;
+    } else if (value === "--copy-unused-media") {
+      copyUnusedMedia = true;
     } else if (value === "--live-urls") {
       const candidate = optionValue(value, argv[index + 1]);
       if (/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
@@ -181,6 +228,13 @@ function parseArguments(argv: readonly string[]): CliOptions {
 
   if (!help && !version) {
     const hasDelivery = ssrwireReport !== undefined || ssrwireBaseline !== undefined;
+    const hasMediaOptions =
+      uploadsDirectory !== undefined || mediaBaseUrl !== undefined || copyUnusedMedia;
+    if (command !== "convert" && command !== "demo" && hasMediaOptions) {
+      throw new Error(
+        "--uploads, --media-base and --copy-unused-media write files into a generated project, so they are only supported by convert and demo."
+      );
+    }
     if (
       command !== "verify" &&
       (htmlDirectory !== undefined || routelintReport !== undefined || hasDelivery)
@@ -213,8 +267,12 @@ function parseArguments(argv: readonly string[]): CliOptions {
     ...(routelintReport === undefined ? {} : { routelintReport }),
     ...(ssrwireReport === undefined ? {} : { ssrwireReport }),
     ...(ssrwireBaseline === undefined ? {} : { ssrwireBaseline }),
+    ...(configPath === undefined ? {} : { configPath }),
+    ...(uploadsDirectory === undefined ? {} : { uploadsDirectory }),
+    ...(mediaBaseUrl === undefined ? {} : { mediaBaseUrl }),
+    ...(copyUnusedMedia ? { copyUnusedMedia } : {}),
     json,
-    failOn
+    ...(failOn === undefined ? {} : { failOn })
   };
 }
 
@@ -226,13 +284,114 @@ function optionValue(option: string, value: string | undefined): string {
   return value;
 }
 
-async function loadProject(inputPath: string, options: CliOptions): Promise<MigrationProject> {
+/**
+ * A migration config is the file the caller named, or the default name sitting
+ * beside the export. A file the caller named has to exist; the default one is
+ * only read when it is there.
+ */
+async function loadRunConfig(
+  options: ParsedOptions,
+  inputPath: string | undefined
+): Promise<LoadedMigrationConfig | undefined> {
+  if (options.configPath !== undefined) {
+    return loadMigrationConfig(options.configPath);
+  }
+  if (inputPath === undefined) {
+    return undefined;
+  }
+
+  const candidate = resolve(dirname(inputPath), defaultMigrationConfigFileName);
+  return (await pathExists(candidate)) ? loadMigrationConfig(candidate) : undefined;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isNodeErrorCode(error, "ENOENT")) return false;
+    throw error;
+  }
+}
+
+/**
+ * Fold the config into the options. The command line wins where it was given,
+ * and the config supplies the defaults for everything it did not.
+ */
+function resolveOptions(options: ParsedOptions, loaded: LoadedMigrationConfig | undefined): CliOptions {
+  const config = loaded?.config;
+  return {
+    ...options,
+    includeDrafts: options.includeDrafts || config?.includeDrafts === true,
+    keepSourceLinks: options.keepSourceLinks || config?.keepSourceLinks === true,
+    failOn: options.failOn ?? config?.failOn ?? "none",
+    ...(loaded === undefined ? {} : { configPath: loaded.source })
+  };
+}
+
+async function loadProject(
+  inputPath: string,
+  options: CliOptions,
+  config: MigrationConfig | undefined
+): Promise<MigrationProject> {
   const xml = await readFile(resolve(inputPath), "utf8");
   const liveUrlSource = await loadLiveUrlSource(options.liveUrlPaths);
   return parseWxr(xml, {
     includeDrafts: options.includeDrafts,
+    ...(config === undefined ? {} : { config }),
     ...(liveUrlSource === undefined ? {} : { liveUrlSource })
   });
+}
+
+/**
+ * Decide what the generated site does with every referenced upload.
+ *
+ * A run with neither an uploads directory nor a media base URL plans nothing,
+ * which leaves the handoff exactly as 0.6 wrote it: source imagery stays a
+ * repair marker. Nothing here fetches anything either way.
+ */
+async function deliverProjectMedia(
+  project: MigrationProject,
+  options: CliOptions,
+  config: MigrationConfig | undefined
+): Promise<MigrationProject> {
+  const uploadsDirectory = options.uploadsDirectory ?? config?.media?.uploadsDir;
+  const baseUrl = options.mediaBaseUrl ?? config?.media?.baseUrl;
+  const copyUnusedAssets = options.copyUnusedMedia === true || config?.media?.copyUnused === true;
+
+  if (uploadsDirectory === undefined && baseUrl === undefined) {
+    return project;
+  }
+
+  const plan = await planMediaDelivery(project, {
+    ...(uploadsDirectory === undefined ? {} : { uploadsDirectory }),
+    ...(baseUrl === undefined ? {} : { baseUrl }),
+    ...(copyUnusedAssets ? { copyUnusedAssets: true } : {})
+  });
+
+  return applyMediaDelivery(project, plan);
+}
+
+/**
+ * The demo ships a small uploads directory so the handoff shows real images
+ * rather than markers. It is used only when the caller asked for nothing else,
+ * and only when the directory is actually part of this install.
+ */
+async function demoMediaOptions(
+  options: CliOptions,
+  config: MigrationConfig | undefined
+): Promise<{ readonly uploadsDirectory?: string }> {
+  if (
+    options.uploadsDirectory !== undefined ||
+    options.mediaBaseUrl !== undefined ||
+    config?.media?.uploadsDir !== undefined ||
+    config?.media?.baseUrl !== undefined
+  ) {
+    return {};
+  }
+
+  const directory = fileURLToPath(new URL("../../fixtures/uploads", import.meta.url));
+  return (await pathExists(directory)) ? { uploadsDirectory: directory } : {};
 }
 
 /**
@@ -274,6 +433,9 @@ function createMigrationPlan(project: MigrationProject): object {
     issues: project.issues.map(createPlanIssue),
     media: {
       summary: project.media.summary,
+      ...(project.media.delivery === undefined
+        ? {}
+        : { delivery: mediaDeliveryRecord(project.media.delivery) }),
       assets: project.media.assets.map((asset) => ({
         id: asset.id,
         wordpressId: asset.wordpressId,
@@ -287,7 +449,8 @@ function createMigrationPlan(project: MigrationProject): object {
         ...(asset.width === undefined ? {} : { width: asset.width }),
         ...(asset.height === undefined ? {} : { height: asset.height }),
         referenceCount: asset.referenceCount,
-        referencedBy: asset.referencedBy
+        referencedBy: asset.referencedBy,
+        ...(asset.delivery === undefined ? {} : { delivery: asset.delivery })
       })),
       references: project.media.references.map((reference) => ({
         id: reference.id,
@@ -329,6 +492,7 @@ function createMigrationPlan(project: MigrationProject): object {
       summary: project.coverage.summary,
       entries: coverageEntryRecords(project.coverage)
     },
+    ...(project.config === undefined ? {} : { config: project.config }),
     summary: project.summary
   };
 }
@@ -373,6 +537,7 @@ function createPlanIssue(issue: MigrationIssue): object {
     sourceId: issue.sourceId,
     ...(route === undefined ? {} : { route }),
     ...(issue.nodeId === undefined ? {} : { nodeId: issue.nodeId }),
+    ...(issue.ignored === undefined ? {} : { ignored: issue.ignored }),
     title: issue.title,
     message: issue.message,
     requiredAction: issue.requiredAction
@@ -432,6 +597,13 @@ function printSummary(project: MigrationProject): void {
       `${summary.media.referenced} referenced, ` +
       `${summary.media.notInExport} referenced but not in the export, ${summary.media.missingAltText} without alternative text`
   );
+  const delivery = summary.media.delivery;
+  if (delivery !== undefined) {
+    console.log(
+      `  media delivery: ${delivery.copied} of ${delivery.files} ${pluralize(delivery.files, "file")} copied, ` +
+        `${delivery.linked} linked to the media base, ${delivery.remote} left remote, ${delivery.missing} missing`
+    );
+  }
   console.log(
     `  urls: ${summary.routes.generated} ${pluralize(summary.routes.generated, "route")} generated, ` +
       `${summary.routes.redirects} ${pluralize(summary.routes.redirects, "redirect")} needed, ` +
@@ -494,11 +666,15 @@ function createJsonDocument(
   return {
     generator: { name: "wp-migrate-core", version: packageVersion },
     command,
-    scan: { includeDrafts: options.includeDrafts },
+    scan: {
+      includeDrafts: options.includeDrafts,
+      ...(options.configPath === undefined ? {} : { config: options.configPath })
+    },
     source: project.source.title === undefined ? {} : { title: project.source.title },
     summary: project.summary,
     coverage: project.coverage.summary,
     issues: project.issues.map(createPlanIssue),
+    ...(project.config === undefined ? {} : { config: project.config }),
     outputs,
     failed
   };
@@ -817,27 +993,41 @@ async function inspect(
 }
 
 async function run(): Promise<void> {
-  const options = parseArguments(process.argv.slice(2));
+  const parsed = parseArguments(process.argv.slice(2));
 
-  if (options.help) {
+  if (parsed.help) {
     console.log(usage());
     return;
   }
 
-  if (options.version) {
+  if (parsed.version) {
     console.log(packageVersion);
     return;
   }
 
+  const demoFixture =
+    parsed.command === "demo"
+      ? fileURLToPath(new URL("../../fixtures/demo-wordpress.xml", import.meta.url))
+      : undefined;
+  const inputPath = parsed.input ?? demoFixture;
+  const loaded = await loadRunConfig(parsed, inputPath);
+  const options = resolveOptions(parsed, loaded);
+  const config = loaded?.config;
+
   if (options.command === "demo") {
     assertTargetEnabled(options.target);
-    const fixture = fileURLToPath(new URL("../../fixtures/demo-wordpress.xml", import.meta.url));
+    const fixture = inputPath as string;
     // The demo also shows the coverage check, unless the caller supplied their own URLs.
     const demoSitemap = fileURLToPath(new URL("../../fixtures/demo-sitemap.xml", import.meta.url));
-    const project = await loadProject(fixture, {
-      ...options,
-      liveUrlPaths: options.liveUrlPaths.length > 0 ? options.liveUrlPaths : [demoSitemap]
-    });
+    const inspected = await loadProject(
+      fixture,
+      {
+        ...options,
+        liveUrlPaths: options.liveUrlPaths.length > 0 ? options.liveUrlPaths : [demoSitemap]
+      },
+      config
+    );
+    const project = await deliverProjectMedia(inspected, { ...options, ...(await demoMediaOptions(options, config)) }, config);
     const output = resolve(options.output ?? "wp-migrate-core-demo");
     const plan = await inspect(project, resolve(output, "migration-plan"));
     const site = resolve(output, "astro-site");
@@ -850,6 +1040,9 @@ async function run(): Promise<void> {
         plan: plan.plan,
         report: plan.report,
         site,
+        ...((project.media.delivery?.copies.length ?? 0) === 0
+          ? {}
+          : { mediaCopies: resolve(site, "public", "wp-content", "uploads") }),
         ...(ruleFiles.length === 0 ? {} : { redirectRules: resolve(site, "migration", "redirect-rules") })
       },
       humanLines: [
@@ -860,6 +1053,9 @@ async function run(): Promise<void> {
         `URL and redirect map: ${resolve(site, "migration", "redirects.json")}`,
         `Link inventory: ${resolve(site, "migration", "links.json")}`,
         `Coverage check: ${resolve(site, "migration", "coverage.json")}`,
+        ...((project.media.delivery?.copies.length ?? 0) === 0
+          ? []
+          : [`Media copies: ${resolve(site, "public", "wp-content", "uploads")}`]),
         ...(ruleFiles.length === 0 ? [] : [`Redirect rules: ${resolve(site, "migration", "redirect-rules")}`])
       ]
     });
@@ -870,7 +1066,7 @@ async function run(): Promise<void> {
     throw new Error(`${options.command} requires a WordPress WXR file.\n\n${usage()}`);
   }
 
-  const project = await loadProject(options.input, options);
+  const project = await loadProject(options.input, options, config);
 
   if (options.command === "inspect") {
     assertTargetEnabled(options.target);
@@ -898,16 +1094,20 @@ async function run(): Promise<void> {
     assertTargetEnabled(options.target);
     if (!options.output) throw new Error("convert requires --out <new-site>.");
     const output = resolve(options.output);
-    const ruleFiles = redirectRuleFiles(project);
-    await generateAstroProject(project, output, { rewriteLinks: !options.keepSourceLinks });
-    await writeReport(project, resolve(output, "migration", "report.html"));
-    finishCommand(project, options, {
+    const delivered = await deliverProjectMedia(project, options, config);
+    const ruleFiles = redirectRuleFiles(delivered);
+    await generateAstroProject(delivered, output, { rewriteLinks: !options.keepSourceLinks });
+    await writeReport(delivered, resolve(output, "migration", "report.html"));
+    finishCommand(delivered, options, {
       command: "convert",
       outputs: {
         site: output,
         manifest: resolve(output, "migration", "manifest.json"),
         issues: resolve(output, "migration", "issues.json"),
         media: resolve(output, "migration", "media.json"),
+        ...((delivered.media.delivery?.copies.length ?? 0) === 0
+          ? {}
+          : { mediaCopies: resolve(output, "public", "wp-content", "uploads") }),
         redirects: resolve(output, "migration", "redirects.json"),
         links: resolve(output, "migration", "links.json"),
         coverage: resolve(output, "migration", "coverage.json"),
@@ -917,6 +1117,9 @@ async function run(): Promise<void> {
       humanLines: [
         `\nGenerated ${targetAvailability[options.target].label} project: ${output}`,
         `Media inventory: ${resolve(output, "migration", "media.json")}`,
+        ...((delivered.media.delivery?.copies.length ?? 0) === 0
+          ? []
+          : [`Media copies: ${resolve(output, "public", "wp-content", "uploads")}`]),
         `URL and redirect map: ${resolve(output, "migration", "redirects.json")}`,
         `Link inventory: ${resolve(output, "migration", "links.json")}`,
         `Coverage check: ${resolve(output, "migration", "coverage.json")}`,

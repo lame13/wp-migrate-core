@@ -8,6 +8,7 @@ import type {
   LinkReferenceStatus,
   LiveUrlShape,
   LiveUrlStatus,
+  MediaDeliveryStatus,
   MediaReferenceKind,
   MediaReferenceStatus,
   MigrationIssue,
@@ -139,7 +140,7 @@ function renderIssue(
     <article
       class="issue-card issue-card--${escapeHtml(issue.severity)}"
       data-issue
-      data-severity="${escapeHtml(issue.severity)}"
+      data-severity="${issue.ignored === true ? "ignored" : escapeHtml(issue.severity)}"
       data-source="${escapeHtml(source.toLocaleLowerCase())}"
       data-search="${escapeHtml(searchText)}"
     >
@@ -147,6 +148,7 @@ function renderIssue(
         <div>
           <div class="badges">
             <span class="badge badge--${escapeHtml(issue.severity)}">${escapeHtml(severityLabels[issue.severity])}</span>
+            ${issue.ignored === true ? '<span class="badge badge--notice">Waived</span>' : ""}
           </div>
           <h3>${escapeHtml(title)}</h3>
         </div>
@@ -164,8 +166,8 @@ function renderIssue(
       <p class="issue-message">${escapeHtml(message)}</p>
 
       <div class="next-action">
-        <span>Next action</span>
-        <p>${escapeHtml(requiredAction)}</p>
+        <span>${issue.ignored === true ? "Reviewed decision" : "Next action"}</span>
+        <p>${issue.ignored === true ? "The migration config waives this finding. It does not count towards the summary or fail the run." : escapeHtml(requiredAction)}</p>
       </div>
 
       <details class="technical-details">
@@ -181,14 +183,15 @@ function renderIssue(
 }
 
 function renderIssueFilters(project: MigrationProject): string {
-  const counts: Record<"all" | MigrationIssueSeverity, number> = {
+  const counts: Record<"all" | "ignored" | MigrationIssueSeverity, number> = {
     all: project.issues.length,
+    ignored: 0,
     blocker: 0,
     warning: 0
   };
 
   for (const issue of project.issues) {
-    counts[issue.severity] += 1;
+    counts[issue.ignored === true ? "ignored" : issue.severity] += 1;
   }
 
   const sources = [...new Set(project.issues.map((issue) => {
@@ -196,7 +199,7 @@ function renderIssueFilters(project: MigrationProject): string {
     return record ? sourceKindLabels[record.editor] : "Site-wide";
   }))].sort((a, b) => a.localeCompare(b));
 
-  const button = (filter: "all" | MigrationIssueSeverity, label: string): string => `
+  const button = (filter: "all" | "ignored" | MigrationIssueSeverity, label: string): string => `
     <button
       class="filter-button${filter === "all" ? " is-selected" : ""}"
       type="button"
@@ -210,6 +213,7 @@ function renderIssueFilters(project: MigrationProject): string {
         ${button("all", "All")}
         ${button("blocker", "Blockers")}
         ${button("warning", "Needs review")}
+        ${counts.ignored > 0 ? button("ignored", "Waived") : ""}
       </div>
 
       <div class="filter-fields">
@@ -331,6 +335,20 @@ const mediaKindLabels: Readonly<Record<MediaReferenceKind, string>> = {
   "elementor-background": "Elementor background",
   "html-image": "HTML image",
   "featured-image": "Featured image"
+};
+
+const deliveryStatusLabels: Readonly<Record<MediaDeliveryStatus, string>> = {
+  copied: "Copied",
+  linked: "Media host",
+  remote: "Left remote",
+  missing: "No local file"
+};
+
+const deliveryStatusClasses: Readonly<Record<MediaDeliveryStatus, string>> = {
+  copied: "badge--ok",
+  linked: "badge--ok",
+  remote: "badge--notice",
+  missing: "badge--warning"
 };
 
 const routeStatusLabels: Readonly<Record<RouteStatus, string>> = {
@@ -471,16 +489,34 @@ function renderMediaSection(project: MigrationProject): string {
   const recordsById = new Map(project.records.map((record) => [record.sourceId, record]));
   const unused = assets.filter((asset) => asset.referenceCount === 0);
   const shownReferences = references.slice(0, inventoryRowLimit);
+  const delivery = project.media.delivery;
+  const deliveryByPath = new Map(
+    (delivery?.entries ?? []).map((entry) => [entry.sourcePath, entry] as const)
+  );
 
   const rows = shownReferences
     .map((reference) => {
       const source = recordsById.get(reference.sourceId)?.title ?? reference.sourceId;
       const target = reference.path ?? reference.url ?? "Unknown path";
+      const delivered = reference.path === undefined ? undefined : deliveryByPath.get(reference.path);
+      const deliveryCell =
+        delivery === undefined
+          ? ""
+          : `<td>${
+              delivered === undefined
+                ? "<span class=\"muted\">Not planned</span>"
+                : `<span class="badge ${deliveryStatusClasses[delivered.status]}">${escapeHtml(
+                    delivered.status === "copied" && delivered.outputPath !== undefined && delivered.outputPath !== reference.path
+                      ? `Copied as ${delivered.outputPath.split("/").pop() ?? delivered.outputPath}`
+                      : deliveryStatusLabels[delivered.status]
+                  )}</span>`
+            }</td>`;
       return `<tr>
         <td><code>${escapeHtml(target)}</code></td>
         <td>${escapeHtml(mediaKindLabels[reference.kind])}</td>
         <td>${escapeHtml(source)}</td>
         <td><span class="badge ${mediaStatusClasses[reference.status]}">${escapeHtml(mediaStatusLabels[reference.status])}</span></td>
+        ${deliveryCell}
       </tr>`;
     })
     .join("\n");
@@ -494,7 +530,11 @@ function renderMediaSection(project: MigrationProject): string {
     <section class="section" aria-labelledby="media-heading">
       <div class="section-heading">
         <h2 id="media-heading">Media inventory</h2>
-        <p>Attachment items this export already carries, matched against the media the included pages reference. No asset was downloaded, copied, re-encoded or rewritten.</p>
+        <p>${
+          delivery === undefined
+            ? "Attachment items this export already carries, matched against the media the included pages reference. No asset was downloaded, copied, re-encoded or rewritten."
+            : `Attachment items this export already carries, matched against the media the included pages reference, and against the ${delivery.source === "uploads-directory" ? "uploads directory" : "media host"} you supplied. Nothing was fetched over the network.`
+        }</p>
       </div>
 
       <div class="metric-grid">
@@ -503,6 +543,14 @@ function renderMediaSection(project: MigrationProject): string {
         <article class="metric"><span>Needs alternative text</span><strong>${summary.missingAltText}</strong><small>Referenced images with no description anywhere in the export</small></article>
         <article class="metric"><span>Not in this export</span><strong>${summary.notInExport}</strong><small>References whose asset has to come from somewhere else</small></article>
       </div>
+
+      ${delivery === undefined ? "" : `
+        <div class="metric-grid">
+          <article class="metric"><span>Copied into the site</span><strong>${delivery.summary.copied}</strong><small>Files written under <code>public/wp-content/uploads/</code></small></article>
+          <article class="metric"><span>Served by a media host</span><strong>${delivery.summary.linked}</strong><small>Markup points at the media base URL you named</small></article>
+          <article class="metric"><span>Left on the source site</span><strong>${delivery.summary.remote}</strong><small>Files this export carries no attachment item for</small></article>
+          <article class="metric"><span>No local file found</span><strong>${delivery.summary.missing}</strong><small>Reported as <code>MEDIA_NOT_LOCAL</code> findings</small></article>
+        </div>`}
 
       ${references.length === 0 ? `
         <div class="empty-state">
@@ -514,7 +562,9 @@ function renderMediaSection(project: MigrationProject): string {
           <div class="inventory-scroll">
             <table class="inventory-table">
               <thead>
-                <tr><th scope="col">Source path</th><th scope="col">Found in</th><th scope="col">Used by</th><th scope="col">Status</th></tr>
+                <tr><th scope="col">Source path</th><th scope="col">Found in</th><th scope="col">Used by</th><th scope="col">Status</th>${
+                  delivery === undefined ? "" : "<th scope=\"col\">Delivery</th>"
+                }</tr>
               </thead>
               <tbody>
                 ${rows}
@@ -752,7 +802,7 @@ function renderCoverageSection(project: MigrationProject): string {
 
 export function renderReport(project: MigrationProject): string {
   const recordsById = new Map(project.records.map((record) => [record.sourceId, record]));
-  const openIssues = project.issues;
+  const openIssues = project.issues.filter((issue) => issue.ignored !== true);
   const openBlockers = openIssues.filter((issue) => issue.severity === "blocker");
   const openReviews = openIssues.filter((issue) => issue.severity === "warning");
   const sortedIssues = [...project.issues].sort((left, right) => {
@@ -760,7 +810,7 @@ export function renderReport(project: MigrationProject): string {
     if (severityDifference !== 0) return severityDifference;
     return left.title.localeCompare(right.title);
   });
-  const sourceUrl = safeSourceUrl(project.site.url ?? "") ?? safeSourceUrl(project.source.url ?? "");
+  const sourceUrl = safeSourceUrl(project.source.url ?? "") ?? safeSourceUrl(project.site.url ?? "");
   const siteUrl = sourceUrl ?? "Source URL unavailable";
   const blockerPhrase = `${openBlockers.length} ${openBlockers.length === 1 ? "blocker" : "blockers"}`;
   const reviewPhrase = `${openReviews.length} ${openReviews.length === 1 ? "item" : "items"}`;

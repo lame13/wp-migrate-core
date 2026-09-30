@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-01
+
+You can now bring images into the generated Astro site. Use `--uploads` with a local copy of your WordPress uploads directory, or `--media-base` if a CDN already serves your files. The migration report shows which files were copied, which stay remote, and which still need attention.
+
+There's also a config file for the decisions you used to make by hand: choosing a route for a `?p=123` permalink, leaving out a page, or accepting a finding you've already reviewed. Keep it beside the export to reuse those decisions on the next run.
+
+- Copies referenced files into `public/wp-content/uploads/`, preserving their upload paths. Uploads listed in `--live-urls` are included too; `--copy-unused-media` adds the remaining attachments.
+- Updates image and picture sources, including `srcset`, and fills in missing alt text and dimensions from the export. Decorative images with `alt=""` keep it. If a resized image is unavailable, the original file can stand in for it.
+- Reads `wp-migrate-core.config.json` beside the export, or a file passed with `--config`. It supports routes, exclusions, reviewed findings, site details, media sources and the failure threshold.
+- Keeps waived findings visible as `ignored`, labels them in the report, and leaves them out of the counts used by `--fail-on`. Unmatched config entries produce a warning.
+- Records media delivery and config decisions in the handoff. The media inventory and manifest now use schema `0.7`; local uploads directory paths are omitted.
+- Adds missing-file warnings and checks that copied files stay inside the supplied uploads directory. Media base URLs omit credentials, query strings and fragments. No media is fetched over the network.
+- Includes placeholder images in the demo so you can try media delivery without supplying your own uploads.
+
 ## [0.6.1] - 2026-09-27
 
 The npm package homepage now points to [wp-migrate-core on NikoCodes](https://nikocodes.com/software/wp-migrate-core/). No changes to migration behavior.
@@ -105,7 +119,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/lame13/wp-migrate-core/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/lame13/wp-migrate-core/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/lame13/wp-migrate-core/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/lame13/wp-migrate-core/compare/v0.4.0...v0.5.0
