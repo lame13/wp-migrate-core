@@ -1,6 +1,7 @@
 import { dirname } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
+import { SUPPORTED_TARGETS, targetDefinitions } from "./targets.js";
 import { packageVersion } from "./version.js";
 
 import type {
@@ -37,12 +38,6 @@ const sourceKindLabels: Readonly<Record<SourceEditor, string>> = {
   gutenberg: "Gutenberg",
   elementor: "Elementor",
   mixed: "Mixed editor"
-};
-
-const targetDescriptions: Readonly<Record<OutputTarget, string>> = {
-  astro: "Implemented for this demo. Its generated files are a starting point and still need manual verification.",
-  next: "No Next.js output is included in this demonstration release.",
-  nuxt: "No Nuxt output is included in this demonstration release."
 };
 
 function escapeHtml(value: unknown): string {
@@ -92,17 +87,19 @@ function formatDate(value: string): string {
 
 function renderTargetCard(project: MigrationProject, target: OutputTarget): string {
   void project;
-  const labels: Readonly<Record<OutputTarget, string>> = { astro: "Astro", next: "Next.js", nuxt: "Nuxt" };
-  const enabled = target === "astro";
+  const definition = targetDefinitions[target];
+  const enabled = definition.enabled;
   const state = enabled ? "Implemented" : "Not implemented";
+  const kind = definition.kind === "cms" ? "CMS destination" : "Static site";
 
   return `
-    <article class="target-card${enabled ? " target-card--enabled" : ""}" aria-label="${escapeHtml(labels[target])} target: ${state}">
+    <article class="target-card${enabled ? " target-card--enabled" : ""}" aria-label="${escapeHtml(definition.label)} target: ${state}">
       <div class="target-card__top">
-        <h3>${escapeHtml(labels[target])}</h3>
+        <h3>${escapeHtml(definition.label)}</h3>
         <span class="target-state target-state--${enabled ? "available" : "unavailable"}">${state}</span>
       </div>
-      <p>${escapeHtml(targetDescriptions[target])}</p>
+      <p class="target-kind">${escapeHtml(kind)}</p>
+      <p>${escapeHtml(definition.description)}</p>
       ${enabled ? "" : '<span class="target-card__notice">Not implemented in this release</span>'}
     </article>`;
 }
@@ -1410,12 +1407,10 @@ export function renderReport(project: MigrationProject): string {
     <section class="section" aria-labelledby="targets-heading">
       <div class="section-heading">
         <h2 id="targets-heading">Output target</h2>
-        <p>Astro is the only implemented output target. Every generated output still needs verification against the source.</p>
+        <p>Astro and Payload are the implemented output targets. Every generated output still needs verification against the source.</p>
       </div>
       <div class="target-grid">
-        ${renderTargetCard(project, "astro")}
-        ${renderTargetCard(project, "next")}
-        ${renderTargetCard(project, "nuxt")}
+        ${SUPPORTED_TARGETS.map((target) => renderTargetCard(project, target)).join("\n        ")}
       </div>
     </section>
 

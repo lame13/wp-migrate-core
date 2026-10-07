@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-07
+
+The tool stops being only an Astro renderer. Destinations now have a *kind* — a static site or a CMS — and the first CMS destination, **Payload**, turns the export into collections, a content and media drop, and a generated importer you run inside the destination project. `verify` can then answer a third question: not just "is the content in the front end?" but "is it in the CMS, and what still needs a human there?".
+
+The direction is yours: people leaving WordPress still need somewhere to edit their website. The WXR parsing, media handling, URL and link inventories, redirects, repair queue and verification all apply across destinations, so the work here is the destination boundary plus the first target behind it. Pruvious and Ghost are planned next; Svelte stays a real but non-priority static target, and a bare Next.js or Nuxt renderer stays parked behind the CMS work.
+
+- **A destination has a kind.** `TargetAdapter` gains `kind: "static-site" | "cms"`, and the CLI, the report and the manifest now say which one a target is instead of implying every target writes a site. `--target payload` is implemented; `next`, `nuxt` and `svelte` are declared and refuse with a reason. The manifest's `targets` block and the report's target cards are generated from one registry, so they cannot disagree.
+- **A CMS destination writes a bundle, not a site.** `convert --target payload` writes `payload.config.mjs`, one collection module per content type plus `media`, `categories`, `tags` and `authors`, a content and media drop under `import/`, a generated importer, and a redirect map in the shape a Next front end uses (alongside the Netlify, Vercel, nginx and Apache files). `wp-migrate-core` itself still reads and writes local files and makes no network requests; the importer is the only thing that talks to a database, and it is yours to run.
+- **Posts and pages map explicitly.** Title, slug, route, dates, author, taxonomy and the source publication status are all mapped. WordPress `draft`/`pending` become a Payload draft; `future` and `private` keep their own `wordpressStatus`. Authors become an `authors` collection rather than Payload users, because `dc:creator` is a WordPress login and creating login accounts is a deployment decision.
+- **The body is native rich text for a documented subset.** Headings, paragraphs, lists, quotes, code, horizontal rules, links and emphasis become Lexical nodes. Images, embeds, forms, tables, shortcodes and layout containers become `contentReview` entries instead of being guessed at, and `sourceHtml` keeps the exact export HTML so nothing is lost.
+- **Media goes through the Local API.** Files delivered from a local uploads directory are copied into the bundle, referenced by `{ "$ref": ... }` markers, and uploaded by the importer so Payload owns the file, its sizes and its alt text. A `linked` or `remote` file has no local bytes, so it is left out and any reference to it is reported as unresolved rather than inventing an empty media record.
+- **Re-imports are safe.** The importer looks records up by the stable `wordpressSourceId` the manifest already uses (`wp:post:20`), and uses an import hash to tell "the source changed" apart from "somebody edited this in the CMS". A record that changed is updated; a record edited in the CMS is skipped and reported as `record-modified` rather than overwritten.
+- **`verify` gains `--import-report`.** Read the `migration-import.json` a generated importer wrote, and the launch gate gains an `import` check: a planned record the report never mentions is `IMPORT_RECORD_MISSING`, a record the importer failed on is a blocker (`IMPORT_RECORD_FAILED`), a skipped record is `IMPORT_RECORD_SKIPPED`, and a content id the plan does not carry is `IMPORT_RECORD_UNKNOWN`. The report can stand alone if you only want to know whether the CMS import landed, or join a build check so one run answers both questions.
+- **The manifest moves to schema `0.9`** for the destination block and the new targets, and the verification artefact moves to `0.9` for the import evidence. Media stays `0.7`, links `0.3`, coverage `0.4`, redirects `0.2`, archives and menus `0.8`, because none of those changed shape.
+- **What this release does not claim:** the generated Payload config and importer are type-checked, unit-tested at the mapping and hash level, and exercised through the installed package's CLI, but they have not been run against a live Payload database here. That round-trip is the validation gate before the next CMS target: one real WordPress → Payload migration, with more than two content types, a menu, archives and media.
+
 ## [0.8.1] - 2026-10-07
 
 - Fixes archive pagination redirecting the first page to a later page, and prevents query-based attachment permalinks from becoming homepage redirects.
@@ -144,7 +160,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/lame13/wp-migrate-core/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/lame13/wp-migrate-core/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/lame13/wp-migrate-core/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/lame13/wp-migrate-core/compare/v0.6.1...v0.7.0

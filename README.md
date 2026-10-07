@@ -1,14 +1,14 @@
 # wp-migrate-core
 
-Plan a WordPress migration, generate an Astro starting point, and check the result before publishing.
+Plan a WordPress migration, generate an Astro site or a Payload CMS bundle, and check the result before publishing.
 
-`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate an Astro project with your content, images, navigation, the archive pages WordPress generated, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache.
+`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate a **static Astro project** with your content, images, navigation, the archive pages WordPress generated, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache — or a **Payload CMS bundle** with collections to edit in, a media library, and a generated importer.
 
 To include images, supply a local copy of `wp-content/uploads` or the URL of a host that already serves them. A migration config lets you save route choices, excluded pages and findings you've reviewed, so you can repeat the migration without patching the output each time.
 
 After a build, `verify` checks for missing or substantially changed content, and then for launch readiness: media that never reached the build, links that lead nowhere, canonical URLs, `robots.txt` and the sitemap. Add a saved SSRWire audit to check responses, metadata and indexing too.
 
-This is an early tool, and Astro is the only supported output. You'll still need to rebuild your theme, forms and plugin behavior, bring over your media, and review the generated site.
+Astro and Payload are the supported destinations. You'll still need to rebuild your theme, forms and plugin behavior, bring over your media, and review the generated output. Where WordPress served a page but this tool cannot, the repair queue says so rather than dropping it.
 
 ## Try it with the demo
 
@@ -79,7 +79,39 @@ Conversion writes one content collection per post type in the export, such as `s
 | `migration/manifest.json` | Connect WordPress IDs to generated files and routes. |
 | `public/sitemap.xml` | List the generated routes, using the configured site URL or the URL from the export. |
 
-The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The manifest, the archive inventory, the menu inventory and the verification artefact use `"0.8"`. These describe each file's data format separately from the npm package version.
+The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The archive and menu inventories use `"0.8"`. The manifest uses `"0.9"` (the destination block and the target list), and the verification artefact uses `"0.9"` (the import evidence). These describe each file's data format separately from the npm package version.
+
+## The Payload CMS destination
+
+A static site gives you a foundation; a CMS destination also gives you an admin, media management and a publishing workflow. `--target payload` writes a reviewable bundle instead of pages:
+
+```bash
+npx wp-migrate-core convert export.xml --out payload-bundle --target payload --uploads ../wordpress/wp-content/uploads
+cd payload-bundle
+npm install
+export PAYLOAD_SECRET="$(openssl rand -hex 16)"
+export DATABASE_URI="file:./payload.db"
+npm run import
+```
+
+The bundle contains one collection module per content type plus `media`, `categories`, `tags` and `authors`, a `payload.config.mjs`, a content and media drop under `import/`, and the generated importer. `wp-migrate-core` itself never talks to a database; the importer is the only thing that does.
+
+| File | Use it to |
+| --- | --- |
+| `payload.config.mjs` | Start or extend a Payload app; it is built for Payload `^3.0.0`. |
+| `collections/` | Read the fields each collection carries before you run the import. |
+| `import/content/` | Review the drop: one file per collection, with `{ "$ref": ... }` markers the importer resolves. |
+| `import/import.mjs` | Run the import (`npm run import`); it writes `migration-import.json`. |
+| `import/redirects.json`, `next.config.mjs` | Publish the redirect map on a Next front end. |
+| `migration/` | The same review artifacts the Astro handoff writes. |
+
+Posts and pages keep their title, slug, route, dates, author, taxonomy and the source publication status. WordPress `draft`/`pending` become a Payload draft; `future` and `private` keep their own `wordpressStatus`. Authors become an `authors` collection rather than Payload users, because `dc:creator` is a WordPress login. The body is native rich text for a documented subset — headings, paragraphs, lists, quotes, code, links and emphasis — and everything else (images, embeds, forms, tables, shortcodes and layout containers) becomes a `contentReview` entry rather than a guess, with `sourceHtml` keeping the original HTML alongside it.
+
+Re-imports are safe. The importer finds each record by its stable `wordpressSourceId` (`wp:post:20`), updates it when the source changed, and skips a record that was edited in the CMS, reporting it as `record-modified` instead of overwriting it. Point `verify` at the import report to check the outcome:
+
+```bash
+npx wp-migrate-core verify export.xml --import-report migration-import.json --fail-on blocker
+```
 
 ### Content types
 
@@ -282,9 +314,20 @@ npx wp-migrate-core convert export.xml --out new-site --uploads ../uploads --pub
 npx wp-migrate-core verify export.xml --html-dir new-site/dist --uploads ../uploads --fail-on blocker
 ```
 
-`migration-verification.json` (schema version `0.8`) records every check with a `checked` flag. A check that needs the built site on disk is **not checked** when you pass a crawl report instead of a build, and the summary counts those separately: a check that could not run is never reported as passed.
+`migration-verification.json` (schema version `0.9`) records every check with a `checked` flag. A check that needs the built site on disk is **not checked** when you pass a crawl report instead of a build, and the summary counts those separately: a check that could not run is never reported as passed.
 
 For media verification, reuse the conversion's `--uploads`, `--media-base`, and `--copy-unused-media` options, or its `media` config. Verification reads the delivery sources without copying files. If the export contains media but no delivery plan is available, the media check is marked unchecked. Archive pages are checked for presence and indexing; their generated listing text has no WXR body to compare.
+
+### Check the CMS import
+
+A Payload bundle's importer writes `migration-import.json`. Pass it with `--import-report` and the launch gate gains an `import` check: a planned record the report never mentions is `IMPORT_RECORD_MISSING` (warning), a record the importer failed on is a blocker (`IMPORT_RECORD_FAILED`), a record it skipped because the CMS copy was edited is `IMPORT_RECORD_SKIPPED` (warning), and a content id the plan does not carry is `IMPORT_RECORD_UNKNOWN` (warning). Taxonomies, authors and media are expected in the report and are never reported as unknown.
+
+The import report can be the whole check when you only care that the CMS import landed, or it can join `--html-dir`/`--routelint-report` and `--ssrwire-report` so one run answers every question at once:
+
+```bash
+npx wp-migrate-core verify export.xml --import-report migration-import.json --fail-on blocker
+npx wp-migrate-core verify export.xml --html-dir dist --import-report migration-import.json --fail-on warning
+```
 
 ### Check responses and metadata
 
@@ -341,6 +384,7 @@ The generated site starts with `noindex, nofollow` in its layout and `Disallow: 
 ```text
 wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro] [--live-urls sitemap.xml]
 wp-migrate-core convert <export.xml> --out <new-site> [--target astro] [--live-urls sitemap.xml]
+wp-migrate-core convert <export.xml> --out <payload-bundle> --target payload --uploads ../uploads
 wp-migrate-core convert <export.xml> --out <new-site> --uploads ../wordpress/wp-content/uploads
 wp-migrate-core convert <export.xml> --out <new-site> --media-base https://cdn.example.com/uploads
 wp-migrate-core convert <export.xml> --out <new-site> --publish-ready
@@ -349,12 +393,13 @@ wp-migrate-core verify <export.xml> --html-dir dist [--out migration-verificatio
 wp-migrate-core verify <export.xml> --routelint-report routelint.json
 wp-migrate-core verify <export.xml> --html-dir dist --ssrwire-report ssrwire-preview.json
 wp-migrate-core verify <export.xml> --html-dir dist --ssrwire-report ssrwire-preview.json --ssrwire-baseline ssrwire-source.json
+wp-migrate-core verify <export.xml> --import-report migration-import.json
 wp-migrate-core demo [--out wp-migrate-core-demo] [--live-urls sitemap.xml]
 wp-migrate-core --version
 wp-migrate-core inspect --help
 ```
 
-`report` writes just the HTML report. `verify` compares a built site, or a saved RouteLint report, with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `--config` applies a migration config to any command. `--uploads`, `--media-base` and `--copy-unused-media` apply to `convert`, `demo` and `verify`; verification only reads the files. `--publish-ready` belongs to `convert` and `demo`. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `next` and `nuxt` are planned targets and currently return an error.
+`report` writes just the HTML report. `verify` compares a built site, a saved RouteLint report, or a CMS import report with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `--config` applies a migration config to any command. `--uploads`, `--media-base` and `--copy-unused-media` apply to `convert`, `demo` and `verify`; verification only reads the files. `--publish-ready` belongs to `convert` and `demo`. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `--target` takes `astro` or `payload`; `next`, `nuxt` and `svelte` are declared, planned targets and currently return an error.
 
 | Option | What it does |
 | --- | --- |
@@ -370,6 +415,7 @@ wp-migrate-core inspect --help
 | `--routelint-report <file>` | Reads a saved RouteLint JSON report instead of a local build, for a site that is already crawled. |
 | `--ssrwire-report <file>` | Adds delivery evidence from a saved SSRWire JSON audit: response status, metadata and crawler delivery per planned route. |
 | `--ssrwire-baseline <file>` | Compares that audit with one taken before the migration. The two reports pair up on their target ids. |
+| `--import-report <file>` | Reads the `migration-import.json` a generated CMS importer wrote and checks the imported records against the plan. It can stand alone, or join a build check. |
 | `--json` | Prints one JSON result instead of the terminal summary, with scan settings, counts for every inventory, sanitized issues, output paths, and a `failed` flag. Full inventories are in the output files. |
 | `--fail-on none\|warning\|blocker` | Exits unsuccessfully for findings at or above the chosen severity, after writing the output. Defaults to `none`. |
 
@@ -421,12 +467,16 @@ import {
   deliveryCheckFiles,
   deliveryLaunchFindings,
   generateAstroProject,
+  generatePayloadBundle,
+  htmlToPayloadRichText,
+  importLaunchFindings,
   linkRewrites,
   loadMigrationConfig,
   planMediaDelivery,
   parseLiveUrlSource,
   parseWxr,
   readDeliveryEvidence,
+  readImportEvidence,
   redirectRuleFiles,
   verifySite
 } from 'wp-migrate-core';
@@ -453,6 +503,11 @@ const project = applyMediaDelivery(parsed, mediaPlan);
 console.log(project.media.delivery.summary);
 await generateAstroProject(project, 'new-site');
 
+// Or write the Payload CMS bundle: collections, a drop, and an importer.
+await generatePayloadBundle(project, 'payload-bundle');
+const richText = htmlToPayloadRichText('<h1>Title</h1><p>Body text.</p>');
+console.log(richText.body, richText.review);
+
 // The same check the CLI runs: content evidence plus both audits.
 const verification = await verifySite(project, {
   htmlDirectory: 'new-site/dist',
@@ -466,9 +521,13 @@ console.log(verification.launch);
 const delivery = await readDeliveryEvidence(project, { reportPath: 'ssrwire-preview.json' });
 console.log(delivery.summary);
 console.log(deliveryLaunchFindings(delivery));
+
+// Or read the CMS importer's report and turn it into publishing findings.
+const imports = await readImportEvidence('migration-import.json');
+console.log(imports.summary, importLaunchFindings(project, imports));
 ```
 
-Pass `{ includeDrafts: true }` as the second argument to include non-published content, and `parseLiveUrlSource(contents, { sourcePath: 'sitemap.xml' })` to name the file in an error message. `mergeLiveUrlSources([...])` combines several files, and `coverageEntryRecords(project.coverage)` is the sanitized shape the CLI writes. `generateAstroProject(project, directory, { rewriteLinks: false })` is the library equivalent of `--keep-source-links`. The library model also retains raw source content, link targets, and metadata; handle it with the same care as the export.
+Pass `{ includeDrafts: true }` as the second argument to include non-published content, and `parseLiveUrlSource(contents, { sourcePath: 'sitemap.xml' })` to name the file in an error message. `mergeLiveUrlSources([...])` combines several files, and `coverageEntryRecords(project.coverage)` is the sanitized shape the CLI writes. `generateAstroProject(project, directory, { rewriteLinks: false })` is the library equivalent of `--keep-source-links`. `generatePayloadBundle(project, directory)` writes the CMS bundle, `htmlToPayloadRichText(html)` is the HTML → rich-text conversion on its own, and `targetDefinitions` / `targetAdapters` describe every destination and its kind. The library model also retains raw source content, link targets, and metadata; handle it with the same care as the export.
 
 `loadMigrationConfig(path)` reads a config file and `parseMigrationConfig(text)` validates one you already have; either way it is the `config` option for `parseWxr`. `planMediaDelivery(project, { uploadsDirectory })` reads the files and measures them, `applyMediaDelivery(project, plan)` folds the decisions into the project, and `generateAstroProject()` then writes the copies along with the rewritten markup. `mediaDeliveryRecord(plan)` is the sanitized shape the artifacts use. A plan holds the absolute paths it read, so keep it out of anything you publish; `applyMediaDelivery` never copies a file itself, which is what lets a caller inspect the plan before anything is written.
 

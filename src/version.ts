@@ -13,3 +13,10 @@ export const packageVersion = metadata.version;
  * handoff generates cannot drift from the dependency this package installs.
  */
 export const ssrwireDependency = metadata.dependencies?.["ssrwire"] ?? "^0.5.0";
+
+/**
+ * The Payload release the generated CMS bundle is written against. It is
+ * recorded in the manifest the way `ssrwireDependency` is, so a bundle says
+ * which version its collections and importer were built for.
+ */
+export const payloadDependency = "^3.0.0";

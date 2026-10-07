@@ -72,7 +72,11 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
       parseMigrationConfig,
       planMediaDelivery,
       applyMediaDelivery,
-      mediaDeliveryRecord
+      mediaDeliveryRecord,
+      generatePayloadBundle,
+      htmlToPayloadRichText,
+      readImportEvidence,
+      importLaunchFindings
     } from "wp-migrate-core";
     assert.equal(typeof parseWxr, "function");
     assert.equal(typeof generateAstroProject, "function");
@@ -86,6 +90,10 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
     assert.equal(typeof planMediaDelivery, "function");
     assert.equal(typeof applyMediaDelivery, "function");
     assert.equal(typeof mediaDeliveryRecord, "function");
+    assert.equal(typeof generatePayloadBundle, "function");
+    assert.equal(typeof htmlToPayloadRichText, "function");
+    assert.equal(typeof readImportEvidence, "function");
+    assert.equal(typeof importLaunchFindings, "function");
   `], { cwd: consumer, env, encoding: "utf8", timeout: 30_000 });
 
   const help = runNpm(["exec", "--offline", "--", "wp-migrate-core", "--help"], consumer);
@@ -116,7 +124,7 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   assert.equal(verified.failed, false);
   assert.equal(verified.summary.verified, 1);
   const verificationFile = JSON.parse(await readFile(join(consumer, "migration-verification.json"), "utf8"));
-  assert.equal(verificationFile.schemaVersion, "0.8");
+  assert.equal(verificationFile.schemaVersion, "0.9");
   assert.equal(verificationFile.generator.version, metadata.version);
   assert.deepEqual(verificationFile.summary, verified.summary);
   assert.deepEqual(
@@ -125,8 +133,8 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   );
   assert.deepEqual(
     verificationFile.checks.filter((check) => !check.checked).map((check) => check.id),
-    ["delivery"],
-    "no SSRWire audit was supplied, and the gate says so instead of passing it"
+    ["delivery", "import"],
+    "no SSRWire audit and no import report were supplied, and the gate says so instead of passing them"
   );
 
   runNpm(["exec", "--offline", "--", "wp-migrate-core", "demo", "--out", "demo output"], consumer);
@@ -155,7 +163,7 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   assert.equal(redirects.summary.generated, manifest.redirects.summary.generated);
   assert.equal(links.schemaVersion, "0.3");
   assert.equal(coverage.schemaVersion, "0.4");
-  assert.equal(manifest.schemaVersion, "0.8");
+  assert.equal(manifest.schemaVersion, "0.9");
   assert.equal(links.rewrites.length, manifest.links.summary.needsRewrite);
   assert.equal(manifest.media.file, "migration/media.json");
   assert.equal(manifest.redirects.file, "migration/redirects.json");
@@ -250,6 +258,50 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
     await readFile(join(consumer, "cpt-site/public/robots.txt"), "utf8"),
     /User-agent: \*\nAllow: \/\n\nSitemap: https:\/\/cpt\.invalid\/sitemap\.xml\n/
   );
+
+  // The CMS destination, through the installed executable: a Payload bundle
+  // with collections and a drop, then the import report verification reads.
+  runNpm(
+    ["exec", "--offline", "--", "wp-migrate-core", "convert", "cpt.xml", "--out", "cms-bundle", "--target", "payload"],
+    consumer
+  );
+  const cmsManifest = JSON.parse(await readFile(join(consumer, "cms-bundle/migration/manifest.json"), "utf8"));
+  assert.equal(cmsManifest.generator.target, "payload");
+  assert.equal(cmsManifest.destination.kind, "cms");
+  assert.equal(cmsManifest.destination.payloadVersion, "^3.0.0");
+  assert.ok(
+    cmsManifest.records.some((record) => record.sourceId === "wp:portfolio:20"),
+    "a custom post type is dropped into its own Payload collection"
+  );
+  await readFile(join(consumer, "cms-bundle/collections/Portfolios.mjs"));
+  await readFile(join(consumer, "cms-bundle/import/import.mjs"));
+
+  await writeFile(
+    join(consumer, "cms-import.json"),
+    JSON.stringify({
+      schemaVersion: "0.9",
+      generator: { name: "wp-migrate-core", version: metadata.version, target: "payload" },
+      generatedAt: "2026-10-07T00:00:00.000Z",
+      destination: { target: "payload", kind: "cms", structure: "payload-next" },
+      summary: { planned: 2 },
+      records: [
+        { id: "wp:page:1", sourceId: "wp:page:1", collection: "pages", action: "created", unresolved: [] },
+        { id: "wp:portfolio:20", sourceId: "wp:portfolio:20", collection: "portfolios", action: "created", unresolved: [] }
+      ]
+    })
+  );
+  const imported = JSON.parse(
+    runNpm(
+      ["exec", "--offline", "--", "wp-migrate-core", "verify", "cpt.xml", "--import-report", "cms-import.json", "--out", "cms-verification.json", "--json"],
+      consumer
+    )
+  );
+  assert.equal(imported.observed.kind, "import-report");
+  assert.equal(imported.failed, false);
+  assert.deepEqual(imported.launch.findings, []);
+  const importFile = JSON.parse(await readFile(join(consumer, "cms-verification.json"), "utf8"));
+  assert.equal(importFile.schemaVersion, "0.9");
+  assert.equal(importFile.imports.summary.created, 2);
 
   context.diagnostic(`Verified wp-migrate-core@${metadata.version}: installed executable, ESM exports, types, content verification, bundled demo, and handoff version.`);
 });

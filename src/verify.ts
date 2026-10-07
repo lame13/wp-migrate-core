@@ -14,6 +14,7 @@ import {
   launchFindings,
   readDeliveryEvidence
 } from "./delivery.js";
+import { importLaunchFindings, readImportEvidence } from "./import-report.js";
 import type { ContentIndexing } from "./delivery.js";
 import type {
   ContentRecord,
@@ -81,6 +82,12 @@ export interface VerifyOptions {
   readonly ssrwireBaselinePath?: string;
   /** Origin used to resolve routes. Defaults to the report's base URL, or the export's site URL for HTML. */
   readonly siteUrl?: string;
+  /**
+   * A `migration-import.json` report a generated CMS importer wrote. It is the
+   * third kind of evidence: whether the records arrived in the CMS. It can be
+   * supplied on its own, or alongside a build or crawl check.
+   */
+  readonly importReportPath?: string;
 }
 
 interface ObservedPage {
@@ -115,10 +122,18 @@ export async function verifySite(
 ): Promise<SiteVerification> {
   const hasHtmlDirectory = options.htmlDirectory !== undefined;
   const hasReport = options.routelintReportPath !== undefined;
+  const hasImport = options.importReportPath !== undefined;
+  const hasContentSource = hasHtmlDirectory || hasReport;
 
-  if (hasHtmlDirectory === hasReport) {
+  if (hasHtmlDirectory && hasReport) {
     throw new Error(
-      "Verification reads one observed source at a time: pass --html-dir for a built site, or --routelint-report for a saved report."
+      "Verification reads one content source at a time: pass --html-dir for a built site, or --routelint-report for a saved report."
+    );
+  }
+
+  if (!hasContentSource && !hasImport) {
+    throw new Error(
+      "Verification needs something to check: pass --html-dir for a built site, --routelint-report for a saved report, or --import-report for a CMS import."
     );
   }
 
@@ -129,7 +144,8 @@ export async function verifySite(
   }
 
   let base = resolveBaseUrl(options.siteUrl ?? project.site.url);
-  const planned = plannedRoutes(project);
+  const planned = hasContentSource ? plannedRoutes(project) : [];
+  const imports = options.importReportPath === undefined ? undefined : await readImportEvidence(options.importReportPath);
 
   let observed: readonly ObservedPage[];
   let source: string;
@@ -140,13 +156,17 @@ export async function verifySite(
     observed = await readHtmlDirectory(directory, base);
     source = directory;
     kind = "html-directory";
-  } else {
+  } else if (options.routelintReportPath !== undefined) {
     const reportPath = resolve(options.routelintReportPath ?? "");
     const report = await readRouteLintPages(reportPath, options.siteUrl);
     observed = report.pages;
     base = report.base;
     source = reportPath;
     kind = "routelint-report";
+  } else {
+    observed = [];
+    source = imports?.source ?? "";
+    kind = "import-report";
   }
 
   // Do not silently choose between conflicting local build outputs.
@@ -175,7 +195,7 @@ export async function verifySite(
     const href = normalizeUrl(entry.route, base);
     const page = href === undefined ? undefined : byHref.get(href);
     routes.push(classifyRoute(entry, page, routes.length + 1));
-    if (page !== undefined) {
+    if (page !== undefined && kind !== "import-report") {
       indexing.push({ route: entry.route, source: kind, evidence: page.indexing });
     }
   }
@@ -187,36 +207,20 @@ export async function verifySite(
 
   const launch = sortLaunchFindings([
     ...launchFindings({ indexing, ...(delivery === undefined ? {} : { delivery }) }),
-    ...(gate?.findings ?? [])
+    ...(gate?.findings ?? []),
+    ...(imports === undefined ? [] : importLaunchFindings(project, imports))
   ]);
 
   // A check that could not run is reported as unchecked, never as passed.
-  const checks: VerificationCheck[] =
-    gate === undefined
-      ? [
-          { id: "content", label: "Built pages carry the content the export records", checked: true },
-          ...BUILD_CHECKS.map((check) => ({
-            id: check.id,
-            label: check.label,
-            checked: false,
-            reason: "This check reads the built site on disk; a crawl report does not carry it."
-          })),
-          {
-            id: "delivery",
-            label: "Delivered responses match the plan",
-            checked: delivery !== undefined,
-            ...(delivery === undefined ? { reason: "No saved SSRWire audit was supplied." } : {})
-          }
-        ]
-      : gate.checks.map((check) =>
-          check.id === "delivery"
-            ? {
-                ...check,
-                checked: delivery !== undefined,
-                ...(delivery === undefined ? { reason: "No saved SSRWire audit was supplied." } : {})
-              }
-            : check
-        );
+  const checks: VerificationCheck[] = [
+    ...contentChecks(gate, hasContentSource, delivery !== undefined),
+    {
+      id: "import",
+      label: "Imported records match the plan",
+      checked: imports !== undefined,
+      ...(imports === undefined ? { reason: "No import report was supplied." } : {})
+    }
+  ];
 
   return {
     observed: kind,
@@ -229,9 +233,67 @@ export async function verifySite(
       checks.filter((check) => !check.checked).length
     ),
     ...(delivery === undefined ? {} : { delivery }),
+    ...(imports === undefined ? {} : { imports }),
     launch,
     checks
   };
+}
+
+/**
+ * The content and build checks. A built site on disk can take all of them; a
+ * crawl report can only take the content check, and says why for the rest.
+ */
+function contentChecks(gate: BuildGate | undefined, hasContentSource: boolean, hasDelivery: boolean): readonly VerificationCheck[] {
+  if (gate !== undefined) {
+    return gate.checks.map((check) =>
+      check.id === "delivery"
+        ? {
+            ...check,
+            checked: hasDelivery,
+            ...(hasDelivery ? {} : { reason: "No saved SSRWire audit was supplied." })
+          }
+        : check
+    );
+  }
+
+  if (hasContentSource) {
+    return [
+      { id: "content", label: "Built pages carry the content the export records", checked: true },
+      ...BUILD_CHECKS.map((check) => ({
+        id: check.id,
+        label: check.label,
+        checked: false,
+        reason: "This check reads the built site on disk; a crawl report does not carry it."
+      })),
+      {
+        id: "delivery",
+        label: "Delivered responses match the plan",
+        checked: hasDelivery,
+        ...(hasDelivery ? {} : { reason: "No saved SSRWire audit was supplied." })
+      }
+    ];
+  }
+
+  return [
+    {
+      id: "content",
+      label: "Built pages carry the content the export records",
+      checked: false,
+      reason: "No build or crawl report was supplied."
+    },
+    ...BUILD_CHECKS.map((check) => ({
+      id: check.id,
+      label: check.label,
+      checked: false,
+      reason: "This check reads the built site on disk; no build was supplied."
+    })),
+    {
+      id: "delivery",
+      label: "Delivered responses match the plan",
+      checked: hasDelivery,
+      ...(hasDelivery ? {} : { reason: "No saved SSRWire audit was supplied." })
+    }
+  ];
 }
 
 /** Blockers first, so a gate reads as a list of what stops a launch. */

@@ -3,15 +3,16 @@
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertTargetEnabled, targetAvailability } from "./adapters.js";
+import { assertTargetEnabled, generateForTarget, targetAvailability } from "./adapters.js";
+import type { DestinationGenerateOptions } from "./adapters.js";
 import { defaultMigrationConfigFileName, loadMigrationConfig } from "./config.js";
 import type { LoadedMigrationConfig } from "./config.js";
 import { linkRewrites, parseWxr, sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
-import { generateAstroProject } from "./generate.js";
 import { coverageEntryRecords, mergeLiveUrlSources, parseLiveUrlSource } from "./live-urls.js";
 import { applyMediaDelivery, mediaDeliveryRecord, planMediaDelivery } from "./media.js";
 import { redirectRuleFiles } from "./redirect-rules.js";
 import { writeReport } from "./report.js";
+import { SUPPORTED_TARGETS, isOutputTarget } from "./targets.js";
 import { verifySite } from "./verify.js";
 import { packageVersion } from "./version.js";
 import type {
@@ -19,6 +20,7 @@ import type {
   DeliveryComparison,
   DeliveryEvidence,
   FailureThreshold,
+  ImportEvidence,
   LaunchFinding,
   LiveUrlSource,
   MenuItem,
@@ -47,6 +49,7 @@ interface ParsedOptions {
   readonly routelintReport?: string;
   readonly ssrwireReport?: string;
   readonly ssrwireBaseline?: string;
+  readonly importReport?: string;
   readonly configPath?: string;
   readonly uploadsDirectory?: string;
   readonly mediaBaseUrl?: string;
@@ -66,12 +69,13 @@ function usage(): string {
 
 Usage:
   wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro]
-  wp-migrate-core convert <export.xml> --out <new-site> [--target astro]
+  wp-migrate-core convert <export.xml> --out <new-site> [--target astro|payload]
   wp-migrate-core convert <export.xml> --out <new-site> --uploads <uploads-dir>
   wp-migrate-core convert <export.xml> --out <new-site> --media-base <https://cdn.example.com/uploads>
   wp-migrate-core report <export.xml> [--out migration-report.html]
   wp-migrate-core verify <export.xml> --html-dir <built-site> [--out migration-verification.json]
   wp-migrate-core verify <export.xml> --routelint-report <report.json>
+  wp-migrate-core verify <export.xml> --import-report migration-import.json
   wp-migrate-core verify <export.xml> --html-dir <built-site> --ssrwire-report <audit.json>
   wp-migrate-core verify <export.xml> --html-dir <built-site> --ssrwire-report <audit.json> --ssrwire-baseline <audit.json>
   wp-migrate-core demo [--out wp-migrate-core-demo]
@@ -106,22 +110,28 @@ Options:
   --ssrwire-baseline <file>
                         compare that audit with one taken before the migration;
                         the two audits pair up on their target ids
+  --import-report <file>
+                        read the migration-import.json a generated CMS importer
+                        wrote, and check the imported records against the plan
+                        (verify). It can stand alone, or join a build check.
   --json                print one JSON document instead of the summary
   --fail-on <severity>  fail on warning or blocker; none disables the gate (default)
 
 Targets:
-  astro  implemented
-  next   planned, not implemented
-  nuxt   planned, not implemented
+  astro    implemented, static site
+  payload  implemented, CMS bundle plus a generated importer
+  next     planned, not implemented (Payload already delivers a Next front end)
+  nuxt     planned, not implemented
+  svelte   planned, not implemented (non-priority)
 
 This is a deliberately incomplete demonstration. It does not modify WordPress.
 
 --live-urls reads a local file. Save the sitemap yourself; this tool makes no
 network requests.
 
---html-dir, --routelint-report, --ssrwire-report and --ssrwire-baseline read
-local files only. Build, crawl or audit the site first, then point the check at
-the result.
+--html-dir, --routelint-report, --ssrwire-report, --ssrwire-baseline and
+--import-report read local files only. Build, crawl, audit or import first,
+then point the check at the result.
 
 --config and --uploads read local files only. Media is never fetched: files
 come from the directory you name, or from the media host you point at.
@@ -150,6 +160,7 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
   let routelintReport: string | undefined;
   let ssrwireReport: string | undefined;
   let ssrwireBaseline: string | undefined;
+  let importReport: string | undefined;
   let configPath: string | undefined;
   let uploadsDirectory: string | undefined;
   let mediaBaseUrl: string | undefined;
@@ -208,6 +219,9 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
     } else if (value === "--ssrwire-baseline") {
       ssrwireBaseline = optionValue(value, argv[index + 1]);
       index += 1;
+    } else if (value === "--import-report") {
+      importReport = optionValue(value, argv[index + 1]);
+      index += 1;
     } else if (value === "--json") {
       json = true;
     } else if (value === "--out") {
@@ -215,8 +229,8 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
       index += 1;
     } else if (value === "--target") {
       const candidate = optionValue(value, argv[index + 1]);
-      if (candidate !== "astro" && candidate !== "next" && candidate !== "nuxt") {
-        throw new Error(`Unknown target: ${candidate}. Use astro, next, or nuxt.`);
+      if (!isOutputTarget(candidate)) {
+        throw new Error(`Unknown target: ${candidate}. Use ${SUPPORTED_TARGETS.join(", ")}.`);
       }
       target = candidate;
       index += 1;
@@ -248,14 +262,24 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
     }
     if (
       command !== "verify" &&
-      (htmlDirectory !== undefined || routelintReport !== undefined || hasDelivery)
+      (htmlDirectory !== undefined || routelintReport !== undefined || hasDelivery || importReport !== undefined)
     ) {
       throw new Error(
-        "--html-dir, --routelint-report, --ssrwire-report and --ssrwire-baseline are only supported by verify."
+        "--html-dir, --routelint-report, --ssrwire-report, --ssrwire-baseline and --import-report are only supported by verify."
       );
     }
-    if (command === "verify" && (htmlDirectory !== undefined) === (routelintReport !== undefined)) {
-      throw new Error("Verification requires one observed source: pass --html-dir or --routelint-report.");
+    if (command === "verify" && htmlDirectory !== undefined && routelintReport !== undefined) {
+      throw new Error("Verification reads one content source: pass --html-dir or --routelint-report, not both.");
+    }
+    if (
+      command === "verify" &&
+      htmlDirectory === undefined &&
+      routelintReport === undefined &&
+      importReport === undefined
+    ) {
+      throw new Error(
+        "Verification needs something to check: pass --html-dir, --routelint-report, or --import-report."
+      );
     }
     if (ssrwireBaseline !== undefined && ssrwireReport === undefined) {
       throw new Error(
@@ -278,6 +302,7 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
     ...(routelintReport === undefined ? {} : { routelintReport }),
     ...(ssrwireReport === undefined ? {} : { ssrwireReport }),
     ...(ssrwireBaseline === undefined ? {} : { ssrwireBaseline }),
+    ...(importReport === undefined ? {} : { importReport }),
     ...(configPath === undefined ? {} : { configPath }),
     ...(uploadsDirectory === undefined ? {} : { uploadsDirectory }),
     ...(mediaBaseUrl === undefined ? {} : { mediaBaseUrl }),
@@ -618,6 +643,28 @@ function outputExistsError(outputPath: string): Error {
   );
 }
 
+/** The generator options a destination understands, from the CLI flags. */
+function generateOptions(options: CliOptions): DestinationGenerateOptions {
+  return {
+    rewriteLinks: !options.keepSourceLinks,
+    ...(options.publishReady === true ? { publishReady: true } : {})
+  };
+}
+
+/** Where a target writes its output inside a `demo` directory. */
+function targetDirectoryName(target: OutputTarget): string {
+  if (target === "astro") return "astro-site";
+  if (target === "payload") return "payload-bundle";
+  return `${target}-site`;
+}
+
+/** Where a target puts delivered media, for the summary lines. */
+function mediaRootPath(target: OutputTarget, directory: string): string {
+  return target === "payload"
+    ? resolve(directory, "import", "media", "public", "wp-content", "uploads")
+    : resolve(directory, "public", "wp-content", "uploads");
+}
+
 async function prepareInspectionOutput(directory: string): Promise<void> {
   await mkdir(dirname(directory), { recursive: true });
   await assertOutputDoesNotExist(directory);
@@ -824,7 +871,7 @@ function verificationRouteRecords(verification: SiteVerification): readonly Veri
  */
 function createVerificationDocument(verification: SiteVerification): object {
   return {
-    schemaVersion: "0.8",
+    schemaVersion: "0.9",
     generator: { name: "wp-migrate-core", version: packageVersion },
     observed: { kind: verification.observed, source: verification.source },
     routes: verificationRouteRecords(verification),
@@ -838,7 +885,31 @@ function createVerificationDocument(verification: SiteVerification): object {
     ...(verification.delivery === undefined
       ? {}
       : { delivery: deliveryEvidenceRecord(verification.delivery) }),
+    ...(verification.imports === undefined ? {} : { imports: importEvidenceRecord(verification.imports) }),
     launch: launchRecord(verification.launch)
+  };
+}
+
+/** The import report as the verification artifact stores it. */
+function importEvidenceRecord(evidence: ImportEvidence): object {
+  return {
+    observed: evidence.observed,
+    source: evidence.source,
+    version: evidence.version,
+    generatedAt: evidence.generatedAt,
+    target: evidence.target,
+    summary: evidence.summary,
+    records: evidence.records.map((record) => ({
+      id: record.id,
+      sourceId: record.sourceId,
+      collection: record.collection,
+      ...(record.postType === undefined ? {} : { postType: record.postType }),
+      ...(record.route === undefined ? {} : { route: record.route }),
+      ...(record.title === undefined ? {} : { title: record.title }),
+      action: record.action,
+      ...(record.reason === undefined ? {} : { reason: record.reason }),
+      ...(record.unresolved.length === 0 ? {} : { unresolved: record.unresolved })
+    }))
   };
 }
 
@@ -951,7 +1022,27 @@ function verificationMarker(status: VerificationStatus): string {
 
 function printVerification(verification: SiteVerification, output: string): void {
   const { summary } = verification;
-  const observedLabel = verification.observed === "html-directory" ? "built HTML" : "a RouteLint report";
+  const observedLabel =
+    verification.observed === "html-directory"
+      ? "built HTML"
+      : verification.observed === "routelint-report"
+        ? "a RouteLint report"
+        : "a CMS import report";
+
+  const imports = verification.imports;
+  if (verification.observed === "import-report" && imports !== undefined) {
+    console.log(`\nVerification against ${observedLabel}`);
+    console.log(`  observed: ${verification.source}`);
+    console.log(
+      `  ${imports.summary.planned} ${pluralize(imports.summary.planned, "record")} reported by the ${imports.target} importer: ` +
+        `${imports.summary.created} created, ${imports.summary.updated} updated, ` +
+        `${imports.summary.unchanged} unchanged, ${imports.summary.skipped} skipped, ${imports.summary.failed} failed`
+    );
+    printVerificationChecks(verification);
+    printVerificationLaunch(verification);
+    console.log(`\nVerification: ${output}`);
+    return;
+  }
 
   console.log(`\nVerification against ${observedLabel}`);
   console.log(`  observed: ${verification.source}`);
@@ -965,14 +1056,7 @@ function printVerification(verification: SiteVerification, output: string): void
     `  pages without a title: ${summary.withoutTitle}; pages without a heading: ${summary.withoutHeading}`
   );
 
-  const unchecked = verification.checks.filter((check) => !check.checked);
-  console.log(
-    `\nChecks taken: ${verification.checks.length - unchecked.length} of ${verification.checks.length}` +
-      `${unchecked.length === 0 ? "" : `; not checked: ${unchecked.map((check) => check.label).join("; ")}`}`
-  );
-  for (const check of unchecked) {
-    console.log(`  [NOT CHECKED] ${check.label}${check.reason === undefined ? "" : ` — ${check.reason}`}`);
-  }
+  printVerificationChecks(verification);
 
   const delivery = verification.delivery;
   if (delivery !== undefined) {
@@ -1021,18 +1105,42 @@ function printVerification(verification: SiteVerification, output: string): void
     }
   }
 
-  if (verification.launch.length > 0) {
-    console.log("\nPublishing findings");
-    for (const finding of verification.launch) {
-      const marker = finding.severity === "blocker" ? "BLOCKED" : "REVIEW";
-      const routes = finding.routes;
-      const label = finding.route ??
-        (routes === undefined ? "site-wide" : `${routes.length} ${pluralize(routes.length, "route")}`);
-      console.log(`  [${marker}] ${label}: ${finding.title} — ${finding.message}`);
-    }
+  if (imports !== undefined) {
+    console.log(`\nCMS import evidence from ${imports.source}`);
+    console.log(
+      `  ${imports.summary.planned} ${pluralize(imports.summary.planned, "record")} reported by the ${imports.target} importer: ` +
+        `${imports.summary.created} created, ${imports.summary.updated} updated, ` +
+        `${imports.summary.unchanged} unchanged, ${imports.summary.skipped} skipped, ${imports.summary.failed} failed`
+    );
   }
 
+  printVerificationLaunch(verification);
+
   console.log(`\nVerification: ${output}`);
+}
+
+function printVerificationChecks(verification: SiteVerification): void {
+  const unchecked = verification.checks.filter((check) => !check.checked);
+  console.log(
+    `\nChecks taken: ${verification.checks.length - unchecked.length} of ${verification.checks.length}` +
+      `${unchecked.length === 0 ? "" : `; not checked: ${unchecked.map((check) => check.label).join("; ")}`}`
+  );
+  for (const check of unchecked) {
+    console.log(`  [NOT CHECKED] ${check.label}${check.reason === undefined ? "" : ` — ${check.reason}`}`);
+  }
+}
+
+function printVerificationLaunch(verification: SiteVerification): void {
+  if (verification.launch.length === 0) return;
+
+  console.log("\nPublishing findings");
+  for (const finding of verification.launch) {
+    const marker = finding.severity === "blocker" ? "BLOCKED" : "REVIEW";
+    const routes = finding.routes;
+    const label =
+      finding.route ?? (routes === undefined ? "site-wide" : `${routes.length} ${pluralize(routes.length, "route")}`);
+    console.log(`  [${marker}] ${label}: ${finding.title} — ${finding.message}`);
+  }
 }
 
 function finishVerification(verification: SiteVerification, options: CliOptions, output: string): void {
@@ -1115,7 +1223,6 @@ async function run(): Promise<void> {
   const config = loaded?.config;
 
   if (options.command === "demo") {
-    assertTargetEnabled(options.target);
     const fixture = inputPath as string;
     // The demo also shows the coverage check, unless the caller supplied their own URLs.
     const demoSitemap = fileURLToPath(new URL("../../fixtures/demo-sitemap.xml", import.meta.url));
@@ -1130,12 +1237,10 @@ async function run(): Promise<void> {
     const project = await deliverProjectMedia(inspected, { ...options, ...(await demoMediaOptions(options, config)) }, config);
     const output = resolve(options.output ?? "wp-migrate-core-demo");
     const plan = await inspect(project, resolve(output, "migration-plan"));
-    const site = resolve(output, "astro-site");
+    const site = resolve(output, targetDirectoryName(options.target));
     const ruleFiles = redirectRuleFiles(project);
-    await generateAstroProject(project, site, {
-      rewriteLinks: !options.keepSourceLinks,
-      ...(options.publishReady === true ? { publishReady: true } : {})
-    });
+    assertTargetEnabled(options.target);
+    await generateForTarget(options.target, project, site, generateOptions(options));
     await writeReport(project, resolve(site, "migration", "report.html"));
     finishCommand(project, options, {
       command: "demo",
@@ -1145,20 +1250,20 @@ async function run(): Promise<void> {
         site,
         ...((project.media.delivery?.copies.length ?? 0) === 0
           ? {}
-          : { mediaCopies: resolve(site, "public", "wp-content", "uploads") }),
+          : { mediaCopies: mediaRootPath(options.target, site) }),
         ...(ruleFiles.length === 0 ? {} : { redirectRules: resolve(site, "migration", "redirect-rules") })
       },
       humanLines: [
         `\nPlan: ${plan.plan}`,
         `Report: ${plan.report}`,
-        `Astro demo: ${site}`,
+        `${targetAvailability[options.target].label} demo: ${site}`,
         `Media inventory: ${resolve(site, "migration", "media.json")}`,
         `URL and redirect map: ${resolve(site, "migration", "redirects.json")}`,
         `Link inventory: ${resolve(site, "migration", "links.json")}`,
         `Coverage check: ${resolve(site, "migration", "coverage.json")}`,
         ...((project.media.delivery?.copies.length ?? 0) === 0
           ? []
-          : [`Media copies: ${resolve(site, "public", "wp-content", "uploads")}`]),
+          : [`Media copies: ${mediaRootPath(options.target, site)}`]),
         ...(ruleFiles.length === 0 ? [] : [`Redirect rules: ${resolve(site, "migration", "redirect-rules")}`])
       ]
     });
@@ -1199,10 +1304,7 @@ async function run(): Promise<void> {
     const output = resolve(options.output);
     const delivered = await deliverProjectMedia(project, options, config);
     const ruleFiles = redirectRuleFiles(delivered);
-    await generateAstroProject(delivered, output, {
-      rewriteLinks: !options.keepSourceLinks,
-      ...(options.publishReady === true ? { publishReady: true } : {})
-    });
+    await generateForTarget(options.target, delivered, output, generateOptions(options));
     await writeReport(delivered, resolve(output, "migration", "report.html"));
     finishCommand(delivered, options, {
       command: "convert",
@@ -1213,7 +1315,7 @@ async function run(): Promise<void> {
         media: resolve(output, "migration", "media.json"),
         ...((delivered.media.delivery?.copies.length ?? 0) === 0
           ? {}
-          : { mediaCopies: resolve(output, "public", "wp-content", "uploads") }),
+          : { mediaCopies: mediaRootPath(options.target, output) }),
         redirects: resolve(output, "migration", "redirects.json"),
         links: resolve(output, "migration", "links.json"),
         coverage: resolve(output, "migration", "coverage.json"),
@@ -1221,11 +1323,13 @@ async function run(): Promise<void> {
         report: resolve(output, "migration", "report.html")
       },
       humanLines: [
-        `\nGenerated ${targetAvailability[options.target].label} project: ${output}`,
+        `\nGenerated ${targetAvailability[options.target].label} ${
+          targetAvailability[options.target].kind === "cms" ? "bundle" : "project"
+        }: ${output}`,
         `Media inventory: ${resolve(output, "migration", "media.json")}`,
         ...((delivered.media.delivery?.copies.length ?? 0) === 0
           ? []
-          : [`Media copies: ${resolve(output, "public", "wp-content", "uploads")}`]),
+          : [`Media copies: ${mediaRootPath(options.target, output)}`]),
         `URL and redirect map: ${resolve(output, "migration", "redirects.json")}`,
         `Link inventory: ${resolve(output, "migration", "links.json")}`,
         `Coverage check: ${resolve(output, "migration", "coverage.json")}`,
@@ -1241,7 +1345,8 @@ async function run(): Promise<void> {
       ...(options.htmlDirectory === undefined ? {} : { htmlDirectory: options.htmlDirectory }),
       ...(options.routelintReport === undefined ? {} : { routelintReportPath: options.routelintReport }),
       ...(options.ssrwireReport === undefined ? {} : { ssrwireReportPath: options.ssrwireReport }),
-      ...(options.ssrwireBaseline === undefined ? {} : { ssrwireBaselinePath: options.ssrwireBaseline })
+      ...(options.ssrwireBaseline === undefined ? {} : { ssrwireBaselinePath: options.ssrwireBaseline }),
+      ...(options.importReport === undefined ? {} : { importReportPath: options.importReport })
     });
     const output = resolve(options.output ?? "migration-verification.json");
     await writeNewFile(output, `${JSON.stringify(createVerificationDocument(verification), null, 2)}\n`);

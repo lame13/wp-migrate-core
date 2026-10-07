@@ -1,13 +1,20 @@
-import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
-import { dirname, parse, resolve } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
 import {
+  renderArchivesArtifact,
+  renderCoverageArtifact,
+  renderIssuesArtifact,
+  renderLinksArtifact,
+  renderMediaArtifact,
+  renderMenusArtifact,
+  renderRedirectsArtifact
+} from "./artifacts.js";
+import {
   contentCollectionName,
-  linkRewrites,
   mediaPath,
   normalizeRoute,
   readHtmlAttribute,
-  sanitizeLinkHref,
   sanitizeSourceUrl
 } from "./core.js";
 import {
@@ -17,9 +24,17 @@ import {
   deliveryCheckTargets,
   siteOrigin
 } from "./delivery.js";
-import { coverageEntryRecords } from "./live-urls.js";
-import { deliverMedia, mediaDeliveryRecord } from "./media.js";
+import { deliverMedia } from "./media.js";
 import { redirectRuleFiles } from "./redirect-rules.js";
+import {
+  escapeHtml,
+  escapeHtmlAttribute,
+  prepareOutputDirectory,
+  renderJson,
+  safeFileStem,
+  writeNewFile
+} from "./render.js";
+import { targetRecords } from "./targets.js";
 import type {
   ArchivePage,
   ContentRecord,
@@ -103,13 +118,13 @@ export async function generateAstroProject(
     ["src/layouts/Layout.astro", renderLayout(project, options.publishReady === true)],
     ["src/styles/global.css", renderStyles()],
     ["public/robots.txt", renderRobotsTxt(project, options.publishReady === true)],
-    ["migration/issues.json", renderIssues(project.issues)],
-    ["migration/media.json", renderMedia(project)],
-    ["migration/redirects.json", renderRedirects(project)],
-    ["migration/links.json", renderLinks(project)],
-    ["migration/coverage.json", renderCoverage(project)],
-    ["migration/archives.json", renderArchives(project)],
-    ["migration/menus.json", renderMenus(project)],
+    ["migration/issues.json", renderIssuesArtifact(project.issues)],
+    ["migration/media.json", renderMediaArtifact(project, "astro")],
+    ["migration/redirects.json", renderRedirectsArtifact(project, "astro")],
+    ["migration/links.json", renderLinksArtifact(project, "astro")],
+    ["migration/coverage.json", renderCoverageArtifact(project, "astro")],
+    ["migration/archives.json", renderArchivesArtifact(project, "astro")],
+    ["migration/menus.json", renderMenusArtifact(project, "astro")],
     ["migration/manifest.json", renderManifest(project, pages)],
     ["README.md", renderReadme(project, options.rewriteLinks !== false)]
   ]);
@@ -151,38 +166,6 @@ export async function generateAstroProject(
   for (const [relativePath, contents] of files) {
     await writeNewFile(outputDirectory, relativePath, contents);
   }
-}
-
-async function prepareOutputDirectory(outDir: string): Promise<string> {
-  if (outDir.trim().length === 0) {
-    throw new Error("An explicit output directory is required.");
-  }
-
-  const outputDirectory = resolve(outDir);
-  const root = parse(outputDirectory).root;
-
-  if (outputDirectory === root || outputDirectory === resolve(process.cwd())) {
-    throw new Error(`Refusing to generate into unsafe output directory: ${outputDirectory}`);
-  }
-
-  try {
-    const details = await stat(outputDirectory);
-    if (!details.isDirectory()) {
-      throw new Error(`Output path exists and is not a directory: ${outputDirectory}`);
-    }
-
-    const existing = await readdir(outputDirectory);
-    if (existing.length > 0) {
-      throw new Error(`Output directory is not empty: ${outputDirectory}`);
-    }
-  } catch (error) {
-    if (!isNodeErrorCode(error, "ENOENT")) {
-      throw error;
-    }
-    await mkdir(outputDirectory, { recursive: true });
-  }
-
-  return outputDirectory;
 }
 
 /** Raw href -> generated href, per content record. */
@@ -698,69 +681,6 @@ function renderMenuItem(item: MenuItem): string {
   return `  <li>${target}${children}</li>`;
 }
 
-/** The archives this handoff generates, with the subject each one lists. */
-function renderArchives(project: MigrationProject): string {
-  return renderJson({
-    schemaVersion: "0.8",
-    generator: {
-      name: GENERATOR_NAME,
-      version: packageVersion,
-      target: "astro"
-    },
-    summary: project.archives.summary,
-    pages: project.archives.pages.map((page) => ({
-      id: page.id,
-      kind: page.kind,
-      title: page.title,
-      route: page.route,
-      subject: page.subject,
-      ...(page.sourceUrl === undefined ? {} : { sourceUrl: page.sourceUrl }),
-      routeSource: page.routeSource,
-      paginated: page.paginated,
-      sourceIds: page.sourceIds
-    })),
-    feeds: project.archives.feeds.map((feed) => ({
-      id: feed.id,
-      path: feed.path,
-      ...(feed.sourcePath === undefined ? {} : { sourcePath: feed.sourcePath }),
-      title: feed.title,
-      sourceIds: feed.sourceIds
-    }))
-  });
-}
-
-/** The menus WordPress served, so the new theme can rebuild them deliberately. */
-function renderMenus(project: MigrationProject): string {
-  return renderJson({
-    schemaVersion: "0.8",
-    generator: {
-      name: GENERATOR_NAME,
-      version: packageVersion,
-      target: "astro"
-    },
-    summary: project.menus.summary,
-    trees: project.menus.trees.map((menu) => ({
-      id: menu.id,
-      name: menu.name,
-      slug: menu.slug,
-      items: menu.items.map(menuItemRecord)
-    }))
-  });
-}
-
-function menuItemRecord(item: MenuItem): object {
-  return {
-    id: item.id,
-    label: item.label,
-    kind: item.kind,
-    ...(item.url === undefined ? {} : { url: item.url }),
-    ...(item.targetRoute === undefined ? {} : { targetRoute: item.targetRoute }),
-    ...(item.parentId === undefined ? {} : { parentId: item.parentId }),
-    ...(item.reason === undefined ? {} : { reason: item.reason }),
-    children: item.children.map(menuItemRecord)
-  };
-}
-
 /**
  * A listing page, written as a content entry: the title, a link to every
  * record it lists, and the page links when a listing is paginated.
@@ -845,29 +765,12 @@ function rssPublicationDate(value: string | undefined): string | undefined {
   return Number.isFinite(timestamp.getTime()) ? timestamp.toUTCString() : undefined;
 }
 
-function renderIssues(issues: readonly MigrationIssue[]): string {
-  return renderJson(
-    issues.map((issue) => ({
-      id: issue.id,
-      severity: issue.severity,
-      code: issue.code,
-      sourceId: issue.sourceId,
-      ...(issue.route === undefined ? {} : { route: issue.route }),
-      ...(issue.nodeId === undefined ? {} : { nodeId: issue.nodeId }),
-      ...(issue.ignored === undefined ? {} : { ignored: issue.ignored }),
-      title: issue.title,
-      message: issue.message,
-      requiredAction: issue.requiredAction
-    }))
-  );
-}
-
 function renderManifest(project: MigrationProject, pages: readonly GeneratedPage[]): string {
   const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   const records = pages.filter((page): page is GeneratedRecord => page.kind === "content");
   const listings = pages.filter((page): page is GeneratedListing => page.kind === "listing");
   return renderJson({
-    schemaVersion: "0.8",
+    schemaVersion: "0.9",
     generator: {
       name: GENERATOR_NAME,
       version: packageVersion,
@@ -878,11 +781,7 @@ function renderManifest(project: MigrationProject, pages: readonly GeneratedPage
       ...(siteUrl === undefined ? {} : { url: siteUrl })
     },
     summary: project.summary,
-    targets: {
-      astro: { enabled: true, label: "Astro" },
-      next: { enabled: false, label: "Next.js" },
-      nuxt: { enabled: false, label: "Nuxt" }
-    },
+    targets: targetRecords(),
     media: {
       file: "migration/media.json",
       summary: project.media.summary,
@@ -934,138 +833,6 @@ function renderManifest(project: MigrationProject, pages: readonly GeneratedPage
       sourceUrl: sanitizeSourceUrl(sourceUrl) ?? route,
       outputFile: `src/content/${collection}/${fileName}`
     }))
-  });
-}
-
-/**
- * The media inventory is an index of what the export already carries. It is
- * not a download, a copy, or a rewrite: every entry still needs a human to
- * import, describe and verify the asset.
- */
-function renderMedia(project: MigrationProject): string {
-  return renderJson({
-    schemaVersion: "0.7",
-    generator: {
-      name: GENERATOR_NAME,
-      version: packageVersion,
-      target: "astro"
-    },
-    summary: project.media.summary,
-    ...(project.media.delivery === undefined
-      ? {}
-      : { delivery: mediaDeliveryRecord(project.media.delivery) }),
-    assets: project.media.assets.map((asset) => ({
-      id: asset.id,
-      wordpressId: asset.wordpressId,
-      ...(asset.parentId === undefined ? {} : { parentId: asset.parentId }),
-      title: asset.title,
-      ...(asset.path === undefined ? {} : { path: asset.path }),
-      ...(asset.url === undefined ? {} : { url: asset.url }),
-      ...(asset.file === undefined ? {} : { file: asset.file }),
-      ...(asset.mimeType === undefined ? {} : { mimeType: asset.mimeType }),
-      ...(asset.altText === undefined ? {} : { altText: asset.altText }),
-      ...(asset.width === undefined ? {} : { width: asset.width }),
-      ...(asset.height === undefined ? {} : { height: asset.height }),
-      referenceCount: asset.referenceCount,
-      referencedBy: asset.referencedBy,
-      ...(asset.delivery === undefined ? {} : { delivery: asset.delivery })
-    })),
-    references: project.media.references.map((reference) => ({
-      id: reference.id,
-      sourceId: reference.sourceId,
-      ...(reference.route === undefined ? {} : { route: reference.route }),
-      ...(reference.nodeId === undefined ? {} : { nodeId: reference.nodeId }),
-      kind: reference.kind,
-      ...(reference.path === undefined ? {} : { path: reference.path }),
-      ...(reference.url === undefined ? {} : { url: reference.url }),
-      ...(reference.altText === undefined ? {} : { altText: reference.altText }),
-      ...(reference.assetId === undefined ? {} : { assetId: reference.assetId }),
-      status: reference.status
-    }))
-  });
-}
-
-/**
- * The redirect list is what makes the handoff auditable against the live site:
- * every source URL is either served at the same path, given a rule, or
- * explicitly left without a target.
- */
-function renderRedirects(project: MigrationProject): string {
-  return renderJson({
-    schemaVersion: "0.2",
-    generator: {
-      name: GENERATOR_NAME,
-      version: packageVersion,
-      target: "astro"
-    },
-    summary: project.routes.summary,
-    redirects: project.routes.redirects.map((redirect) => ({
-      id: redirect.id,
-      ...(redirect.sourceId === undefined ? {} : { sourceId: redirect.sourceId }),
-      sourcePath: redirect.sourcePath,
-      targetRoute: redirect.targetRoute,
-      reason: redirect.reason
-    })),
-    urls: project.routes.entries.map((entry) => ({
-      id: entry.id,
-      ...(entry.sourceId === undefined ? {} : { sourceId: entry.sourceId }),
-      ...(entry.sourceUrl === undefined ? {} : { sourceUrl: entry.sourceUrl }),
-      ...(entry.sourcePath === undefined ? {} : { sourcePath: entry.sourcePath }),
-      ...(entry.targetRoute === undefined ? {} : { targetRoute: entry.targetRoute }),
-      status: entry.status,
-      reason: entry.reason
-    }))
-  });
-}
-
-/**
- * The link inventory is the answer to "what will not work after this move":
- * every same-site link with the route it resolves to, the hrefs the handoff
- * proposes to rewrite, and every target this export cannot vouch for.
- */
-function renderLinks(project: MigrationProject): string {
-  return renderJson({
-    schemaVersion: "0.3",
-    generator: {
-      name: GENERATOR_NAME,
-      version: packageVersion,
-      target: "astro"
-    },
-    summary: project.links.summary,
-    rewrites: linkRewrites(project.links),
-    references: project.links.references.map((reference) => ({
-      id: reference.id,
-      sourceId: reference.sourceId,
-      ...(reference.route === undefined ? {} : { route: reference.route }),
-      ...(reference.nodeId === undefined ? {} : { nodeId: reference.nodeId }),
-      kind: reference.kind,
-      href: sanitizeLinkHref(reference.href),
-      ...(reference.path === undefined ? {} : { path: reference.path }),
-      ...(reference.fragment === undefined ? {} : { fragment: reference.fragment }),
-      ...(reference.host === undefined ? {} : { host: reference.host }),
-      ...(reference.targetRoute === undefined ? {} : { targetRoute: reference.targetRoute }),
-      status: reference.status,
-      reason: reference.reason
-    }))
-  });
-}
-
-/**
- * The coverage inventory is the result of comparing the live URLs the caller
- * supplied with the routes and rules this plan proposes. Nothing was fetched:
- * a URL is compared by path, and `checked: false` means no live URL source was
- * supplied for this run.
- */
-function renderCoverage(project: MigrationProject): string {
-  return renderJson({
-    schemaVersion: "0.4",
-    generator: {
-      name: GENERATOR_NAME,
-      version: packageVersion,
-      target: "astro"
-    },
-    summary: project.coverage.summary,
-    entries: coverageEntryRecords(project.coverage)
   });
 }
 
@@ -1543,17 +1310,6 @@ function getNestedString(
   return typeof nested === "string" && nested.length > 0 ? nested : undefined;
 }
 
-function safeFileStem(value: string): string {
-  const stem = value
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-  return stem || "migrated-content";
-}
-
 function yamlString(value: string): string {
   return JSON.stringify(value);
 }
@@ -1577,32 +1333,6 @@ function sourceUrlFor(project: MigrationProject, record: ContentRecord, route: s
     }
   }
   return candidate;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function escapeHtmlAttribute(value: string): string {
-  return escapeHtml(value);
-}
-
-function renderJson(value: unknown): string {
-  return `${JSON.stringify(value, null, 2)}\n`;
-}
-
-async function writeNewFile(root: string, relativePath: string, contents: string): Promise<void> {
-  const destination = resolve(root, relativePath);
-  if (!destination.startsWith(`${root}/`)) {
-    throw new Error(`Refusing to write outside output directory: ${relativePath}`);
-  }
-  await mkdir(dirname(destination), { recursive: true });
-  await writeFile(destination, contents, { encoding: "utf8", flag: "wx" });
 }
 
 function isNodeErrorCode(error: unknown, code: string): boolean {

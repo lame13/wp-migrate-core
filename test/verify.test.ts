@@ -435,9 +435,9 @@ test("verification-only CLI flags cannot be silently ignored by another command"
   assert.equal(result.status, 1);
   assert.match(result.stderr, /only.*verify/);
   const missing = runCli(["verify", "missing.xml"], process.cwd());
-  assert.match(missing.stderr, /one observed source/);
+  assert.match(missing.stderr, /needs something to check/);
   const both = runCli(["verify", "missing.xml", "--html-dir", "dist", "--routelint-report", "report.json"], process.cwd());
-  assert.match(both.stderr, /one observed source/);
+  assert.match(both.stderr, /one content source/);
 });
 
 test("verify reads content evidence from a saved RouteLint report", async (context) => {
@@ -477,7 +477,7 @@ test("verify reads content evidence from a saved RouteLint report", async (conte
   );
   await assert.rejects(
     () => verifySite(fixtureProject(), { htmlDirectory: workspace, routelintReportPath: reportPath }),
-    /one observed source at a time/
+    /one content source at a time/
   );
 });
 
@@ -498,7 +498,7 @@ test("the CLI writes a verification artefact and gates on missing content", asyn
 
   const document = JSON.parse(gated.stdout);
   assert.equal(document.command, "verify");
-  assert.equal(document.schemaVersion, "0.8");
+  assert.equal(document.schemaVersion, "0.9");
   assert.equal(document.failed, true);
   assert.equal(document.summary.missingContent, 1);
   assert.equal(document.outputs.verification, output);
@@ -733,11 +733,11 @@ test("delivery flags are verify-only and a baseline needs a report", async (cont
     workspace
   );
   assert.equal(bothSources.status, 1);
-  assert.match(bothSources.stderr, /one observed source/);
+  assert.match(bothSources.stderr, /one content source/);
 
   const empty = runCli(["verify", "export.xml", "--ssrwire-report", "audit.json"], workspace);
   assert.equal(empty.status, 1);
-  assert.match(empty.stderr, /one observed source/);
+  assert.match(empty.stderr, /needs something to check/);
 
   const missing = runCli(
     ["verify", "export.xml", "--html-dir", ".", "--ssrwire-report", "missing.json"],

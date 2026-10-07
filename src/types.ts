@@ -1,4 +1,16 @@
-export type OutputTarget = "astro" | "next" | "nuxt";
+/**
+ * A destination this tool can write. `astro` and `payload` are implemented;
+ * `next`, `nuxt` and `svelte` are declared so the manifest, the report and the
+ * CLI can say a target is planned rather than pretend it does not exist.
+ */
+export type OutputTarget = "astro" | "payload" | "next" | "nuxt" | "svelte";
+
+/**
+ * What kind of destination a target is. A static-site target writes pages; a
+ * CMS target writes collections, a content and media drop, and an importer
+ * that the caller runs inside the destination project.
+ */
+export type DestinationKind = "static-site" | "cms";
 
 /**
  * `page` and `post` are the types this tool has always handled; any other slug
@@ -1017,7 +1029,11 @@ export type LaunchFindingCode =
   | "LINK_TARGET_MISSING_IN_BUILD"
   | "CANONICAL_MISSING"
   | "ROBOTS_BLOCKED"
-  | "SITEMAP_INCOMPLETE";
+  | "SITEMAP_INCOMPLETE"
+  | "IMPORT_RECORD_MISSING"
+  | "IMPORT_RECORD_FAILED"
+  | "IMPORT_RECORD_SKIPPED"
+  | "IMPORT_RECORD_UNKNOWN";
 
 /** Every check the launch gate can take, and whether this run took it. */
 export type VerificationCheckId =
@@ -1027,7 +1043,8 @@ export type VerificationCheckId =
   | "canonical"
   | "robots"
   | "sitemap"
-  | "delivery";
+  | "delivery"
+  | "import";
 
 /**
  * One check in the launch gate. A check that could not run says so: reading
@@ -1041,7 +1058,7 @@ export interface VerificationCheck {
 }
 
 /** The local build or saved report a publishing finding was read from. */
-export type LaunchEvidenceSource = "html-directory" | "routelint-report" | "ssrwire-report";
+export type LaunchEvidenceSource = "html-directory" | "routelint-report" | "ssrwire-report" | "import-report";
 
 export interface LaunchFinding {
   readonly id: string;
@@ -1070,7 +1087,7 @@ export interface LaunchFinding {
 }
 
 export interface SiteVerification {
-  readonly observed: "html-directory" | "routelint-report";
+  readonly observed: "html-directory" | "routelint-report" | "import-report";
   /** The local directory or report file the comparison read. */
   readonly source: string;
   readonly routes: readonly VerifiedRoute[];
@@ -1079,6 +1096,60 @@ export interface SiteVerification {
   readonly checks: readonly VerificationCheck[];
   /** Delivery evidence from a saved SSRWire report, when one was supplied. */
   readonly delivery?: DeliveryEvidence;
+  /** Evidence from a generated CMS importer's report, when one was supplied. */
+  readonly imports?: ImportEvidence;
   /** Findings that gate publishing rather than content fidelity. */
   readonly launch: readonly LaunchFinding[];
+}
+
+/**
+ * What the generated importer did with one record. `unchanged` means the drop
+ * and the CMS copy agreed; `skipped` means the CMS copy was edited after the
+ * last import, so the importer left it alone and said so.
+ */
+export type ImportAction = "created" | "updated" | "unchanged" | "skipped" | "failed";
+
+/** One record a CMS importer reported on, keyed by its stable source id. */
+export interface ImportRecord {
+  readonly id: string;
+  /** The stable source id, such as `wp:post:20`. */
+  readonly sourceId: string;
+  readonly collection: string;
+  readonly postType?: string;
+  readonly route?: string;
+  readonly title?: string;
+  readonly action: ImportAction;
+  /** Why the importer skipped or failed a record, in its own words. */
+  readonly reason?: string;
+  /** Reference markers the importer could not resolve against an earlier pass. */
+  readonly unresolved: readonly string[];
+}
+
+export interface ImportSummary {
+  readonly planned: number;
+  readonly created: number;
+  readonly updated: number;
+  readonly unchanged: number;
+  readonly skipped: number;
+  readonly failed: number;
+  /** Reference markers no created record accounted for. */
+  readonly unresolved: number;
+}
+
+/**
+ * Evidence from the importer a CMS bundle generates. It answers the question a
+ * content check cannot: did the records arrive in the CMS, and what still
+ * needs a human there. The report is keyed by the same stable source ids the
+ * manifest uses, so the plan and the import line up without guessing.
+ */
+export interface ImportEvidence {
+  readonly observed: "import-report";
+  /** The local import report file this evidence was read from. */
+  readonly source: string;
+  readonly version: string;
+  readonly generatedAt: string;
+  /** The destination the report came from, such as `payload`. */
+  readonly target: string;
+  readonly records: readonly ImportRecord[];
+  readonly summary: ImportSummary;
 }

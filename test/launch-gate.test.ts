@@ -158,7 +158,7 @@ test("the gate reports canonical URLs and sitemap coverage", async (context) => 
     ready.launch.map((finding) => finding.code),
     []
   );
-  assert.ok(ready.checks.every((check) => check.id === "delivery" || check.checked));
+  assert.ok(ready.checks.every((check) => check.id === "delivery" || check.id === "import" || check.checked));
 
   // A canonical that points at another page is a different problem, named.
   await writeBuiltPage(
@@ -275,7 +275,7 @@ test("the gate says which checks it could not take instead of passing them", asy
   const unchecked = verification.checks.filter((check) => !check.checked);
   assert.deepEqual(
     unchecked.map((check) => check.id).sort(),
-    ["canonical", "delivery", "links", "media", "robots", "sitemap"]
+    ["canonical", "delivery", "import", "links", "media", "robots", "sitemap"]
   );
   assert.ok(unchecked.every((check) => (check.reason ?? "").length > 0));
   assert.equal(verification.summary.uncheckedChecks, unchecked.length);
