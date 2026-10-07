@@ -98,7 +98,17 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
     <wp:post_name>verified</wp:post_name><content:encoded><![CDATA[<p>${verificationText}</p>]]></content:encoded>
     </item></channel></rss>`);
   await mkdir(join(consumer, "built"));
-  await writeFile(join(consumer, "built/verified.html"), `<p>${verificationText}</p>`);
+  // A build that is ready to launch: content, a canonical URL, a sitemap and
+  // a robots.txt that allows crawling.
+  await writeFile(
+    join(consumer, "built/verified.html"),
+    `<html><head><link rel="canonical" href="https://example.invalid/verified/" /><title>Verified</title></head><body><h1>Verified</h1><p>${verificationText}</p></body></html>`
+  );
+  await writeFile(
+    join(consumer, "built/sitemap.xml"),
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset><url><loc>https://example.invalid/verified/</loc></url></urlset>\n`
+  );
+  await writeFile(join(consumer, "built/robots.txt"), "User-agent: *\nAllow: /\n");
   const verified = JSON.parse(runNpm([
     "exec", "--offline", "--", "wp-migrate-core", "verify", "verify.xml", "--html-dir", "built",
     "--json", "--fail-on", "warning"
@@ -106,9 +116,18 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   assert.equal(verified.failed, false);
   assert.equal(verified.summary.verified, 1);
   const verificationFile = JSON.parse(await readFile(join(consumer, "migration-verification.json"), "utf8"));
-  assert.equal(verificationFile.schemaVersion, "0.6");
+  assert.equal(verificationFile.schemaVersion, "0.8");
   assert.equal(verificationFile.generator.version, metadata.version);
   assert.deepEqual(verificationFile.summary, verified.summary);
+  assert.deepEqual(
+    verificationFile.checks.filter((check) => check.checked).map((check) => check.id),
+    ["content", "media", "links", "canonical", "robots", "sitemap"]
+  );
+  assert.deepEqual(
+    verificationFile.checks.filter((check) => !check.checked).map((check) => check.id),
+    ["delivery"],
+    "no SSRWire audit was supplied, and the gate says so instead of passing it"
+  );
 
   runNpm(["exec", "--offline", "--", "wp-migrate-core", "demo", "--out", "demo output"], consumer);
   const output = join(consumer, "demo output");
@@ -136,7 +155,7 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   assert.equal(redirects.summary.generated, manifest.redirects.summary.generated);
   assert.equal(links.schemaVersion, "0.3");
   assert.equal(coverage.schemaVersion, "0.4");
-  assert.equal(manifest.schemaVersion, "0.7");
+  assert.equal(manifest.schemaVersion, "0.8");
   assert.equal(links.rewrites.length, manifest.links.summary.needsRewrite);
   assert.equal(manifest.media.file, "migration/media.json");
   assert.equal(manifest.redirects.file, "migration/redirects.json");
@@ -158,6 +177,26 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   const services = await readFile(join(output, "astro-site/src/content/pages/services.md"), "utf8");
   assert.match(services, /<img src="\/wp-content\/uploads\/2026\/05\/repair\.jpg"/);
   assert.doesNotMatch(services, /src="https:\/\/brightpath\.example\/wp-content/);
+  // The listings WordPress generated are part of the handoff too: the demo
+  // export carries a category and an author, and its sitemap confirms the term
+  // archive route.
+  const archives = JSON.parse(await readFile(join(output, "astro-site/migration/archives.json"), "utf8"));
+  assert.equal(archives.schemaVersion, "0.8");
+  assert.deepEqual(archives.summary, manifest.archives.summary);
+  assert.ok(
+    archives.pages.some(
+      (page) => page.kind === "taxonomy" && page.route === "/category/guides/" && page.routeSource === "live-url"
+    ),
+    "the term archive is placed where the live site serves it"
+  );
+  assert.ok(archives.pages.some((page) => page.kind === "author"));
+  const menus = JSON.parse(await readFile(join(output, "astro-site/migration/menus.json"), "utf8"));
+  assert.equal(menus.schemaVersion, "0.8");
+  assert.deepEqual(menus.summary, manifest.menus.summary);
+  const listing = await readFile(join(output, "astro-site/src/content/listings/category-guides.md"), "utf8");
+  assert.match(listing, /<a href="\/guides\/stop-a-leaking-tap\/">How to stop a leaking tap<\/a>/);
+  const collections = await readFile(join(output, "astro-site/src/content.config.ts"), "utf8");
+  assert.match(collections, /"listings": defineCollection/);
   // The upload URLs the demo sitemap lists are served once the files are
   // copied, so the coverage check stops calling them an unserved shape.
   assert.ok(
@@ -186,5 +225,31 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   assert.match(sitemap, /<loc>https:\/\/brightpath\.example\/guides\/stop-a-leaking-tap\/<\/loc>/);
   const astroConfig = await readFile(join(output, "astro-site/astro.config.mjs"), "utf8");
   assert.match(astroConfig, /site: "https:\/\/brightpath\.example\/"/);
+
+  // A custom post type, a menu and a publish-ready handoff, all through the
+  // installed executable rather than the checkout it was packed from.
+  await writeFile(join(consumer, "cpt.xml"), `<rss><channel><title>CPT site</title><link>https://cpt.invalid/</link>
+    <item><title>Home</title><link>https://cpt.invalid/</link><wp:post_id>1</wp:post_id><wp:post_type>page</wp:post_type><wp:status>publish</wp:status><wp:post_name>home</wp:post_name></item>
+    <item><title>Tap repair</title><link>https://cpt.invalid/work/tap-repair/</link><wp:post_id>20</wp:post_id><wp:post_type>portfolio</wp:post_type><wp:status>publish</wp:status><wp:post_name>tap-repair</wp:post_name></item>
+    <item><title>Home</title><wp:post_id>500</wp:post_id><wp:post_type>nav_menu_item</wp:post_type><wp:status>publish</wp:status><wp:menu_order>1</wp:menu_order><category domain="nav_menu" nicename="primary"><![CDATA[Primary]]></category><wp:postmeta><wp:meta_key>_menu_item_type</wp:meta_key><wp:meta_value>post_type</wp:meta_value></wp:postmeta><wp:postmeta><wp:meta_key>_menu_item_object</wp:meta_key><wp:meta_value>page</wp:meta_value></wp:postmeta><wp:postmeta><wp:meta_key>_menu_item_object_id</wp:meta_key><wp:meta_value>1</wp:meta_value></wp:postmeta></item>
+  </channel></rss>`);
+  runNpm(
+    ["exec", "--offline", "--", "wp-migrate-core", "convert", "cpt.xml", "--out", "cpt-site", "--publish-ready"],
+    consumer
+  );
+
+  const cptManifest = JSON.parse(await readFile(join(consumer, "cpt-site/migration/manifest.json"), "utf8"));
+  assert.ok(
+    cptManifest.types.some((entry) => entry.name === "portfolio" && entry.records === 1),
+    "a custom post type is brought across rather than dropped"
+  );
+  await readFile(join(consumer, "cpt-site/src/content/portfolios/tap-repair.md"));
+  assert.match(await readFile(join(consumer, "cpt-site/src/components/Nav.astro"), "utf8"), /set:html=\{navigation\}/);
+  assert.doesNotMatch(await readFile(join(consumer, "cpt-site/src/layouts/Layout.astro"), "utf8"), /noindex/);
+  assert.match(
+    await readFile(join(consumer, "cpt-site/public/robots.txt"), "utf8"),
+    /User-agent: \*\nAllow: \/\n\nSitemap: https:\/\/cpt\.invalid\/sitemap\.xml\n/
+  );
+
   context.diagnostic(`Verified wp-migrate-core@${metadata.version}: installed executable, ESM exports, types, content verification, bundled demo, and handoff version.`);
 });

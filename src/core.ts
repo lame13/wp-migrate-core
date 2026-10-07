@@ -1,6 +1,12 @@
 import type {
+  ArchiveKind,
+  ArchivePage,
+  ArchiveRouteSource,
+  ArchiveSummary,
   ContentRecord,
+  ContentTypeEntry,
   ConversionDisposition,
+  FeedFile,
   InspectOptions,
   LinkReference,
   LinkReferenceKind,
@@ -18,7 +24,13 @@ import type {
   MediaReferenceKind,
   MediaReferenceStatus,
   MediaSummary,
+  MenuItem,
+  MenuItemKind,
+  MenuSummary,
+  MenuTree,
+  MigrationArchives,
   MigrationConfig,
+  MigrationMenus,
   MigrationIssue,
   MigrationIssueCode,
   MigrationLinks,
@@ -175,9 +187,22 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
   const pendingRoutes: PendingRoute[] = [];
   const config = options.config;
   const includeDrafts = options.includeDrafts === true || config?.includeDrafts === true;
-  const matchedConfigKeys = { routes: new Set<string>(), exclusions: new Set<string>() };
+  const matchedConfigKeys = {
+    routes: new Set<string>(),
+    exclusions: new Set<string>(),
+    postTypes: new Set<string>()
+  };
   const channelHeader = xml.slice(0, xml.search(/<item\b/i) === -1 ? xml.length : xml.search(/<item\b/i));
   const items = readWxrItems(xml);
+  const untypedItems = items.filter((item) => item.postType === "");
+  const typePolicy = buildTypePolicy(
+    [...new Set(items.filter((item) => item.postType !== "").map((item) => item.postType))],
+    config
+  );
+  for (const name of typePolicy.keys()) {
+    matchedConfigKeys.postTypes.add(name);
+  }
+  const termRegistry = parseTermRegistry(channelHeader);
 
   // Attachments are collected first so content references can be matched
   // against them regardless of where the export places the attachment items.
@@ -188,7 +213,15 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
 
   for (const item of items) {
     const { xml: itemXml, postType } = item;
-    if (postType !== "page" && postType !== "post") {
+    const policy = typePolicy.get(postType);
+    if (policy === undefined) {
+      continue;
+    }
+    policy.sourceItems += 1;
+    // WordPress internals keep no generated route here; a type the config
+    // excluded is reported per item instead, so its live URLs still show up as
+    // a decision rather than as a surprise.
+    if (!policy.included && !policy.excludedByConfig) {
       continue;
     }
 
@@ -253,6 +286,17 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
     }
 
     const sourceId = `wp:${postType}:${wordpressId}`;
+    if (!policy.included) {
+      pendingRoutes.push({
+        id: `route:${pendingRoutes.length + 1}`,
+        sourceId,
+        sourceUrl,
+        status: "excluded",
+        reason: `${policy.reason ?? "The migration config leaves this content type out."} This item keeps no generated route.`
+      });
+      continue;
+    }
+
     const keyForms = configKeyForms(sourceUrl, sourceId);
     const exclusion = firstConfiguredEntry(config?.exclude, keyForms);
     if (exclusion !== undefined) {
@@ -300,8 +344,45 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
       code: "WXR_NO_ITEMS",
       sourceId: "project",
       title: "No eligible WordPress content found",
-      message: "The WXR input contains no posts or pages included by the current scan settings.",
-      requiredAction: "Confirm that the export includes published posts or pages. Drafts are excluded by default; library users can pass { includeDrafts: true } when appropriate."
+      message: "The WXR input contains no content items included by the current scan settings.",
+      requiredAction: "Confirm that the export includes published content. Drafts are excluded by default; library users can pass { includeDrafts: true } when appropriate, and postTypes.include can widen what a config brings across."
+    });
+  }
+
+  if (untypedItems.length > 0) {
+    projectIssues.push({
+      id: "project:WXR_POST_TYPE_SKIPPED:untyped",
+      severity: "warning",
+      code: "WXR_POST_TYPE_SKIPPED",
+      sourceId: "project",
+      title: "Items without a WordPress post type",
+      message: `${untypedItems.length} ${untypedItems.length === 1 ? "item carries" : "items carry"} no wp:post_type, so this scan cannot tell whether ${untypedItems.length === 1 ? "it is" : "they are"} content.`,
+      requiredAction: "Inspect the export and restore the post type for each item, or confirm the migration does not need them."
+    });
+  }
+
+  const types: ContentTypeEntry[] = [...typePolicy.values()].map((policy) => ({
+    name: policy.name,
+    label: policy.label,
+    collection: policy.collection,
+    sourceItems: policy.sourceItems,
+    records: records.filter((record) => record.type === policy.name).length,
+    included: policy.included,
+    ...(policy.reason === undefined ? {} : { reason: policy.reason })
+  }));
+
+  for (const entry of types) {
+    if (entry.included || entry.sourceItems === 0 || CONSUMED_POST_TYPES.has(entry.name)) {
+      continue;
+    }
+    projectIssues.push({
+      id: `project:WXR_POST_TYPE_SKIPPED:${entry.name}`,
+      severity: "warning",
+      code: "WXR_POST_TYPE_SKIPPED",
+      sourceId: "project",
+      title: `Content type "${entry.label}" is not part of this handoff`,
+      message: `${entry.sourceItems} ${entry.sourceItems === 1 ? "item" : "items"} of type "${entry.name}" ${entry.sourceItems === 1 ? "was" : "were"} left out. ${entry.reason ?? ""}`.trim(),
+      requiredAction: `Add "${entry.name}" to postTypes.include in the migration config to bring it across, or confirm this migration does not need it.`
     });
   }
 
@@ -310,6 +391,70 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
     url: cleanOptionalField(readTag(channelHeader, "link"))
   });
   const siteUrl = source.url;
+
+  // Archive routes join the same route model as content, so coverage, links
+  // and redirect rules never disagree about what the generated site serves.
+  const archives = buildArchives({
+    records,
+    liveUrlSource: options.liveUrlSource,
+    config,
+    siteTitle: source.title
+  });
+  for (const page of archives.pages) {
+    pendingRoutes.push({
+      id: `route:${page.id}`,
+      sourceId: page.id,
+      ...(page.sourceUrl === undefined ? {} : { sourceUrl: page.sourceUrl }),
+      status: "generated",
+      override: page.route,
+      reason: archiveRouteReason(page)
+    });
+  }
+  for (const feed of archives.feeds) {
+    if (feed.sourcePath === undefined) {
+      continue;
+    }
+    pendingRoutes.push({
+      id: `route:${feed.id}`,
+      sourceId: feed.id,
+      sourceUrl: feed.sourcePath,
+      status: "generated",
+      override: feed.path,
+      raw: true,
+      reason: "This feed is written as a static file, so the address WordPress served needs a rule."
+    });
+  }
+  if (config?.archives?.attachmentPages !== "ignore") {
+    for (const asset of baseAssets) {
+      if (asset.pagePath === undefined || asset.path === undefined || asset.pagePath === asset.path) {
+        continue;
+      }
+      pendingRoutes.push({
+        id: `route:attachment-page:${asset.wordpressId}`,
+        sourceId: asset.id,
+        sourceUrl: asset.pagePath,
+        status: "generated",
+        override: asset.path,
+        raw: true,
+        redirectOnly: true,
+        reason:
+          "WordPress served an attachment page for this upload, and the upload itself is the destination."
+      });
+    }
+  }
+  if (archives.feeds.length > 0 && (config?.site?.url ?? source.url) === undefined) {
+    projectIssues.push({
+      id: "project:SITE_URL_MISSING:1",
+      severity: "warning",
+      code: "SITE_URL_MISSING",
+      sourceId: "project",
+      title: "A feed was requested without a site URL",
+      message:
+        "This run was asked to write a feed, and neither the export nor the migration config carries a site URL, so the feed has no origin to point its entries at.",
+      requiredAction:
+        "Add site.url to the migration config, or remove the feed path from archives.feeds."
+    });
+  }
 
   const referencesByRecord = records.map((record) => collectMediaReferences(record, assetIndex));
   const routes = finalizeRoutes(pendingRoutes);
@@ -321,10 +466,20 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
       linkReferencesByRecord[index] ?? []
     )
   );
+  const menus = buildMenus({ items, records, archives, termRegistry });
   const links = finalizeLinks(linkReferencesByRecord.flat());
   const media = finalizeMedia(baseAssets, referencesByRecord.flat());
-  const coverage = buildLiveUrlCoverage(options.liveUrlSource, routes, annotatedRecords, media.assets, siteUrl);
+  const coverage = buildLiveUrlCoverage(
+    options.liveUrlSource,
+    routes,
+    annotatedRecords,
+    media.assets,
+    siteUrl,
+    config
+  );
   const recordIssues = annotatedRecords.flatMap((record) => record.issues);
+  const archiveIssues = createArchiveIssues(archives);
+  const menuIssues = createMenuIssues(menus);
   const configIssues = createConfigIssues(config, matchedConfigKeys);
   const waivedCodes = new Set<string>(config?.ignoreIssues ?? []);
   // A waived finding stays in the plan: a reviewer can see what the config
@@ -335,7 +490,14 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
     ...record,
     issues: record.issues.map(waive)
   }));
-  const issues = [...projectIssues, ...coverage.issues, ...recordIssues, ...configIssues].map(waive);
+  const issues = [
+    ...projectIssues,
+    ...coverage.issues,
+    ...archiveIssues,
+    ...menuIssues,
+    ...recordIssues,
+    ...configIssues
+  ].map(waive);
   const ignoredIssues = issues.filter((issue) => issue.ignored === true).length;
   const siteTargetUrl = config?.site?.url ?? siteUrl;
 
@@ -347,10 +509,13 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
     source,
     records: finalRecords,
     issues,
+    types,
     media,
     routes,
     links,
     coverage: coverage.coverage,
+    archives,
+    menus,
     ...(config === undefined
       ? {}
       : {
@@ -363,7 +528,16 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
             }
           }
         }),
-    summary: summarize(finalRecords, issues, media.summary, routes.summary, links.summary)
+    summary: summarize(
+      finalRecords,
+      issues,
+      media.summary,
+      routes.summary,
+      links.summary,
+      types,
+      archives.summary,
+      menus.summary
+    )
   };
 }
 
@@ -461,6 +635,7 @@ function createConfigIssues(
   matched: {
     readonly routes: ReadonlySet<string>;
     readonly exclusions: ReadonlySet<string>;
+    readonly postTypes: ReadonlySet<string>;
   }
 ): MigrationIssue[] {
   if (config === undefined) {
@@ -491,8 +666,166 @@ function createConfigIssues(
     new Set((config.exclude ?? []).filter((key) => !matched.exclusions.has(key))),
     "exclude"
   );
+  unmatched(
+    new Set((config.postTypes?.include ?? []).filter((name) => !matched.postTypes.has(name))),
+    "postTypes.include"
+  );
 
   return issues;
+}
+
+/**
+ * Post types that are not content pages. The first two are consumed elsewhere
+ * in this run, so their absence from the generated pages is not a loss; the
+ * rest are WordPress's own bookkeeping.
+ */
+const NON_CONTENT_POST_TYPES: Readonly<Record<string, string>> = {
+  attachment: "Uploads become the media inventory rather than generated pages.",
+  nav_menu_item: "Menu items become the generated navigation.",
+  revision: "Revisions are editorial history, not content.",
+  custom_css: "Customizer CSS belongs to the theme, not to a page.",
+  customize_changeset: "Customizer drafts are not content.",
+  oembed_cache: "WordPress caches embed responses for its own use.",
+  wp_block: "Reusable blocks are page parts, inlined where they are used.",
+  wp_navigation: "Block-theme navigation is stored as a menu, not as a page."
+};
+
+/** Types this run does something else with, so leaving them out is not a loss. */
+const CONSUMED_POST_TYPES = new Set(["attachment", "nav_menu_item"]);
+
+interface TypePolicy {
+  readonly name: string;
+  readonly label: string;
+  readonly collection: string;
+  readonly included: boolean;
+  /** True when the migration config, rather than WordPress, left the type out. */
+  readonly excludedByConfig: boolean;
+  readonly reason?: string | undefined;
+  sourceItems: number;
+}
+
+/**
+ * The directory under `src/content/` a post type generates into. `page` and
+ * `post` keep the names 0.1 wrote, so an existing handoff reads the same.
+ */
+export function contentCollectionName(postType: string): string {
+  const slug = postType.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (slug === "page") return "pages";
+  if (slug === "post") return "posts";
+  if (slug === "") return "content";
+  return slug.endsWith("s") ? slug : `${slug}s`;
+}
+
+/** A readable label for a post type slug, for reports and page listings. */
+export function contentTypeLabel(postType: string): string {
+  const words = postType.replace(/[_-]+/g, " ").trim();
+  return words === "" ? postType : words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * Which post types become content, and which do not.
+ *
+ * Default is everything the export carries that is actual content. A config
+ * narrows that with an include list, an exclude list, or both, and every
+ * decision leaves a reason behind so the plan can explain itself.
+ */
+function buildTypePolicy(
+  postTypes: readonly string[],
+  config: MigrationConfig | undefined
+): Map<string, TypePolicy> {
+  const include = config?.postTypes?.include;
+  const exclude = config?.postTypes?.exclude ?? [];
+  const usedCollections = new Map<string, string>();
+  const policies = new Map<string, TypePolicy>();
+
+  for (const name of [...postTypes].sort()) {
+    const configReason = exclude.includes(name)
+      ? "The migration config leaves this type out."
+      : include !== undefined && !include.includes(name)
+        ? "The migration config lists the types to bring across, and this one is not in that list."
+        : undefined;
+    const internalReason = NON_CONTENT_POST_TYPES[name];
+    const reason = internalReason ?? configReason;
+
+    policies.set(name, {
+      name,
+      label: contentTypeLabel(name),
+      collection: uniqueCollectionName(name, usedCollections),
+      included: reason === undefined,
+      excludedByConfig: internalReason === undefined && configReason !== undefined,
+      reason,
+      sourceItems: 0
+    });
+  }
+
+  return policies;
+}
+
+function uniqueCollectionName(name: string, used: Map<string, string>): string {
+  const base = contentCollectionName(name);
+  if (!used.has(base)) {
+    used.set(base, name);
+    return base;
+  }
+
+  let suffix = 2;
+  while (used.has(`${base}-${suffix}`)) {
+    suffix += 1;
+  }
+
+  const unique = `${base}-${suffix}`;
+  used.set(unique, name);
+  return unique;
+}
+
+interface TermRegistryEntry {
+  readonly id: number;
+  readonly taxonomy: string;
+  readonly slug: string;
+  readonly name: string;
+}
+
+/**
+ * The channel-level category, tag and term declarations. WordPress exports
+ * these for the whole site, and they are the only place a term id can be
+ * turned back into the slug a URL uses.
+ */
+function parseTermRegistry(channelHeader: string): ReadonlyMap<number, TermRegistryEntry> {
+  const terms = new Map<number, TermRegistryEntry>();
+
+  const collect = (
+    pattern: RegExp,
+    taxonomy: string | ((block: string) => string),
+    slugTag: string,
+    nameTag: string
+  ): void => {
+    for (const match of channelHeader.matchAll(pattern)) {
+      const block = match[1] ?? "";
+      const id = Number.parseInt(cleanField(readTag(block, "wp:term_id")), 10);
+      const slug = cleanField(readTag(block, slugTag));
+      if (!Number.isSafeInteger(id) || id <= 0 || slug === "") {
+        continue;
+      }
+      const name = cleanField(readTag(block, nameTag));
+      terms.set(id, {
+        id,
+        taxonomy: typeof taxonomy === "string" ? taxonomy : taxonomy(block),
+        slug,
+        name: name === "" ? slug : name
+      });
+    }
+  };
+
+  collect(/<wp:category\b[^>]*>([\s\S]*?)<\/wp:category>/gi, "category", "wp:category_nicename", "wp:cat_name");
+  collect(/<wp:tag\b[^>]*>([\s\S]*?)<\/wp:tag>/gi, "post_tag", "wp:tag_slug", "wp:tag_name");
+  collect(
+    /<wp:term\b[^>]*>([\s\S]*?)<\/wp:term>/gi,
+    (block) => cleanField(readTag(block, "wp:term_taxonomy")),
+    "wp:term_slug",
+    "wp:term_name"
+  );
+
+  return terms;
 }
 
 function parseItem(
@@ -539,6 +872,7 @@ function parseItem(
       "publishedAt",
       cleanOptionalField(readTag(itemXml, "wp:post_date_gmt")) ?? cleanOptionalField(readTag(itemXml, "wp:post_date"))
     ),
+    ...optionalProperty("publishedAtGmt", cleanOptionalField(readTag(itemXml, "wp:post_date_gmt"))),
     ...optionalProperty(
       "modifiedAt",
       cleanOptionalField(readTag(itemXml, "wp:post_modified_gmt")) ?? cleanOptionalField(readTag(itemXml, "wp:post_modified"))
@@ -938,6 +1272,16 @@ interface PendingRoute {
   readonly reason: string;
   /** The route a migration config decided, which overrides the permalink. */
   readonly override?: string | undefined;
+  /**
+   * True when the target already exists as a file and only the old address
+   * needs a rule, as with an attachment page pointing at its upload.
+   */
+  readonly redirectOnly?: boolean | undefined;
+  /**
+   * True when the override is a file path rather than a route, so it must not
+   * be given the trailing slash a page route carries.
+   */
+  readonly raw?: boolean | undefined;
 }
 
 interface MediaAssetDraft {
@@ -946,6 +1290,7 @@ interface MediaAssetDraft {
   readonly parentId?: number;
   readonly title: string;
   readonly path?: string;
+  readonly pagePath?: string;
   readonly url?: string;
   readonly file?: string;
   readonly mimeType?: string;
@@ -1077,6 +1422,7 @@ function parseAttachment(itemXml: string): MediaAssetDraft | undefined {
   }
 
   const path = mediaPath(attachmentUrl) ?? mediaPath(file === undefined ? undefined : `/wp-content/uploads/${file}`);
+  const pagePath = sourcePath(cleanOptionalField(readTag(itemXml, "link")));
 
   return {
     id: `media:${wordpressId}`,
@@ -1084,6 +1430,7 @@ function parseAttachment(itemXml: string): MediaAssetDraft | undefined {
     ...optionalProperty("parentId", parseWordPressId(cleanField(readTag(itemXml, "wp:post_parent")))),
     title: cleanField(readTag(itemXml, "title")) || file || `Attachment ${wordpressId}`,
     ...optionalProperty("path", path),
+    ...optionalProperty("pagePath", pagePath === path ? undefined : pagePath),
     ...optionalProperty("url", sanitizeSourceUrl(attachmentUrl)),
     ...optionalProperty("file", file),
     ...optionalProperty("mimeType", cleanOptionalField(readTag(itemXml, "wp:post_mime_type"))),
@@ -1538,17 +1885,20 @@ function finalizeMedia(
 function finalizeRoutes(pending: readonly PendingRoute[]): MigrationRoutes {
   const targets = pending.map((entry) =>
     entry.override !== undefined
-      ? normalizeRoute(entry.override)
+      ? entry.raw === true
+        ? entry.override
+        : normalizeRoute(entry.override)
       : entry.record === undefined
         ? undefined
         : targetRouteFor(entry.record)
   );
   const targetCounts = new Map<string, number>();
-  for (const target of targets) {
+  pending.forEach((entry, index) => {
+    const target = entry.redirectOnly === true ? undefined : targets[index];
     if (target !== undefined) {
       targetCounts.set(target, (targetCounts.get(target) ?? 0) + 1);
     }
-  }
+  });
 
   const entries: RouteEntry[] = [];
   const redirects: RedirectEntry[] = [];
@@ -1556,6 +1906,27 @@ function finalizeRoutes(pending: readonly PendingRoute[]): MigrationRoutes {
   pending.forEach((pendingRoute, index) => {
     const targetRoute = targets[index];
     const exportedPath = sourcePath(pendingRoute.sourceUrl);
+
+    // An attachment page needs a rule, not a route: the file it points at is
+    // already part of the generated site.
+    if (pendingRoute.redirectOnly === true) {
+      if (
+        exportedPath !== undefined &&
+        targetRoute !== undefined &&
+        exportedPath !== targetRoute &&
+        !urlHasQuery(pendingRoute.sourceUrl)
+      ) {
+        redirects.push({
+          id: `redirect:${redirects.length + 1}`,
+          ...optionalProperty("sourceId", pendingRoute.sourceId),
+          sourcePath: exportedPath,
+          targetRoute,
+          reason: pendingRoute.reason
+        });
+      }
+      return;
+    }
+
     const collides = targetRoute !== undefined && (targetCounts.get(targetRoute) ?? 0) > 1;
     // A configuration decision answers the permalink question, so a query URL
     // it decided is no longer waiting on a human.
@@ -1641,6 +2012,14 @@ interface LiveUrlIndexes {
   readonly terms: ReadonlyMap<string, WordPressTerm>;
   /** Upload paths the export carries attachment records for. */
   readonly mediaPaths: ReadonlySet<string>;
+  /** What this run generates, so an explanation can say what is missing. */
+  readonly archives: {
+    readonly taxonomies: boolean;
+    readonly authors: boolean;
+    readonly dates: boolean;
+    readonly feeds: boolean;
+    readonly paginated: boolean;
+  };
 }
 
 interface ParsedLiveUrl {
@@ -1664,13 +2043,14 @@ function buildLiveUrlCoverage(
   routes: MigrationRoutes,
   records: readonly ContentRecord[],
   assets: readonly MediaAsset[],
-  siteUrl: string | undefined
+  siteUrl: string | undefined,
+  config: MigrationConfig | undefined
 ): { readonly coverage: LiveUrlCoverage; readonly issues: readonly MigrationIssue[] } {
   if (source === undefined) {
     return { coverage: emptyLiveUrlCoverage(), issues: [] };
   }
 
-  const indexes = createLiveUrlIndexes(routes, records, assets, siteUrl);
+  const indexes = createLiveUrlIndexes(routes, records, assets, siteUrl, config);
   const entries: LiveUrlEntry[] = [];
   const seen = new Set<string>();
 
@@ -1720,7 +2100,8 @@ function createLiveUrlIndexes(
   routes: MigrationRoutes,
   records: readonly ContentRecord[],
   assets: readonly MediaAsset[],
-  siteUrl: string | undefined
+  siteUrl: string | undefined,
+  config: MigrationConfig | undefined
 ): LiveUrlIndexes {
   const routeTargets = new Map<string, string>();
   const routeVariants = new Map<string, string>();
@@ -1738,6 +2119,20 @@ function createLiveUrlIndexes(
     if (count === 1) {
       routeTargets.set(target, target);
       routeVariants.set(livePathKey(target), target);
+    }
+  }
+
+  // Archive and feed routes have no record of their own, and they serve live
+  // URLs all the same, so coverage has to see them too.
+  for (const entry of routes.entries) {
+    if (entry.status !== "generated" || entry.targetRoute === undefined) {
+      continue;
+    }
+    if (!routeTargets.has(entry.targetRoute)) {
+      routeTargets.set(entry.targetRoute, entry.targetRoute);
+    }
+    if (!routeVariants.has(livePathKey(entry.targetRoute))) {
+      routeVariants.set(livePathKey(entry.targetRoute), entry.targetRoute);
     }
   }
 
@@ -1787,7 +2182,23 @@ function createLiveUrlIndexes(
     }
   }
 
-  return { routeTargets, routeVariants, redirects, unresolved, siteHosts, terms, mediaPaths };
+  const archives = config?.archives;
+  return {
+    routeTargets,
+    routeVariants,
+    redirects,
+    unresolved,
+    siteHosts,
+    terms,
+    mediaPaths,
+    archives: {
+      taxonomies: archives?.taxonomies !== false,
+      authors: archives?.authors !== false,
+      dates: archives?.dates === true,
+      feeds: (archives?.feeds?.length ?? 0) > 0,
+      paginated: archives?.perPage !== undefined
+    }
+  };
 }
 
 /**
@@ -1938,7 +2349,9 @@ function recognizeWordPressShape(
   if (lower[lower.length - 1] === "feed") {
     return {
       shape: "feed",
-      reason: "Feeds are served by WordPress and have no static route in this handoff."
+      reason: indexes.archives.feeds
+        ? "This feed path is not one of the feeds this run writes; check the feeds list in the migration config."
+        : "This run writes no feed, so the address WordPress served has nothing behind it. Add the path to archives.feeds in the migration config to serve one."
     };
   }
 
@@ -1946,7 +2359,7 @@ function recognizeWordPressShape(
     return {
       shape: "media-file",
       reason: indexes.mediaPaths.has(key)
-        ? "This is an upload the export carries, and it is listed in the media inventory. No file was downloaded, copied or rewritten."
+        ? "This is an upload the export carries, and it is listed in the media inventory."
         : "This looks like an upload file, and the export carries no attachment record for this path."
     };
   }
@@ -1963,22 +2376,28 @@ function recognizeWordPressShape(
     return {
       shape: "taxonomy-archive",
       reason: term === undefined
-        ? "Category and tag archives have no generated route in this handoff, and no term in this export matches this path."
-        : `The export carries the "${term.name}" ${termKindLabel(term.domain)} term, whose archive URL has no generated route in this handoff.`
+        ? "No term in this export matches this path, so there is nothing to list here."
+        : indexes.archives.taxonomies
+          ? `The export carries the "${term.name}" ${termKindLabel(term.domain)} term, and nothing in this run serves its archive at this path.`
+          : `The export carries the "${term.name}" ${termKindLabel(term.domain)} term, and this run was configured not to generate taxonomy archives.`
     };
   }
 
   if (base === "author" && segments.length >= 2) {
     return {
       shape: "author-archive",
-      reason: "Author archives have no generated route in this handoff."
+      reason: indexes.archives.authors
+        ? "No content in this export is by that author, so there is nothing to list here."
+        : "This run was configured not to generate author archives."
     };
   }
 
   if (isPagedArchive(lower)) {
     return {
       shape: "paged",
-      reason: "Paginated archive URLs have no generated route in this handoff: one static route serves one page."
+      reason: indexes.archives.paginated
+        ? "This export does not carry enough content for that page of the listing, or the path belongs to an archive this run does not generate."
+        : "This run generates no paginated listings, so one static route serves one page. Set archives.perPage in the migration config to generate them."
     };
   }
 
@@ -1989,7 +2408,9 @@ function recognizeWordPressShape(
   ) {
     return {
       shape: "date-archive",
-      reason: "Date archives have no generated route in this handoff."
+      reason: indexes.archives.dates
+        ? "No content in this export falls in that month."
+        : "This run does not generate date archives. Set archives.dates in the migration config to generate them."
     };
   }
 
@@ -2560,18 +2981,590 @@ function appendLooseHtml(
   destination.push({ ...node, attributes: {}, children: [] });
 }
 
+/** Term domains that never become a public archive of their own. */
+const NON_ARCHIVE_TERM_DOMAINS = new Set(["nav_menu", "post_format", "translation"]);
+
+interface ArchiveInput {
+  readonly records: readonly ContentRecord[];
+  readonly liveUrlSource: LiveUrlSource | undefined;
+  readonly config: MigrationConfig | undefined;
+  readonly siteTitle: string | undefined;
+}
+
+/**
+ * The listing pages this handoff generates, and why each route is where it is.
+ *
+ * Term and author archives default on: leaving a URL WordPress served with no
+ * replacement is the failure this tool exists to prevent. Date archives, a
+ * posts index and feeds are opt-in, because each one needs a setting a WXR
+ * file does not carry, and inventing those would be guessing.
+ */
+function buildArchives(input: ArchiveInput): MigrationArchives {
+  const settings = input.config?.archives;
+  const pages: ArchivePage[] = [];
+  const feeds: FeedFile[] = [];
+  const livePaths = liveArchivePaths(input.liveUrlSource);
+  const posts = input.records.filter((record) => record.type === "post");
+  const perPage = settings?.perPage;
+
+  const addListing = (listing: {
+    readonly id: string;
+    readonly kind: ArchiveKind;
+    readonly title: string;
+    readonly route: string;
+    readonly routeSource: ArchiveRouteSource;
+    readonly subject: string;
+    readonly sourceUrl?: string | undefined;
+    readonly sourceIds: readonly string[];
+  }): void => {
+    const chunks =
+      perPage === undefined || listing.sourceIds.length === 0
+        ? [listing.sourceIds]
+        : chunkSourceIds(listing.sourceIds, perPage);
+
+    chunks.forEach((sourceIds, index) => {
+      if (sourceIds.length === 0) {
+        return;
+      }
+      pages.push({
+        id: index === 0 ? listing.id : `${listing.id}:page-${index + 1}`,
+        kind: listing.kind,
+        title: index === 0 ? listing.title : `${listing.title} (page ${index + 1})`,
+        route: index === 0 ? normalizeRoute(listing.route) : paginatedRoute(listing.route, index + 1),
+        ...(listing.sourceUrl === undefined ? {} : { sourceUrl: listing.sourceUrl }),
+        sourceIds,
+        subject: listing.subject,
+        routeSource: listing.routeSource,
+        paginated: index > 0
+      });
+    });
+  };
+
+  if (settings?.taxonomies !== false) {
+    const termRecords = new Map<
+      string,
+      { readonly domain: string; readonly slug: string; readonly name: string; readonly sourceIds: string[] }
+    >();
+
+    for (const record of input.records) {
+      for (const term of record.terms) {
+        if (
+          term.nicename === "" ||
+          NON_ARCHIVE_TERM_DOMAINS.has(term.domain) ||
+          term.domain.startsWith("wp_")
+        ) {
+          continue;
+        }
+        const key = `${term.domain}:${term.nicename}`;
+        const entry = termRecords.get(key) ?? {
+          domain: term.domain,
+          slug: term.nicename,
+          name: term.name === "" ? term.nicename : term.name,
+          sourceIds: []
+        };
+        if (!entry.sourceIds.includes(record.sourceId)) {
+          entry.sourceIds.push(record.sourceId);
+        }
+        termRecords.set(key, entry);
+      }
+    }
+
+    for (const [key, entry] of [...termRecords].sort(([left], [right]) => left.localeCompare(right))) {
+      const base = defaultArchiveBase(entry.domain);
+      const match = matchLiveArchive(livePaths, entry.slug, [base, entry.domain, "category", "tag", "post_tag"]);
+      addListing({
+        id: `archive:${key}`,
+        kind: "taxonomy",
+        title: entry.name,
+        route: match?.path ?? `/${base}/${entry.slug}/`,
+        routeSource:
+          match !== undefined
+            ? "live-url"
+            : entry.domain === "category" || entry.domain === "post_tag"
+              ? "wordpress-default"
+              : "derived",
+        subject: key,
+        sourceUrl: match?.url,
+        sourceIds: entry.sourceIds
+      });
+    }
+  }
+
+  if (settings?.authors !== false) {
+    const byAuthor = new Map<string, string[]>();
+    for (const record of input.records) {
+      const author = record.author?.trim();
+      // A WordPress author archive lists the blog's posts, not the site's
+      // pages, so pages stay out of the listing even when they share an author.
+      if (author === undefined || author === "" || record.type === "page") {
+        continue;
+      }
+      byAuthor.set(author, [...(byAuthor.get(author) ?? []), record.sourceId]);
+    }
+
+    for (const [author, sourceIds] of [...byAuthor].sort(([left], [right]) => left.localeCompare(right))) {
+      const slug = slugify(author);
+      const match = matchLiveArchive(livePaths, slug, ["author"]);
+      addListing({
+        id: `archive:author:${slug}`,
+        kind: "author",
+        title: author,
+        route: match?.path ?? `/author/${slug}/`,
+        routeSource: match === undefined ? "wordpress-default" : "live-url",
+        subject: `author:${slug}`,
+        sourceUrl: match?.url,
+        sourceIds
+      });
+    }
+  }
+
+  if (settings?.dates === true) {
+    const byMonth = new Map<string, string[]>();
+    for (const record of posts) {
+      const month = /^(\d{4}-\d{2})/.exec(record.publishedAt ?? "")?.[1];
+      if (month === undefined) {
+        continue;
+      }
+      byMonth.set(month, [...(byMonth.get(month) ?? []), record.sourceId]);
+    }
+
+    for (const [month, sourceIds] of [...byMonth].sort(([left], [right]) => left.localeCompare(right))) {
+      addListing({
+        id: `archive:date:${month}`,
+        kind: "date",
+        title: `Posts from ${monthLabel(month)}`,
+        route: `/${month.replace("-", "/")}/`,
+        routeSource: "derived",
+        subject: `date:${month}`,
+        sourceIds
+      });
+    }
+  }
+
+  if (settings?.postsIndex !== undefined) {
+    addListing({
+      id: "archive:posts",
+      kind: "posts-index",
+      title: "Posts",
+      route: settings.postsIndex,
+      routeSource: "config",
+      subject: "posts",
+      sourceIds: posts.map((record) => record.sourceId)
+    });
+  }
+
+  for (const configured of settings?.feeds ?? []) {
+    const asFile = /\.xml$/i.test(configured);
+    const path = asFile ? normalizeRoute(configured) : `${configured.replace(/\/+$/, "")}.xml`;
+    feeds.push({
+      id: `feed:${path}`,
+      path,
+      ...(asFile ? {} : { sourcePath: normalizeRoute(configured) }),
+      title: input.siteTitle ?? "WordPress migration",
+      sourceIds: posts.map((record) => record.sourceId)
+    });
+  }
+
+  const assumedBases = new Set(
+    pages
+      .filter((page) => !page.paginated && page.routeSource !== "live-url" && page.routeSource !== "config")
+      .map((page) => archiveBaseOf(page.route))
+  );
+
+  return {
+    pages,
+    feeds,
+    summary: {
+      taxonomies: pages.filter((page) => page.kind === "taxonomy" && !page.paginated).length,
+      authors: pages.filter((page) => page.kind === "author" && !page.paginated).length,
+      dates: pages.filter((page) => page.kind === "date" && !page.paginated).length,
+      postsIndex: pages.filter((page) => page.kind === "posts-index" && !page.paginated).length,
+      fromLiveUrls: pages.filter((page) => !page.paginated && page.routeSource === "live-url").length,
+      assumed: assumedBases.size,
+      feeds: feeds.length
+    }
+  };
+}
+
+/** Every live URL path the caller supplied, mapped to the URL as it was given. */
+function liveArchivePaths(source: LiveUrlSource | undefined): ReadonlyMap<string, string> {
+  const paths = new Map<string, string>();
+  for (const url of source?.urls ?? []) {
+    const path = sourcePath(url);
+    if (path !== undefined && !paths.has(path)) {
+      paths.set(path, sanitizeSourceUrl(url) ?? path);
+    }
+  }
+  return paths;
+}
+
+/**
+ * The live URL that already serves an archive for this slug.
+ *
+ * A term archive is a path whose last segment is the term and whose first
+ * segment is a base WordPress uses for it. A two-segment path with a different
+ * first segment still counts: that is how a site with a renamed base (say
+ * `/topics/`) tells this tool what it actually serves.
+ */
+function matchLiveArchive(
+  livePaths: ReadonlyMap<string, string>,
+  slug: string,
+  bases: readonly string[]
+): { readonly path: string; readonly url: string } | undefined {
+  const candidates: Array<{ readonly path: string; readonly url: string; readonly known: boolean }> = [];
+
+  for (const [path, url] of livePaths) {
+    const segments = path.split("/").filter((segment) => segment !== "");
+    if (segments.length < 2) {
+      continue;
+    }
+    const last = (segments[segments.length - 1] ?? "").toLowerCase();
+    const first = (segments[0] ?? "").toLowerCase();
+    if (last !== slug.toLowerCase() || (segments.length > 2 && !bases.includes(first))) {
+      continue;
+    }
+    candidates.push({ path, url, known: bases.includes(first) });
+  }
+
+  const chosen = candidates.find((candidate) => candidate.known) ?? candidates[0];
+  return chosen === undefined ? undefined : { path: chosen.path, url: chosen.url };
+}
+
+function defaultArchiveBase(domain: string): string {
+  if (domain === "post_tag" || domain === "tag") return "tag";
+  return domain === "category" ? "category" : slugify(domain);
+}
+
+function chunkSourceIds(sourceIds: readonly string[], perPage: number): string[][] {
+  const chunks: string[][] = [];
+  for (let index = 0; index < sourceIds.length; index += perPage) {
+    chunks.push(sourceIds.slice(index, index + perPage));
+  }
+  return chunks;
+}
+
+function paginatedRoute(route: string, page: number): string {
+  return normalizeRoute(`${route.replace(/\/+$/, "")}/page/${page}/`);
+}
+
+function monthLabel(month: string): string {
+  const [year, monthNumber] = month.split("-");
+  const names = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December"
+  ];
+  const name = names[Number.parseInt(monthNumber ?? "", 10) - 1];
+  return name === undefined ? month : `${name} ${year}`;
+}
+
+/** The first path segment of a route, which is the base an archive lives under. */
+function archiveBaseOf(route: string): string {
+  const first = route.split("/").filter((segment) => segment !== "")[0] ?? "";
+  return `/${first}/`;
+}
+
+function archiveRouteReason(page: ArchivePage): string {
+  const origin =
+    page.routeSource === "live-url"
+      ? "A live URL you supplied serves this archive here."
+      : page.routeSource === "config"
+        ? "The migration config places this listing here."
+        : page.routeSource === "wordpress-default"
+          ? "WordPress serves this archive under its default base, which this export does not confirm."
+          : "This archive route is derived from the content it lists.";
+  return `${origin} Generated from ${page.sourceIds.length} listed ${
+    page.sourceIds.length === 1 ? "record" : "records"
+  }.`;
+}
+
+/**
+ * Archive routes that rest on an assumption are reported once per base rather
+ * than once per term, so a site with fifty categories gets one decision to
+ * make instead of fifty.
+ */
+function createArchiveIssues(archives: MigrationArchives): MigrationIssue[] {
+  const assumed = new Map<string, number>();
+  for (const page of archives.pages) {
+    if (page.paginated || page.routeSource === "live-url" || page.routeSource === "config") {
+      continue;
+    }
+    const base = archiveBaseOf(page.route);
+    assumed.set(base, (assumed.get(base) ?? 0) + 1);
+  }
+
+  return [...assumed]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([base, count], index) => {
+      const message = `${count} archive ${count === 1 ? "route uses" : "routes use"} the base "${base}", because no live URL you supplied identifies the real one.`;
+      return {
+        id: `project:ARCHIVE_ROUTE_ASSUMED:${index + 1}`,
+        severity: "warning" as const,
+        code: "ARCHIVE_ROUTE_ASSUMED" as const,
+        sourceId: "project",
+        title: "An archive route rests on a WordPress default",
+        message,
+        requiredAction:
+          "Save the live sitemap and run again with --live-urls so the archive routes come from the site itself, or confirm the base in a migration config."
+      };
+    });
+}
+
+function emptyMenus(): MigrationMenus {
+  return { trees: [], summary: { menus: 0, items: 0, unresolved: 0 } };
+}
+
+interface MenuTarget {
+  readonly kind: MenuItemKind;
+  readonly url?: string | undefined;
+  readonly targetRoute?: string | undefined;
+  readonly reason?: string | undefined;
+}
+
+interface MenuDraft {
+  readonly id: string;
+  readonly wordpressId: number;
+  readonly label: string;
+  readonly menuSlug: string;
+  readonly menuName: string;
+  readonly order: number;
+  readonly target: MenuTarget;
+  readonly parentWordpressId?: number | undefined;
+}
+
+interface MenuInput {
+  readonly items: readonly WxrItem[];
+  readonly records: readonly ContentRecord[];
+  readonly archives: MigrationArchives;
+  readonly termRegistry: ReadonlyMap<number, TermRegistryEntry>;
+}
+
+/**
+ * The navigation WordPress served, rebuilt from its `nav_menu_item` items.
+ * Menu items are not content, but dropping them silently is how a migrated
+ * site ends up with no navigation at all.
+ */
+function buildMenus(input: MenuInput): MigrationMenus {
+  const menuItems = input.items.filter((item) => item.postType === "nav_menu_item");
+  if (menuItems.length === 0) {
+    return emptyMenus();
+  }
+
+  const recordsByKey = new Map(
+    input.records.map((record) => [`${record.type}:${record.wordpressId}`, record] as const)
+  );
+  const archivesBySubject = new Map(
+    input.archives.pages.filter((page) => !page.paginated).map((page) => [page.subject, page] as const)
+  );
+  const drafts: MenuDraft[] = [];
+
+  for (const item of menuItems) {
+    const wordpressId = parseWordPressId(cleanField(readTag(item.xml, "wp:post_id")));
+    if (wordpressId === undefined) {
+      continue;
+    }
+    if (normalizeStatus(cleanField(readTag(item.xml, "wp:status"))) === "trash") {
+      continue;
+    }
+
+    const meta = parsePostMeta(item.xml);
+    const menuTerm = parseTerms(item.xml).find((term) => term.domain === "nav_menu");
+    const order = Number.parseInt(cleanField(readTag(item.xml, "wp:menu_order")), 10);
+    const objectId = parseWordPressId(cleanField(meta._menu_item_object_id?.[0] ?? ""));
+    const objectType = cleanField(meta._menu_item_object?.[0] ?? "");
+
+    drafts.push({
+      id: `menu:${wordpressId}`,
+      wordpressId,
+      label: cleanField(readTag(item.xml, "title")) || `Menu item ${wordpressId}`,
+      menuSlug: menuTerm?.nicename ?? "menu",
+      menuName: menuTerm === undefined || menuTerm.name === "" ? "Menu" : menuTerm.name,
+      order: Number.isSafeInteger(order) ? order : 0,
+      target: resolveMenuTarget({
+        itemType: cleanField(meta._menu_item_type?.[0] ?? ""),
+        objectType,
+        objectId,
+        customUrl: cleanOptionalField(meta._menu_item_url?.[0] ?? ""),
+        recordsByKey,
+        termRegistry: input.termRegistry,
+        archivesBySubject
+      }),
+      parentWordpressId: parseWordPressId(cleanField(meta._menu_item_menu_item_parent?.[0] ?? ""))
+    });
+  }
+
+  return assembleMenus(drafts);
+}
+
+function resolveMenuTarget(input: {
+  readonly itemType: string;
+  readonly objectType: string;
+  readonly objectId: number | undefined;
+  readonly customUrl: string | undefined;
+  readonly recordsByKey: ReadonlyMap<string, ContentRecord>;
+  readonly termRegistry: ReadonlyMap<number, TermRegistryEntry>;
+  readonly archivesBySubject: ReadonlyMap<string, ArchivePage>;
+}): MenuTarget {
+  if (input.itemType === "post_type") {
+    const record =
+      input.objectId === undefined ? undefined : input.recordsByKey.get(`${input.objectType}:${input.objectId}`);
+    if (record === undefined) {
+      return {
+        kind: "post",
+        reason: `No ${input.objectType || "content"} item in this export matches the menu target.`
+      };
+    }
+    const route = normalizeRoute(record.route ?? `/${record.slug}/`);
+    return { kind: "post", url: route, targetRoute: route };
+  }
+
+  if (input.itemType === "taxonomy") {
+    const term = input.objectId === undefined ? undefined : input.termRegistry.get(input.objectId);
+    const archive =
+      term === undefined ? undefined : input.archivesBySubject.get(`${term.taxonomy}:${term.slug}`);
+    if (archive === undefined) {
+      return {
+        kind: "taxonomy",
+        reason: `This export carries no archive for the ${input.objectType || "taxonomy"} this menu item points at.`
+      };
+    }
+    return {
+      kind: "taxonomy",
+      url: archive.sourceUrl ?? archive.route,
+      targetRoute: archive.route
+    };
+  }
+
+  if (input.itemType === "custom") {
+    const url = input.customUrl?.trim();
+    if (url === undefined || url === "") {
+      return { kind: "custom", reason: "The menu item carries no URL." };
+    }
+    return url.startsWith("/")
+      ? { kind: "custom", url, targetRoute: normalizeRoute(url) }
+      : { kind: "custom", url: sanitizeSourceUrl(url) ?? url };
+  }
+
+  if (input.itemType === "post_type_archive") {
+    return {
+      kind: "post-type-archive",
+      reason: `The ${input.objectType || "content"} archive is not generated by this handoff.`
+    };
+  }
+
+  return {
+    kind: "unknown",
+    reason: `Menu item type "${input.itemType || "unknown"}" is not supported.`
+  };
+}
+
+function assembleMenus(drafts: readonly MenuDraft[]): MigrationMenus {
+  const byMenu = new Map<string, MenuDraft[]>();
+  for (const draft of drafts) {
+    byMenu.set(draft.menuSlug, [...(byMenu.get(draft.menuSlug) ?? []), draft]);
+  }
+
+  const trees: MenuTree[] = [];
+  let items = 0;
+  let unresolved = 0;
+
+  for (const [slug, menuDrafts] of [...byMenu].sort(([left], [right]) => left.localeCompare(right))) {
+    const ordered = [...menuDrafts].sort(
+      (left, right) => left.order - right.order || left.wordpressId - right.wordpressId
+    );
+    const ids = new Set(ordered.map((draft) => draft.wordpressId));
+
+    const build = (draft: MenuDraft): MenuItem => {
+      const children = ordered
+        .filter((candidate) => candidate.parentWordpressId === draft.wordpressId)
+        .map(build);
+      items += 1;
+      if (draft.target.reason !== undefined) {
+        unresolved += 1;
+      }
+
+      return {
+        id: draft.id,
+        label: draft.label,
+        kind: draft.target.kind,
+        ...(draft.target.url === undefined ? {} : { url: draft.target.url }),
+        ...(draft.target.targetRoute === undefined ? {} : { targetRoute: draft.target.targetRoute }),
+        ...(draft.parentWordpressId === undefined || !ids.has(draft.parentWordpressId)
+          ? {}
+          : { parentId: `menu:${draft.parentWordpressId}` }),
+        children,
+        ...(draft.target.reason === undefined ? {} : { reason: draft.target.reason })
+      };
+    };
+
+    const roots = ordered.filter(
+      (draft) => draft.parentWordpressId === undefined || !ids.has(draft.parentWordpressId)
+    );
+    trees.push({
+      id: `menu:${slug}`,
+      name: ordered[0]?.menuName ?? "Menu",
+      slug,
+      items: roots.map(build)
+    });
+  }
+
+  return { trees, summary: { menus: trees.length, items, unresolved } };
+}
+
+/** One finding per menu entry nothing in this plan serves. */
+function createMenuIssues(menus: MigrationMenus): MigrationIssue[] {
+  const issues: MigrationIssue[] = [];
+
+  const visit = (menu: MenuTree, item: MenuItem): void => {
+    if (item.reason !== undefined) {
+      issues.push({
+        id: `menu:${menu.slug}:${item.id}:MENU_TARGET_UNRESOLVED`,
+        severity: "warning",
+        code: "MENU_TARGET_UNRESOLVED",
+        sourceId: item.id,
+        title: `Menu entry "${item.label}" has no target in this handoff`,
+        message: `${item.reason} The entry stays in the migration menu inventory so the decision is visible.`,
+        requiredAction:
+          "Point the entry at a generated route in the migration config, or rebuild it deliberately in the new theme."
+      });
+    }
+    item.children.forEach((child) => visit(menu, child));
+  };
+
+  for (const menu of menus.trees) {
+    menu.items.forEach((item) => visit(menu, item));
+  }
+
+  return issues;
+}
+
 function summarize(
   records: readonly ContentRecord[],
   issues: readonly MigrationIssue[],
   media: MediaSummary,
   routes: RouteSummary,
-  links: LinkSummary
+  links: LinkSummary,
+  types: readonly ContentTypeEntry[],
+  archives: ArchiveSummary,
+  menus: MenuSummary
 ): MigrationSummary {
   const nodes = records.flatMap((record) => flattenNodes(record.nodes));
   return {
     records: records.length,
     pages: records.filter((record) => record.type === "page").length,
     posts: records.filter((record) => record.type === "post").length,
+    types: Object.fromEntries(
+      types.filter((entry) => entry.records > 0).map((entry) => [entry.name, entry.records])
+    ),
     nodes: nodes.length,
     nativeNodes: nodes.filter((node) => node.conversion === "native").length,
     manualNodes: nodes.filter((node) => node.conversion === "manual" || node.conversion === "legacy-html").length,
@@ -2584,7 +3577,9 @@ function summarize(
     blockers: issues.filter((issue) => issue.severity === "blocker" && issue.ignored !== true).length,
     media,
     routes,
-    links
+    links,
+    archives,
+    menus
   };
 }
 

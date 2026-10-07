@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import {
   extractContentEvidence,
@@ -8,7 +8,7 @@ import {
   simhashDistance
 } from "routelint";
 import type { PageContentEvidence } from "routelint";
-import { normalizeRoute, sanitizeSourceUrl } from "./core.js";
+import { normalizeRoute, readHtmlAttribute, sanitizeSourceUrl } from "./core.js";
 import {
   indexingFromSignals,
   launchFindings,
@@ -22,6 +22,7 @@ import type {
   MigrationNode,
   MigrationProject,
   SiteVerification,
+  VerificationCheck,
   VerificationStatus,
   VerificationSummary,
   VerifiedRoute
@@ -85,6 +86,10 @@ export interface VerifyOptions {
 interface ObservedPage {
   /** Sanitized absolute URL the plan resolves against. */
   readonly href: string;
+  /** Site-relative route, for a page read from a built directory. */
+  readonly route?: string;
+  /** The built markup, for the checks that read the output itself. */
+  readonly html?: string;
   readonly evidence?: PageContentEvidence;
   readonly titles: number;
   readonly headings: number;
@@ -174,19 +179,64 @@ export async function verifySite(
     }
   }
 
-  const launch: readonly LaunchFinding[] = launchFindings({
-    indexing,
-    ...(delivery === undefined ? {} : { delivery })
-  });
+  const gate =
+    kind === "html-directory" && options.htmlDirectory !== undefined
+      ? await readBuildGate(project, resolve(options.htmlDirectory), observed)
+      : undefined;
+
+  const launch = sortLaunchFindings([
+    ...launchFindings({ indexing, ...(delivery === undefined ? {} : { delivery }) }),
+    ...(gate?.findings ?? [])
+  ]);
+
+  // A check that could not run is reported as unchecked, never as passed.
+  const checks: VerificationCheck[] =
+    gate === undefined
+      ? [
+          { id: "content", label: "Built pages carry the content the export records", checked: true },
+          ...BUILD_CHECKS.map((check) => ({
+            id: check.id,
+            label: check.label,
+            checked: false,
+            reason: "This check reads the built site on disk; a crawl report does not carry it."
+          })),
+          {
+            id: "delivery",
+            label: "Delivered responses match the plan",
+            checked: delivery !== undefined,
+            ...(delivery === undefined ? { reason: "No saved SSRWire audit was supplied." } : {})
+          }
+        ]
+      : gate.checks.map((check) =>
+          check.id === "delivery"
+            ? {
+                ...check,
+                checked: delivery !== undefined,
+                ...(delivery === undefined ? { reason: "No saved SSRWire audit was supplied." } : {})
+              }
+            : check
+        );
 
   return {
     observed: kind,
     source,
     routes,
-    summary: summarizeVerification(routes, [...byHref.values()], launch),
+    summary: summarizeVerification(
+      routes,
+      [...byHref.values()],
+      launch,
+      checks.filter((check) => !check.checked).length
+    ),
     ...(delivery === undefined ? {} : { delivery }),
-    launch
+    launch,
+    checks
   };
+}
+
+/** Blockers first, so a gate reads as a list of what stops a launch. */
+function sortLaunchFindings(findings: readonly LaunchFinding[]): readonly LaunchFinding[] {
+  const rank: Readonly<Record<LaunchFinding["severity"], number>> = { blocker: 0, warning: 1 };
+  return [...findings].sort((left, right) => rank[left.severity] - rank[right.severity]);
 }
 
 /**
@@ -298,7 +348,8 @@ function classifyRoute(
 function summarizeVerification(
   routes: readonly VerifiedRoute[],
   observed: readonly ObservedPage[],
-  launch: readonly LaunchFinding[]
+  launch: readonly LaunchFinding[],
+  uncheckedChecks: number
 ): VerificationSummary {
   const count = (status: VerificationStatus): number =>
     routes.filter((route) => route.status === status).length;
@@ -313,7 +364,8 @@ function summarizeVerification(
     withoutTitle: observed.filter((page) => page.unavailableReason === undefined && page.titles === 0).length,
     withoutHeading: observed.filter((page) => page.unavailableReason === undefined && page.headings === 0).length,
     launchBlockers: launch.filter((finding) => finding.severity === "blocker").length,
-    launchWarnings: launch.filter((finding) => finding.severity === "warning").length
+    launchWarnings: launch.filter((finding) => finding.severity === "warning").length,
+    uncheckedChecks
   };
 }
 
@@ -363,6 +415,8 @@ async function readHtmlDirectory(directory: string, base: string): Promise<reado
     const signals = parseHtml(html, href);
     pages.push({
       href,
+      route: routeForHtmlFile(directory, file),
+      html,
       evidence: extractContentEvidence(html),
       titles: signals.titles.length,
       headings: signals.h1s.length,
@@ -371,6 +425,498 @@ async function readHtmlDirectory(directory: string, base: string): Promise<reado
   }
 
   return pages;
+}
+
+/** The checks that need the built site on disk, in the order they are reported. */
+const BUILD_CHECKS: readonly {
+  readonly id: "media" | "links" | "canonical" | "robots" | "sitemap";
+  readonly label: string;
+}[] = [
+  { id: "media", label: "Copied media is present in the build" },
+  { id: "links", label: "Internal links resolve to a route, a rule or a file" },
+  { id: "canonical", label: "Built pages carry a canonical URL" },
+  { id: "robots", label: "robots.txt allows crawling" },
+  { id: "sitemap", label: "sitemap.xml lists every generated route" }
+];
+
+interface BuildGate {
+  readonly findings: readonly LaunchFinding[];
+  readonly checks: readonly VerificationCheck[];
+}
+
+interface BuiltPage {
+  readonly route: string;
+  readonly href: string;
+  readonly html: string;
+}
+
+/**
+ * The checks that read the built site rather than the plan: media delivery,
+ * internal links, canonical URLs, robots.txt and the sitemap.
+ *
+ * Everything here reads local files. Nothing is fetched, and a check that
+ * cannot run says so rather than reporting a pass it did not earn.
+ */
+async function readBuildGate(
+  project: MigrationProject,
+  directory: string,
+  pages: readonly ObservedPage[]
+): Promise<BuildGate> {
+  const buildPages: BuiltPage[] = pages.flatMap((page) =>
+    page.route === undefined || page.html === undefined
+      ? []
+      : [{ route: page.route, href: page.href, html: page.html }]
+  );
+
+  const findings: LaunchFinding[] = [
+    ...(await checkBuildMedia(project, directory)),
+    ...(await checkBuildLinks(project, directory, buildPages)),
+    ...checkCanonicalUrls(buildPages),
+    ...(await checkRobots(directory)),
+    ...(await checkSitemap(project, directory))
+  ];
+
+  return {
+    findings,
+    checks: [
+      { id: "content", label: "Built pages carry the content the export records", checked: true },
+      ...BUILD_CHECKS.map((check) => ({ id: check.id, label: check.label, checked: true })),
+      { id: "delivery", label: "Delivered responses match the plan", checked: false }
+    ]
+  };
+}
+
+/** Media the plan copied has to be in the build, and has to carry bytes. */
+async function checkBuildMedia(project: MigrationProject, directory: string): Promise<readonly LaunchFinding[]> {
+  const copies = project.media.delivery?.copies ?? [];
+  if (copies.length === 0) {
+    return [];
+  }
+
+  const missing: string[] = [];
+  const empty: string[] = [];
+  for (const copy of copies) {
+    const file = resolveInside(directory, copy.outputPath);
+    const size = file === undefined ? undefined : await fileSize(file);
+    if (size === undefined) {
+      missing.push(copy.outputPath);
+    } else if (size === 0) {
+      empty.push(copy.outputPath);
+    }
+  }
+
+  const findings: LaunchFinding[] = [];
+  if (missing.length > 0) {
+    findings.push({
+      id: "launch:MEDIA_MISSING_IN_BUILD:1",
+      severity: "blocker",
+      code: "MEDIA_MISSING_IN_BUILD",
+      source: "html-directory",
+      routes: missing.slice(0, 5),
+      title: "Copied media is missing from the build",
+      message: `${missing.length} of ${copies.length} copied ${
+        copies.length === 1 ? "file is" : "files are"
+      } not in the built site: ${listTargets(missing)}.`,
+      requiredAction:
+        "Check that the build copies public/ into the output, and that media delivery ran before it."
+    });
+  }
+  if (empty.length > 0) {
+    findings.push({
+      id: "launch:MEDIA_EMPTY_IN_BUILD:1",
+      severity: "warning",
+      code: "MEDIA_EMPTY_IN_BUILD",
+      source: "html-directory",
+      routes: empty.slice(0, 5),
+      title: "A copied media file is empty in the build",
+      message: `${empty.length} copied ${empty.length === 1 ? "file has" : "files have"} no bytes: ${listTargets(empty)}.`,
+      requiredAction: "Compare these files with the source uploads directory before publishing."
+    });
+  }
+
+  return findings;
+}
+
+/**
+ * Internal links have to lead somewhere: a generated route, a proposed rule,
+ * or a file the build actually contains.
+ *
+ * Findings group by target rather than by page, because a link in a shared
+ * layout is one problem even when it appears on every page.
+ */
+async function checkBuildLinks(
+  project: MigrationProject,
+  directory: string,
+  pages: readonly BuiltPage[]
+): Promise<readonly LaunchFinding[]> {
+  const routes = new Set(
+    project.routes.entries.filter((entry) => entry.status === "generated").flatMap((entry) => entry.targetRoute ?? [])
+  );
+  const variants = new Map([...routes].map((route) => [withoutTrailingSlash(route), route]));
+  const rules = new Set(project.routes.redirects.map((redirect) => redirect.sourcePath));
+
+  const broken = new Map<string, Set<string>>();
+  const slashOnly = new Map<string, Set<string>>();
+  const fileCache = new Map<string, boolean>();
+
+  for (const page of pages) {
+    for (const href of htmlAttributeValues(page.html, "a", "href")) {
+      const target = resolveInternalLink(href, page.href);
+      if (target === undefined || routes.has(target) || rules.has(target)) {
+        continue;
+      }
+      // A generated route serves the other spelling of this path, which is a
+      // different problem from a target nothing serves at all.
+      const variant = variants.get(withoutTrailingSlash(target));
+      if (variant !== undefined && variant !== target) {
+        slashOnly.set(target, (slashOnly.get(target) ?? new Set<string>()).add(page.route));
+        continue;
+      }
+      if (await buildFileExists(directory, target, fileCache)) {
+        continue;
+      }
+
+      broken.set(target, (broken.get(target) ?? new Set<string>()).add(page.route));
+    }
+  }
+
+  const findings: LaunchFinding[] = [];
+  for (const [target, sources] of [...broken].slice(0, 10)) {
+    findings.push({
+      id: `launch:LINK_TARGET_MISSING_IN_BUILD:${target}`,
+      severity: "warning",
+      code: "LINK_TARGET_MISSING_IN_BUILD",
+      source: "html-directory",
+      routes: [...sources].slice(0, 5),
+      field: target,
+      title: `A built page links to ${target}, and nothing serves it`,
+      message: `No generated route, no redirect rule and no built file answers ${target}. It appears on ${listTargets([...sources])}.`,
+      requiredAction:
+        "Point the link at a generated route, decide the target in the migration config, or remove the link."
+    });
+  }
+  if (broken.size > 10) {
+    findings.push({
+      id: "launch:LINK_TARGET_MISSING_IN_BUILD:more",
+      severity: "warning",
+      code: "LINK_TARGET_MISSING_IN_BUILD",
+      source: "html-directory",
+      title: "More built links lead nowhere",
+      message: `${broken.size - 10} further targets in the built pages resolve to no route, rule or file.`,
+      requiredAction: "Work through the link inventory and the migration config together."
+    });
+  }
+
+  for (const [target, sources] of [...slashOnly].slice(0, 10)) {
+    findings.push({
+      id: `launch:LINK_TARGET_MISSING_IN_BUILD:slash:${target}`,
+      severity: "warning",
+      code: "LINK_TARGET_MISSING_IN_BUILD",
+      source: "html-directory",
+      routes: [...sources].slice(0, 5),
+      field: target,
+      title: `A built page links to ${target} without the trailing slash`,
+      message: `The generated route is ${variants.get(withoutTrailingSlash(target)) ?? target}, and this link does not use it. It appears on ${listTargets([...sources])}.`,
+      requiredAction:
+        "Rewrite the link, or confirm the host resolves both spellings, as Netlify's Pretty URLs does."
+    });
+  }
+
+  return findings;
+}
+
+/** Canonical URLs, which the publish-ready layout writes and the default does not. */
+function checkCanonicalUrls(pages: readonly BuiltPage[]): readonly LaunchFinding[] {
+  const missing: string[] = [];
+  const findings: LaunchFinding[] = [];
+
+  for (const page of pages) {
+    const canonical = canonicalHref(page.html);
+    if (canonical === undefined) {
+      missing.push(page.route);
+      continue;
+    }
+    const resolved = resolveInternalLink(canonical, page.href);
+    if (resolved !== undefined && withoutTrailingSlash(resolved) !== withoutTrailingSlash(page.route)) {
+      findings.push({
+        id: `launch:CANONICAL_MISSING:${page.route}`,
+        severity: "warning",
+        code: "CANONICAL_MISSING",
+        source: "html-directory",
+        route: page.route,
+        field: "canonical",
+        title: `The canonical URL of ${page.route} points somewhere else`,
+        message: `This page declares ${resolved} as its canonical URL.`,
+        requiredAction:
+          "Check the layout and the site URL, so a page does not ask search engines to prefer another address."
+      });
+    }
+  }
+
+  if (missing.length > 0) {
+    findings.push({
+      id: "launch:CANONICAL_MISSING:1",
+      severity: "warning",
+      code: "CANONICAL_MISSING",
+      source: "html-directory",
+      routes: missing.slice(0, 5),
+      title: "Built pages carry no canonical URL",
+      message: `${missing.length} built ${missing.length === 1 ? "page has" : "pages have"} no canonical link, including ${listTargets(missing)}.`,
+      requiredAction:
+        "Run convert with --publish-ready, which writes a canonical URL per page when the site URL is known."
+    });
+  }
+
+  return findings;
+}
+
+/** A build that still disallows crawling is not ready, whatever else it does. */
+async function checkRobots(directory: string): Promise<readonly LaunchFinding[]> {
+  const file = resolveInside(directory, "/robots.txt");
+  const contents = file === undefined ? undefined : await readTextFile(file);
+  if (contents === undefined || !robotsDisallowsAll(contents)) {
+    return [];
+  }
+
+  return [
+    {
+      id: "launch:ROBOTS_BLOCKED:1",
+      severity: "blocker",
+      code: "ROBOTS_BLOCKED",
+      source: "html-directory",
+      route: "/robots.txt",
+      title: "robots.txt tells every crawler to stay away",
+      message: "The built robots.txt disallows crawling for every user agent.",
+      requiredAction: "Run convert with --publish-ready, or edit public/robots.txt, before moving DNS."
+    }
+  ];
+}
+
+/** The sitemap has to list the routes the plan generates. */
+async function checkSitemap(project: MigrationProject, directory: string): Promise<readonly LaunchFinding[]> {
+  const expected = [
+    ...new Set(
+      project.routes.entries
+        .filter((entry) => entry.status === "generated")
+        .flatMap((entry) => entry.targetRoute ?? [])
+        .filter((route) => route.endsWith("/"))
+    )
+  ].sort();
+  if (expected.length === 0) {
+    return [];
+  }
+
+  const file = resolveInside(directory, "/sitemap.xml");
+  const contents = file === undefined ? undefined : await readTextFile(file);
+  if (contents === undefined) {
+    return [
+      {
+        id: "launch:SITEMAP_INCOMPLETE:1",
+        severity: "warning",
+        code: "SITEMAP_INCOMPLETE",
+        source: "html-directory",
+        title: "The build has no sitemap",
+        message: `${expected.length} generated ${
+          expected.length === 1 ? "route is" : "routes are"
+        } listed nowhere, because the build carries no sitemap.xml.`,
+        requiredAction:
+          "Add the site URL to the export or the migration config so conversion writes public/sitemap.xml."
+      }
+    ];
+  }
+
+  const listed = new Set(
+    [...contents.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)].flatMap((match) => {
+      const value = match[1];
+      if (value === undefined) {
+        return [];
+      }
+      const text = decodeXmlText(value);
+      try {
+        return [new URL(text).pathname];
+      } catch {
+        return [text];
+      }
+    })
+  );
+  const missing = expected.filter((route) => !listed.has(route));
+  if (missing.length === 0) {
+    return [];
+  }
+
+  return [
+    {
+      id: "launch:SITEMAP_INCOMPLETE:2",
+      severity: "warning",
+      code: "SITEMAP_INCOMPLETE",
+      source: "html-directory",
+      routes: missing.slice(0, 5),
+      title: "The sitemap does not list every generated route",
+      message: `${missing.length} of ${expected.length} generated ${
+        expected.length === 1 ? "route is" : "routes are"
+      } missing from the build's sitemap, including ${listTargets(missing)}.`,
+      requiredAction:
+        "Regenerate the sitemap with the same plan that built the pages, and check that nothing edits it afterwards."
+    }
+  ];
+}
+
+/** The href of a page's canonical link, when it has one. */
+function canonicalHref(html: string): string | undefined {
+  for (const match of html.matchAll(/<link\b[^>]*>/gi)) {
+    const tag = match[0];
+    const rel = readHtmlAttribute(tag, "rel");
+    if (rel === undefined || rel.trim().toLowerCase() !== "canonical") {
+      continue;
+    }
+    const href = readHtmlAttribute(tag, "href");
+    if (href !== undefined && href.trim() !== "") {
+      return href.trim();
+    }
+  }
+
+  return undefined;
+}
+
+/** Every value of one attribute on one tag, for scanning built markup. */
+function htmlAttributeValues(html: string, tag: string, attribute: string): readonly string[] {
+  const pattern = new RegExp(`<${tag}\\b[^>]*>`, "gi");
+  return [...html.matchAll(pattern)].flatMap((match) => {
+    const value = readHtmlAttribute(match[0], attribute);
+    return value === undefined ? [] : [value];
+  });
+}
+
+/**
+ * The path an internal link points at, or undefined when the link leaves the
+ * site or is not a navigation target at all.
+ */
+function resolveInternalLink(href: string, pageHref: string): string | undefined {
+  const trimmed = href.trim();
+  if (trimmed === "" || trimmed.startsWith("#") || /^(?:mailto|tel|sms|geo|javascript|data):/i.test(trimmed)) {
+    return undefined;
+  }
+
+  let url: URL;
+  let page: URL;
+  try {
+    url = new URL(trimmed, pageHref);
+    page = new URL(pageHref);
+  } catch {
+    return undefined;
+  }
+
+  if (url.host !== page.host || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    return undefined;
+  }
+
+  return url.pathname === "" ? "/" : url.pathname;
+}
+
+/** True when the build serves this path as a file, a directory index or a page. */
+async function buildFileExists(
+  directory: string,
+  path: string,
+  cache: Map<string, boolean>
+): Promise<boolean> {
+  const cached = cache.get(path);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const candidates = path.endsWith("/")
+    ? [path, `${path}index.html`]
+    : [path, `${path}/index.html`, `${path}.html`];
+  let found = false;
+  for (const candidate of candidates) {
+    const file = resolveInside(directory, candidate);
+    if (file !== undefined && (await fileSize(file)) !== undefined) {
+      found = true;
+      break;
+    }
+  }
+
+  cache.set(path, found);
+  return found;
+}
+
+/** Resolve a site-relative path inside a directory, refusing to escape it. */
+function resolveInside(directory: string, path: string): string | undefined {
+  if (!path.startsWith("/")) {
+    return undefined;
+  }
+  const resolved = resolve(directory, `.${path}`);
+  return resolved === directory || resolved.startsWith(`${directory}${sep}`) ? resolved : undefined;
+}
+
+async function fileSize(path: string): Promise<number | undefined> {
+  try {
+    const details = await stat(path);
+    return details.isFile() ? details.size : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readTextFile(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True when robots.txt disallows crawling for everyone. Only the `*` group
+ * counts, because a rule naming one crawler is not a closed site.
+ */
+function robotsDisallowsAll(contents: string): boolean {
+  let appliesToAll = false;
+  let disallows = false;
+
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const line = (rawLine.split("#")[0] ?? "").trim();
+    if (line === "") {
+      continue;
+    }
+    const separator = line.indexOf(":");
+    if (separator === -1) {
+      continue;
+    }
+    const field = line.slice(0, separator).trim().toLowerCase();
+    const value = line.slice(separator + 1).trim();
+
+    if (field === "user-agent") {
+      appliesToAll = value === "*";
+      continue;
+    }
+    if (field === "disallow" && appliesToAll && value.replace(/\s+/g, "") === "/") {
+      disallows = true;
+    }
+  }
+
+  return disallows;
+}
+
+function withoutTrailingSlash(value: string): string {
+  return value.length > 1 ? value.replace(/\/+$/, "") : value;
+}
+
+/** A short, readable list of paths or routes for a finding message. */
+function listTargets(values: readonly string[]): string {
+  const shown = values.slice(0, 3).map((value) => `"${value}"`);
+  return values.length <= shown.length
+    ? shown.join(", ")
+    : `${shown.join(", ")} and ${values.length - shown.length} more`;
+}
+
+function decodeXmlText(value: string): string {
+  return value
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", "\"")
+    .replaceAll("&apos;", "'");
 }
 
 async function collectHtmlFiles(directory: string): Promise<readonly string[]> {

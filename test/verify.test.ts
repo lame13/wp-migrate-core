@@ -498,7 +498,7 @@ test("the CLI writes a verification artefact and gates on missing content", asyn
 
   const document = JSON.parse(gated.stdout);
   assert.equal(document.command, "verify");
-  assert.equal(document.schemaVersion, "0.6");
+  assert.equal(document.schemaVersion, "0.8");
   assert.equal(document.failed, true);
   assert.equal(document.summary.missingContent, 1);
   assert.equal(document.outputs.verification, output);
@@ -507,7 +507,13 @@ test("the CLI writes a verification artefact and gates on missing content", asyn
   assert.equal(written.observed.kind, "html-directory");
   assert.equal(written.routes.length, 5);
   assert.equal(written.summary.routeMissing, 1);
-  assert.deepEqual(written.launch, { blockers: 0, warnings: 0, findings: [] });
+  // A clean build is not automatically a publishable one: this fixture has no
+  // canonical links and no sitemap, and both are reported as warnings.
+  assert.equal(written.launch.blockers, 0);
+  assert.deepEqual(
+    written.launch.findings.map((finding: { code: string }) => finding.code).sort(),
+    ["CANONICAL_MISSING", "SITEMAP_INCOMPLETE"]
+  );
 
   const again = runCli(["verify", exportPath, "--html-dir", site, "--out", output], workspace);
   assert.equal(again.status, 1);
@@ -546,7 +552,16 @@ test("verify reports a build that still asks crawlers not to index it", async (c
   assert.equal(blocked[0]?.source, "html-directory");
   assert.match(blocked[0]?.id ?? "", /^launch:indexing-blocked:html-directory:\/carried\/$/);
   assert.equal(verification.summary.launchBlockers, 1);
-  assert.equal(verification.summary.launchWarnings, 0);
+  // The page blocks indexing, and it is the only page: nothing else is built
+  // for this fixture, so the only other findings are the two output checks.
+  assert.deepEqual(
+    verification.launch
+      .filter((finding) => finding.severity === "warning")
+      .map((finding) => finding.code)
+      .sort(),
+    ["CANONICAL_MISSING", "SITEMAP_INCOMPLETE"]
+  );
+  assert.equal(verification.summary.launchWarnings, 2);
 });
 
 test("the indexing gate reads the crawl report too, including response headers", async (context) => {
@@ -664,13 +679,17 @@ test("verify folds SSRWire delivery evidence into the publishing gate", async (c
 
   const codes = verification.launch.map((finding) => finding.code).sort();
   assert.deepEqual(codes, [
+    "CANONICAL_MISSING",
     "DELIVERY_FAILED",
     "DELIVERY_REGRESSION",
     "DELIVERY_UNOBSERVED",
-    "INDEXING_BLOCKED"
+    "INDEXING_BLOCKED",
+    "SITEMAP_INCOMPLETE"
   ]);
   assert.equal(verification.summary.launchBlockers, 2);
-  assert.equal(verification.summary.launchWarnings, 2);
+  // The delivery warnings, plus the canonical and sitemap checks this build
+  // output cannot pass: the fixture has no canonical link and no sitemap.
+  assert.equal(verification.summary.launchWarnings, 4);
 
   // The candidate-only contract warning is reported once, as the regression
   // the comparison found, rather than twice.
@@ -762,10 +781,11 @@ test("the CLI gates on a build that blocks indexing and writes the evidence", as
   // Four pages block indexing, but that is one thing to fix, so it is one
   // finding naming the four routes.
   assert.equal(document.summary.launchBlockers, 1);
-  assert.equal(document.summary.launchWarnings, 1);
+  // Unobserved delivery routes, plus the canonical and sitemap checks.
+  assert.equal(document.summary.launchWarnings, 3);
   assert.equal(document.delivery.summary.covered, 1);
   assert.equal(document.delivery.summary.unobserved, 4);
-  assert.equal(document.launch.findings.length, 2);
+  assert.equal(document.launch.findings.length, 4);
 
   const indexing = document.launch.findings.find(
     (finding: { code: string }) => finding.code === "INDEXING_BLOCKED"

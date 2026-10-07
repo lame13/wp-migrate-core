@@ -93,10 +93,10 @@ test("classifies the demo sitemap against routes, rules and WordPress shapes", a
   assert.deepEqual(project.coverage.summary, {
     checked: true,
     liveUrls: 17,
-    routed: 4,
+    routed: 5,
     redirected: 1,
     unresolved: 0,
-    excluded: 9,
+    excluded: 8,
     externalHosts: 1,
     invalid: 0,
     uncovered: 2,
@@ -107,8 +107,11 @@ test("classifies the demo sitemap against routes, rules and WordPress shapes", a
   assert.equal(entryFor(project, "/services/")?.targetRoute, "/services/");
   assert.equal(entryFor(project, "/guides/stop-a-leaking-tap")?.status, "redirected");
   assert.equal(entryFor(project, "/guides/stop-a-leaking-tap")?.targetRoute, "/guides/stop-a-leaking-tap/");
-  assert.equal(entryFor(project, "/category/guides/")?.shape, "taxonomy-archive");
-  assert.match(entryFor(project, "/category/guides/")?.reason ?? "", /"Guides" category term/);
+  // The term archive the export carries is generated now, at the URL the
+  // sitemap already serves, so this URL is served rather than explained away.
+  assert.equal(entryFor(project, "/category/guides/")?.status, "routed");
+  assert.equal(entryFor(project, "/category/guides/")?.targetRoute, "/category/guides/");
+  assert.match(entryFor(project, "/category/guides/")?.reason ?? "", /generated page serves this path/);
   assert.equal(entryFor(project, "/feed/")?.shape, "feed");
   assert.equal(entryFor(project, "/services/page/2/")?.shape, "paged");
   assert.equal(entryFor(project, "/2026/06/")?.shape, "date-archive");

@@ -105,7 +105,11 @@ test("ships media, redirect and link inventories without source credentials", as
   );
 
   const urlMap = JSON.parse(redirects);
-  assert.equal(urlMap.summary.generated, 0, "every URL in this export carries a query string");
+  assert.equal(
+    urlMap.summary.generated,
+    2,
+    "the term and author listings keep clean routes even when every content permalink is a query URL"
+  );
   assert.equal(
     urlMap.urls.filter((entry: { status: string }) => entry.status === "ambiguous-url").length,
     4

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-07
+
+The handoff now carries the parts of a WordPress site it used to leave behind, and `verify` can say whether the result is ready for DNS. Custom post types, navigation menus and archive pages come across instead of being dropped, and the publishing gate reads the build itself: media that never arrived, links that lead nowhere, canonical URLs, robots.txt and the sitemap.
+
+- Brings across every content post type in the export, not just pages and posts. Each becomes its own collection under `src/content/`, and the manifest records what the export carried and what this run did with it. Types that are not content, such as revisions and customizer drafts, are reported rather than passed over, and `postTypes.include` / `postTypes.exclude` decide anything you want decided differently.
+- Rebuilds the navigation WordPress served from its menu items, including nesting, custom links, and entries that point at a taxonomy archive. The generated project gets a `Nav.astro` the layout renders, `migration/menus.json` records the tree, and an entry nothing serves is reported (`MENU_TARGET_UNRESOLVED`).
+- Generates the archive pages WordPress made from its own settings: term archives for the categories, tags and custom taxonomies the content uses, and author archives for the people who wrote it. Routes come from the live URLs you supply when a sitemap confirms them, and otherwise from a WordPress default that the plan labels as an assumption (`ARCHIVE_ROUTE_ASSUMED`) rather than presenting as fact.
+- Adds the listings that need a setting WXR does not carry, each one opt-in through the migration config: a posts index (`archives.postsIndex`), pagination (`archives.perPage`), date archives (`archives.dates`) and RSS feeds (`archives.feeds`). Feeds are written as static files, and the address WordPress served gets a redirect rule to reach them.
+- Redirects attachment pages to the upload they describe, using the permalink the export records, and leaves them alone with `archives.attachmentPages: "ignore"`.
+- Listing pages are generated as ordinary content entries, so the sitemap, redirect map, coverage check and delivery checks treat them like any other page. Coverage now reports a live archive URL as served instead of explaining why it has no route.
+- `verify` gains the launch gate: it checks that every copied media file is present in the build and is not empty (`MEDIA_MISSING_IN_BUILD`, `MEDIA_EMPTY_IN_BUILD`), that internal links resolve to a route, a rule or a build file (`LINK_TARGET_MISSING_IN_BUILD`), that pages carry a canonical URL (`CANONICAL_MISSING`), that `robots.txt` does not disallow crawling (`ROBOTS_BLOCKED`) and that the sitemap lists every generated route (`SITEMAP_INCOMPLETE`).
+- Adds `--publish-ready` to `convert` and `demo`: an indexable layout with a canonical URL per page, and a `robots.txt` that allows crawling and names the sitemap. The private default is unchanged.
+- The verification artefact records which checks ran and which could not (`checks`), and counts the unchecked ones separately. A check that needs the build output is never reported as passed when only a crawl report was supplied.
+- `manifest.json` and the new `archives.json` and `menus.json` use schema `0.8`; the verification artefact moves to `0.8`. Media stays `0.7` and links stay `0.3`, because neither changed shape.
+
 ## [0.7.0] - 2026-10-01
 
 You can now bring images into the generated Astro site. Use `--uploads` with a local copy of your WordPress uploads directory, or `--media-base` if a CDN already serves your files. The migration report shows which files were copied, which stay remote, and which still need attention.
@@ -119,7 +134,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/lame13/wp-migrate-core/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/lame13/wp-migrate-core/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/lame13/wp-migrate-core/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/lame13/wp-migrate-core/compare/v0.5.0...v0.6.0

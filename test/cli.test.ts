@@ -215,7 +215,11 @@ test("--json prints one machine-readable document instead of the summary", async
   assert.deepEqual(document.issues, plan.issues);
   assert.equal(document.summary.media.assets, 5);
   assert.equal(document.summary.media.notInExport, 1);
-  assert.equal(document.summary.routes.generated, 0, "every link in this export carries a query string");
+  assert.equal(
+    document.summary.routes.generated,
+    2,
+    "the generated term and author listings have real routes even when every content permalink is a query URL"
+  );
   assert.equal(document.summary.routes.withoutTarget, 4);
   assert.equal(document.summary.links.internal, 4);
   assert.equal(document.summary.links.needsRewrite, 0, "ambiguous exported URLs must not be rewritten");
@@ -360,7 +364,7 @@ test("convert writes a media inventory and a URL map beside the generated site",
   const humanRun = runCli(["convert", demoFixturePath, "--out", output], workspace);
   assert.equal(humanRun.status, 0, humanRun.stderr);
   assert.match(humanRun.stdout, /media: 5 assets in the export, 4 referenced/);
-  assert.match(humanRun.stdout, /urls: 4 routes generated, 1 redirect needed/);
+  assert.match(humanRun.stdout, /urls: 6 routes generated, 1 redirect needed/);
   assert.match(humanRun.stdout, /links: 4 same-site links, 2 proposed rewrites, 1 without a generated page, 1 external/);
   assert.match(humanRun.stdout, /Media inventory: .*migration\/media\.json/);
   assert.match(humanRun.stdout, /URL and redirect map: .*migration\/redirects\.json/);
@@ -432,7 +436,7 @@ test("--live-urls checks a downloaded sitemap against the routes and rules", asy
   assert.equal(human.status, 0, human.stderr);
   assert.match(
     human.stdout,
-    /live urls: 17 URLs checked, 4 served by a route, 1 covered by a proposed rule, 2 with no route or rule/
+    /live urls: 17 URLs checked, 5 served by a route, 1 covered by a proposed rule, 2 with no route or rule/
   );
   assert.match(human.stdout, /\[WARNING\] \/guides\/water-heater-repair\/: .*no redirect rule covers it/);
 

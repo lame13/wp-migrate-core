@@ -21,6 +21,7 @@ import type {
   FailureThreshold,
   LaunchFinding,
   LiveUrlSource,
+  MenuItem,
   MigrationConfig,
   MigrationIssue,
   MigrationNode,
@@ -50,6 +51,7 @@ interface ParsedOptions {
   readonly uploadsDirectory?: string;
   readonly mediaBaseUrl?: string;
   readonly copyUnusedMedia?: boolean;
+  readonly publishReady?: boolean;
   readonly json: boolean;
   /** Absent when the caller did not ask for a gate, so config can set one. */
   readonly failOn?: FailureThreshold;
@@ -88,6 +90,9 @@ Options:
                         copying the files (convert and demo)
   --copy-unused-media   also deliver attachments no included content uses
                         (convert and demo)
+  --publish-ready       write a site ready to be indexed: canonical URLs, no
+                        noindex meta, and a robots.txt that allows crawling
+                        (convert and demo). The default handoff stays private.
   --live-urls <file>     compare a downloaded sitemap or URL list with the plan;
                         repeat the option to check several files at once
   --html-dir <dir>      verify a local build by reading its HTML files
@@ -149,6 +154,7 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
   let uploadsDirectory: string | undefined;
   let mediaBaseUrl: string | undefined;
   let copyUnusedMedia = false;
+  let publishReady = false;
   let json = false;
   let failOn: FailureThreshold | undefined;
 
@@ -179,6 +185,8 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
       index += 1;
     } else if (value === "--copy-unused-media") {
       copyUnusedMedia = true;
+    } else if (value === "--publish-ready") {
+      publishReady = true;
     } else if (value === "--live-urls") {
       const candidate = optionValue(value, argv[index + 1]);
       if (/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
@@ -235,6 +243,9 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
         "--uploads, --media-base and --copy-unused-media write files into a generated project, so they are only supported by convert and demo."
       );
     }
+    if (command !== "convert" && command !== "demo" && publishReady) {
+      throw new Error("--publish-ready writes a generated project, so it is only supported by convert and demo.");
+    }
     if (
       command !== "verify" &&
       (htmlDirectory !== undefined || routelintReport !== undefined || hasDelivery)
@@ -271,6 +282,7 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
     ...(uploadsDirectory === undefined ? {} : { uploadsDirectory }),
     ...(mediaBaseUrl === undefined ? {} : { mediaBaseUrl }),
     ...(copyUnusedMedia ? { copyUnusedMedia } : {}),
+    ...(publishReady ? { publishReady } : {}),
     json,
     ...(failOn === undefined ? {} : { failOn })
   };
@@ -492,8 +504,60 @@ function createMigrationPlan(project: MigrationProject): object {
       summary: project.coverage.summary,
       entries: coverageEntryRecords(project.coverage)
     },
+    types: project.types.map((entry) => ({
+      name: entry.name,
+      label: entry.label,
+      collection: entry.collection,
+      sourceItems: entry.sourceItems,
+      records: entry.records,
+      included: entry.included,
+      ...(entry.reason === undefined ? {} : { reason: entry.reason })
+    })),
+    archives: {
+      summary: project.archives.summary,
+      pages: project.archives.pages.map((page) => ({
+        id: page.id,
+        kind: page.kind,
+        title: page.title,
+        route: page.route,
+        subject: page.subject,
+        ...(page.sourceUrl === undefined ? {} : { sourceUrl: page.sourceUrl }),
+        routeSource: page.routeSource,
+        paginated: page.paginated,
+        sourceIds: page.sourceIds
+      })),
+      feeds: project.archives.feeds.map((feed) => ({
+        id: feed.id,
+        path: feed.path,
+        ...(feed.sourcePath === undefined ? {} : { sourcePath: feed.sourcePath }),
+        title: feed.title,
+        sourceIds: feed.sourceIds
+      }))
+    },
+    menus: {
+      summary: project.menus.summary,
+      trees: project.menus.trees.map((menu) => ({
+        id: menu.id,
+        name: menu.name,
+        slug: menu.slug,
+        items: menu.items.map(planMenuItem)
+      }))
+    },
     ...(project.config === undefined ? {} : { config: project.config }),
     summary: project.summary
+  };
+}
+
+function planMenuItem(item: MenuItem): object {
+  return {
+    id: item.id,
+    label: item.label,
+    kind: item.kind,
+    ...(item.url === undefined ? {} : { url: item.url }),
+    ...(item.targetRoute === undefined ? {} : { targetRoute: item.targetRoute }),
+    ...(item.parentId === undefined ? {} : { parentId: item.parentId }),
+    ...(item.reason === undefined ? {} : { reason: item.reason }),
+    children: item.children.map(planMenuItem)
   };
 }
 
@@ -602,6 +666,27 @@ function printSummary(project: MigrationProject): void {
     console.log(
       `  media delivery: ${delivery.copied} of ${delivery.files} ${pluralize(delivery.files, "file")} copied, ` +
         `${delivery.linked} linked to the media base, ${delivery.remote} left remote, ${delivery.missing} missing`
+    );
+  }
+  const types = Object.entries(summary.types).sort(([left], [right]) => left.localeCompare(right));
+  if (types.length > 2 || types.some(([name]) => name !== "page" && name !== "post")) {
+    console.log(`  content types: ${types.map(([name, count]) => `${count} ${name}`).join(", ")}`);
+  }
+  const archives = summary.archives;
+  const listings = archives.taxonomies + archives.authors + archives.dates + archives.postsIndex;
+  if (listings > 0 || archives.feeds > 0) {
+    console.log(
+      `  listings: ${listings} ${pluralize(listings, "archive page")} ` +
+        `(${archives.taxonomies} term, ${archives.authors} author, ${archives.dates} date, ${archives.postsIndex} posts index), ` +
+        `${archives.fromLiveUrls} from live URLs, ${archives.assumed} built on an assumed base` +
+        `${archives.feeds === 0 ? "" : `, ${archives.feeds} ${pluralize(archives.feeds, "feed")}`}`
+    );
+  }
+  if (summary.menus.menus > 0) {
+    console.log(
+      `  navigation: ${summary.menus.menus} ${pluralize(summary.menus.menus, "menu")}, ` +
+        `${summary.menus.items} ${pluralize(summary.menus.items, "entry")}, ` +
+        `${summary.menus.unresolved} without a generated target`
     );
   }
   console.log(
@@ -739,11 +824,17 @@ function verificationRouteRecords(verification: SiteVerification): readonly Veri
  */
 function createVerificationDocument(verification: SiteVerification): object {
   return {
-    schemaVersion: "0.6",
+    schemaVersion: "0.8",
     generator: { name: "wp-migrate-core", version: packageVersion },
     observed: { kind: verification.observed, source: verification.source },
     routes: verificationRouteRecords(verification),
     summary: verification.summary,
+    checks: verification.checks.map((check) => ({
+      id: check.id,
+      label: check.label,
+      checked: check.checked,
+      ...(check.reason === undefined ? {} : { reason: check.reason })
+    })),
     ...(verification.delivery === undefined
       ? {}
       : { delivery: deliveryEvidenceRecord(verification.delivery) }),
@@ -873,6 +964,15 @@ function printVerification(verification: SiteVerification, output: string): void
   console.log(
     `  pages without a title: ${summary.withoutTitle}; pages without a heading: ${summary.withoutHeading}`
   );
+
+  const unchecked = verification.checks.filter((check) => !check.checked);
+  console.log(
+    `\nChecks taken: ${verification.checks.length - unchecked.length} of ${verification.checks.length}` +
+      `${unchecked.length === 0 ? "" : `; not checked: ${unchecked.map((check) => check.label).join("; ")}`}`
+  );
+  for (const check of unchecked) {
+    console.log(`  [NOT CHECKED] ${check.label}${check.reason === undefined ? "" : ` — ${check.reason}`}`);
+  }
 
   const delivery = verification.delivery;
   if (delivery !== undefined) {
@@ -1032,7 +1132,10 @@ async function run(): Promise<void> {
     const plan = await inspect(project, resolve(output, "migration-plan"));
     const site = resolve(output, "astro-site");
     const ruleFiles = redirectRuleFiles(project);
-    await generateAstroProject(project, site, { rewriteLinks: !options.keepSourceLinks });
+    await generateAstroProject(project, site, {
+      rewriteLinks: !options.keepSourceLinks,
+      ...(options.publishReady === true ? { publishReady: true } : {})
+    });
     await writeReport(project, resolve(site, "migration", "report.html"));
     finishCommand(project, options, {
       command: "demo",
@@ -1096,7 +1199,10 @@ async function run(): Promise<void> {
     const output = resolve(options.output);
     const delivered = await deliverProjectMedia(project, options, config);
     const ruleFiles = redirectRuleFiles(delivered);
-    await generateAstroProject(delivered, output, { rewriteLinks: !options.keepSourceLinks });
+    await generateAstroProject(delivered, output, {
+      rewriteLinks: !options.keepSourceLinks,
+      ...(options.publishReady === true ? { publishReady: true } : {})
+    });
     await writeReport(delivered, resolve(output, "migration", "report.html"));
     finishCommand(delivered, options, {
       command: "convert",

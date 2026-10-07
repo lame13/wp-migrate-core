@@ -1,6 +1,11 @@
 export type OutputTarget = "astro" | "next" | "nuxt";
 
-export type WordPressContentType = "page" | "post";
+/**
+ * `page` and `post` are the types this tool has always handled; any other slug
+ * an export carries becomes a content type of its own rather than a silent
+ * omission.
+ */
+export type WordPressContentType = "page" | "post" | (string & {});
 
 export type WordPressStatus =
   | "publish"
@@ -82,7 +87,11 @@ export const MIGRATION_ISSUE_CODES = [
   "LINK_TARGET_OUTSIDE_EXPORT",
   "LIVE_URL_UNCOVERED",
   "LIVE_URL_SOURCE_EMPTY",
-  "CONFIG_ENTRY_UNMATCHED"
+  "CONFIG_ENTRY_UNMATCHED",
+  "WXR_POST_TYPE_SKIPPED",
+  "MENU_TARGET_UNRESOLVED",
+  "ARCHIVE_ROUTE_ASSUMED",
+  "SITE_URL_MISSING"
 ] as const;
 
 export type MigrationIssueCode = (typeof MIGRATION_ISSUE_CODES)[number];
@@ -123,6 +132,11 @@ export interface ContentRecord {
   readonly slug: string;
   readonly route?: string;
   readonly publishedAt?: string;
+  /**
+   * The same publication time from `wp:post_date_gmt`, kept separately because
+   * only this one is known to be UTC and can therefore date a feed item.
+   */
+  readonly publishedAtGmt?: string;
   readonly modifiedAt?: string;
   readonly author?: string;
   readonly editor: SourceEditor;
@@ -164,6 +178,12 @@ export interface MediaAsset {
   readonly title: string;
   /** Path of the asset on the source site, without query or fragment. */
   readonly path?: string;
+  /**
+   * Path of the attachment page WordPress served for this upload, when the
+   * export carries the permalink. Attachment pages usually redirect to the
+   * file itself.
+   */
+  readonly pagePath?: string;
   /** Sanitized absolute source URL, when the export provides one. */
   readonly url?: string;
   /** `_wp_attached_file`, such as `2026/05/repair.jpg`. */
@@ -366,6 +386,123 @@ export interface MigrationRoutes {
   readonly summary: RouteSummary;
 }
 
+/**
+ * One WordPress post type the export carried, and what this run did with it.
+ * `sourceItems` counts what the file contains; `records` counts what became
+ * content in the handoff, so a type the scan left out is visible rather than
+ * absent.
+ */
+export interface ContentTypeEntry {
+  readonly name: string;
+  /** Human label for reports, derived from the slug. */
+  readonly label: string;
+  /** Directory under `src/content/` this type generates into. */
+  readonly collection: string;
+  readonly sourceItems: number;
+  readonly records: number;
+  readonly included: boolean;
+  /** Why the type was left out, when it was. */
+  readonly reason?: string;
+}
+
+/** How a navigation entry resolves against the rest of this plan. */
+export type MenuItemKind = "post" | "taxonomy" | "custom" | "post-type-archive" | "unknown";
+
+/** One menu entry, with its children in export order. */
+export interface MenuItem {
+  readonly id: string;
+  readonly label: string;
+  readonly kind: MenuItemKind;
+  /** The target as the export recorded it, sanitized. */
+  readonly url?: string;
+  /** The generated route this plan serves the target at, when it serves one. */
+  readonly targetRoute?: string;
+  readonly parentId?: string;
+  readonly children: readonly MenuItem[];
+  /** Set when nothing in this plan serves the entry. */
+  readonly reason?: string;
+}
+
+/** One WordPress menu, as the export's `nav_menu_item` items describe it. */
+export interface MenuTree {
+  readonly id: string;
+  readonly name: string;
+  readonly slug: string;
+  readonly items: readonly MenuItem[];
+}
+
+export interface MenuSummary {
+  readonly menus: number;
+  readonly items: number;
+  /** Entries no generated route serves, which need a decision. */
+  readonly unresolved: number;
+}
+
+export interface MigrationMenus {
+  readonly trees: readonly MenuTree[];
+  readonly summary: MenuSummary;
+}
+
+/** The WordPress views a static site has to reproduce deliberately. */
+export type ArchiveKind = "taxonomy" | "author" | "date" | "posts-index";
+
+/**
+ * How an archive route was chosen. A route taken from a live URL the caller
+ * supplied is evidence; a route built from a WordPress default is an
+ * assumption, and the report says which is which.
+ */
+export type ArchiveRouteSource = "live-url" | "wordpress-default" | "derived" | "config";
+
+/** One generated listing page: a term, an author, a month, or the posts index. */
+export interface ArchivePage {
+  readonly id: string;
+  readonly kind: ArchiveKind;
+  readonly title: string;
+  readonly route: string;
+  /**
+   * What this listing is about, as `category:guides`, `author:niko`,
+   * `date:2026-06` or `posts`. Menus and other planners line archives up by
+   * subject rather than by guessing from a URL.
+   */
+  readonly subject: string;
+  /** The URL WordPress answered this archive on, when the caller supplied it. */
+  readonly sourceUrl?: string;
+  /** Records this page lists, in plan order. */
+  readonly sourceIds: readonly string[];
+  readonly routeSource: ArchiveRouteSource;
+  /** True for `/page/2/` and later, which serve the tail of a listing. */
+  readonly paginated: boolean;
+}
+
+/** One feed the plan writes as a static file. */
+export interface FeedFile {
+  readonly id: string;
+  /** Site-relative path the file is served at, such as `/feed.xml`. */
+  readonly path: string;
+  /** The path WordPress served a feed on, when the live URLs named one. */
+  readonly sourcePath?: string;
+  readonly title: string;
+  readonly sourceIds: readonly string[];
+}
+
+export interface ArchiveSummary {
+  readonly taxonomies: number;
+  readonly authors: number;
+  readonly dates: number;
+  readonly postsIndex: number;
+  /** Routes taken from a live URL rather than assumed. */
+  readonly fromLiveUrls: number;
+  /** Routes that use a base this export does not confirm. */
+  readonly assumed: number;
+  readonly feeds: number;
+}
+
+export interface MigrationArchives {
+  readonly pages: readonly ArchivePage[];
+  readonly feeds: readonly FeedFile[];
+  readonly summary: ArchiveSummary;
+}
+
 export type LinkReferenceKind = "html-anchor" | "gutenberg-button" | "elementor-button";
 
 /**
@@ -513,6 +650,8 @@ export interface MigrationSummary {
   readonly records: number;
   readonly pages: number;
   readonly posts: number;
+  /** Content records per WordPress post type, including `page` and `post`. */
+  readonly types: Readonly<Record<string, number>>;
   readonly nodes: number;
   readonly nativeNodes: number;
   readonly manualNodes: number;
@@ -523,6 +662,8 @@ export interface MigrationSummary {
   readonly media: MediaSummary;
   readonly routes: RouteSummary;
   readonly links: LinkSummary;
+  readonly archives: ArchiveSummary;
+  readonly menus: MenuSummary;
 }
 
 export interface MigrationProject {
@@ -536,10 +677,14 @@ export interface MigrationProject {
   };
   readonly records: readonly ContentRecord[];
   readonly issues: readonly MigrationIssue[];
+  /** Every WordPress post type the export carried and what this run did with it. */
+  readonly types: readonly ContentTypeEntry[];
   readonly media: MigrationMedia;
   readonly routes: MigrationRoutes;
   readonly links: MigrationLinks;
   readonly coverage: LiveUrlCoverage;
+  readonly archives: MigrationArchives;
+  readonly menus: MigrationMenus;
   readonly summary: MigrationSummary;
   /** The decisions a migration config applied, when the run read one. */
   readonly config?: MigrationConfigRecord;
@@ -573,6 +718,32 @@ export interface MigrationConfig {
   readonly exclude?: readonly string[];
   /** Issue codes a reviewer has already looked at and accepted. */
   readonly ignoreIssues?: readonly MigrationIssueCode[];
+  /**
+   * Which WordPress post types become content. The default brings across every
+   * type the export carries except the ones that are not content.
+   */
+  readonly postTypes?: {
+    readonly include?: readonly string[];
+    readonly exclude?: readonly string[];
+  };
+  /**
+   * The views WordPress generated from settings a WXR file does not carry.
+   * Term and author archives default on, because dropping a URL is the failure
+   * this tool exists to prevent. Everything else has to be asked for.
+   */
+  readonly archives?: {
+    readonly taxonomies?: boolean;
+    readonly authors?: boolean;
+    readonly dates?: boolean;
+    /** Where the posts index lives, such as `/blog/`. No default is invented. */
+    readonly postsIndex?: string;
+    /** Posts per listing page, which decides the `/page/2/` routes. */
+    readonly perPage?: number;
+    /** Feed paths to write, such as `/feed/`. */
+    readonly feeds?: readonly string[];
+    /** What to do with WordPress attachment pages. */
+    readonly attachmentPages?: "redirect" | "ignore";
+  };
   /** Where the files for the media inventory come from. */
   readonly media?: {
     readonly uploadsDir?: string;
@@ -660,6 +831,8 @@ export interface VerificationSummary {
   readonly launchBlockers: number;
   /** Findings that need review before publishing. */
   readonly launchWarnings: number;
+  /** Checks this run could not take, which must never read as passed. */
+  readonly uncheckedChecks: number;
 }
 
 /**
@@ -836,7 +1009,34 @@ export type LaunchFindingCode =
   | "DELIVERY_INCOMPLETE"
   | "DELIVERY_CONTRACT"
   | "DELIVERY_REGRESSION"
-  | "DELIVERY_UNOBSERVED";
+  | "DELIVERY_UNOBSERVED"
+  | "MEDIA_MISSING_IN_BUILD"
+  | "MEDIA_EMPTY_IN_BUILD"
+  | "LINK_TARGET_MISSING_IN_BUILD"
+  | "CANONICAL_MISSING"
+  | "ROBOTS_BLOCKED"
+  | "SITEMAP_INCOMPLETE";
+
+/** Every check the launch gate can take, and whether this run took it. */
+export type VerificationCheckId =
+  | "content"
+  | "media"
+  | "links"
+  | "canonical"
+  | "robots"
+  | "sitemap"
+  | "delivery";
+
+/**
+ * One check in the launch gate. A check that could not run says so: reading
+ * "not checked" as "passed" is the failure mode a launch gate exists to avoid.
+ */
+export interface VerificationCheck {
+  readonly id: VerificationCheckId;
+  readonly label: string;
+  readonly checked: boolean;
+  readonly reason?: string;
+}
 
 /** The local build or saved report a publishing finding was read from. */
 export type LaunchEvidenceSource = "html-directory" | "routelint-report" | "ssrwire-report";
@@ -873,6 +1073,8 @@ export interface SiteVerification {
   readonly source: string;
   readonly routes: readonly VerifiedRoute[];
   readonly summary: VerificationSummary;
+  /** What the launch gate checked, and what it could not check. */
+  readonly checks: readonly VerificationCheck[];
   /** Delivery evidence from a saved SSRWire report, when one was supplied. */
   readonly delivery?: DeliveryEvidence;
   /** Findings that gate publishing rather than content fidelity. */

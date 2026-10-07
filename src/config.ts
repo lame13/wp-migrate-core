@@ -18,12 +18,25 @@ const CONFIG_KEYS = [
   "routes",
   "exclude",
   "ignoreIssues",
+  "postTypes",
+  "archives",
   "media"
 ] as const;
 
 const SITE_KEYS = ["title", "url"] as const;
 const MEDIA_KEYS = ["uploadsDir", "baseUrl", "copyUnused"] as const;
+const POST_TYPE_KEYS = ["include", "exclude"] as const;
+const ARCHIVE_KEYS = [
+  "taxonomies",
+  "authors",
+  "dates",
+  "postsIndex",
+  "perPage",
+  "feeds",
+  "attachmentPages"
+] as const;
 const FAILURE_THRESHOLDS = ["none", "warning", "blocker"] as const;
+const ATTACHMENT_PAGE_MODES = ["redirect", "ignore"] as const;
 
 export interface LoadedMigrationConfig {
   /** Absolute path of the config file the caller asked for. */
@@ -90,6 +103,16 @@ export function parseMigrationConfig(
     routes?: Record<string, string>;
     exclude?: string[];
     ignoreIssues?: MigrationIssueCode[];
+    postTypes?: { include?: string[]; exclude?: string[] };
+    archives?: {
+      taxonomies?: boolean;
+      authors?: boolean;
+      dates?: boolean;
+      postsIndex?: string;
+      perPage?: number;
+      feeds?: string[];
+      attachmentPages?: "redirect" | "ignore";
+    };
     media?: { uploadsDir?: string; baseUrl?: string; copyUnused?: boolean };
   } = {};
 
@@ -150,6 +173,59 @@ export function parseMigrationConfig(
       );
     }
     config.ignoreIssues = list as MigrationIssueCode[];
+  }
+
+  if (parsed.postTypes !== undefined) {
+    const typesLabel = `${label} postTypes`;
+    const record = expectRecord(parsed.postTypes, typesLabel);
+    expectKnownKeys(record, POST_TYPE_KEYS, typesLabel);
+    config.postTypes = {
+      ...(record.include === undefined
+        ? {}
+        : { include: expectStringList(record.include, `${typesLabel} include`) }),
+      ...(record.exclude === undefined
+        ? {}
+        : { exclude: expectStringList(record.exclude, `${typesLabel} exclude`) })
+    };
+  }
+
+  if (parsed.archives !== undefined) {
+    const archivesLabel = `${label} archives`;
+    const record = expectRecord(parsed.archives, archivesLabel);
+    expectKnownKeys(record, ARCHIVE_KEYS, archivesLabel);
+    config.archives = {
+      ...(record.taxonomies === undefined
+        ? {}
+        : { taxonomies: expectBoolean(record.taxonomies, `${archivesLabel} taxonomies`) }),
+      ...(record.authors === undefined
+        ? {}
+        : { authors: expectBoolean(record.authors, `${archivesLabel} authors`) }),
+      ...(record.dates === undefined
+        ? {}
+        : { dates: expectBoolean(record.dates, `${archivesLabel} dates`) }),
+      ...(record.postsIndex === undefined
+        ? {}
+        : { postsIndex: expectRoute(record.postsIndex, `${archivesLabel} postsIndex`) }),
+      ...(record.perPage === undefined
+        ? {}
+        : { perPage: expectPositiveInteger(record.perPage, `${archivesLabel} perPage`) }),
+      ...(record.feeds === undefined
+        ? {}
+        : {
+            feeds: expectStringList(record.feeds, `${archivesLabel} feeds`).map((feed) =>
+              expectRoute(feed, `${archivesLabel} feeds[]`)
+            )
+          }),
+      ...(record.attachmentPages === undefined
+        ? {}
+        : {
+            attachmentPages: expectMode(
+              record.attachmentPages,
+              ATTACHMENT_PAGE_MODES,
+              `${archivesLabel} attachmentPages`
+            )
+          })
+    };
   }
 
   if (parsed.media !== undefined) {
@@ -264,4 +340,34 @@ function expectHttpUrl(value: unknown, label: string): string {
   // channel link is reported, and drop any query or fragment a base URL
   // cannot mean.
   return parsed.origin + parsed.pathname;
+}
+
+/** A site-relative path, such as a generated route or a feed path. */
+function expectRoute(value: unknown, label: string): string {
+  const candidate = expectNonEmptyString(value, label);
+  if (!candidate.startsWith("/") || candidate.startsWith("//")) {
+    throw new Error(`${label} must be a site-relative path such as "/blog/", not "${candidate}".`);
+  }
+
+  return candidate;
+}
+
+function expectPositiveInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive whole number.`);
+  }
+
+  return value;
+}
+
+function expectMode<const Mode extends string>(
+  value: unknown,
+  modes: readonly Mode[],
+  label: string
+): Mode {
+  if (typeof value !== "string" || !modes.includes(value as Mode)) {
+    throw new Error(`${label} must be one of ${modes.join(", ")}.`);
+  }
+
+  return value as Mode;
 }

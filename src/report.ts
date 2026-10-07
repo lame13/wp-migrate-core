@@ -4,11 +4,14 @@ import { sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
 import { packageVersion } from "./version.js";
 
 import type {
+  ArchiveKind,
+  ArchiveRouteSource,
   ContentRecord,
   LinkReferenceStatus,
   LiveUrlShape,
   LiveUrlStatus,
   MediaDeliveryStatus,
+  MenuItem,
   MediaReferenceKind,
   MediaReferenceStatus,
   MigrationIssue,
@@ -115,9 +118,27 @@ function renderSourceBreakdown(project: MigrationProject): string {
     return '<p class="muted">No posts or pages were included in this scan.</p>';
   }
 
+  const types = project.types
+    .filter((entry) => entry.sourceItems > 0)
+    .sort((left, right) => right.records - left.records || left.name.localeCompare(right.name));
+  const typeList =
+    types.length <= 1
+      ? ""
+      : `\n  <h3>Content types</h3>
+  <ul class="source-breakdown">
+    ${types
+      .map(
+        (entry) =>
+          `<li><span>${escapeHtml(entry.label)}${entry.included ? "" : " — left out"}</span><strong>${entry.records}${
+            entry.included ? "" : ` of ${entry.sourceItems}`
+          }</strong></li>`
+      )
+      .join("\n    ")}
+  </ul>`;
+
   return `<ul class="source-breakdown">
     ${entries.map(([kind, count]) => `<li><span>${escapeHtml(sourceKindLabels[kind])}</span><strong>${count}</strong></li>`).join("\n")}
-  </ul>`;
+  </ul>${typeList}`;
 }
 
 function renderIssue(
@@ -405,6 +426,135 @@ const liveUrlShapeLabels: Readonly<Record<LiveUrlShape, string>> = {
   paged: "Paginated archive",
   "query-url": "Query-string URL"
 };
+
+const archiveKindLabels: Readonly<Record<ArchiveKind, string>> = {
+  taxonomy: "Term",
+  author: "Author",
+  date: "Date",
+  "posts-index": "Posts index"
+};
+
+const archiveRouteSourceLabels: Readonly<Record<ArchiveRouteSource, string>> = {
+  "live-url": "From a live URL",
+  "wordpress-default": "WordPress default base",
+  derived: "Derived from content",
+  config: "Set in the config"
+};
+
+/**
+ * The listings WordPress served, and how each route was decided. A route taken
+ * from a live URL is evidence; one built from a WordPress default is an
+ * assumption, and the two never look alike here.
+ */
+function renderArchiveSection(project: MigrationProject): string {
+  const { pages, feeds, summary } = project.archives;
+  const shown = pages.slice(0, inventoryRowLimit);
+
+  const rows = shown
+    .map(
+      (page) => `<tr>
+        <td><code>${escapeHtml(page.route)}</code></td>
+        <td>${escapeHtml(archiveKindLabels[page.kind])}</td>
+        <td>${escapeHtml(page.title)}</td>
+        <td>${escapeHtml(archiveRouteSourceLabels[page.routeSource])}</td>
+        <td>${page.sourceIds.length}</td>
+      </tr>`
+    )
+    .join("\n");
+
+  const feedList =
+    feeds.length === 0
+      ? ""
+      : `
+        <article class="panel">
+          <h3>Feeds</h3>
+          <ul class="inventory-list">
+            ${feeds
+              .map(
+                (feed) =>
+                  `<li><code>${escapeHtml(feed.path)}</code><span>${
+                    feed.sourcePath === undefined ? "Written as a static file" : `WordPress served ${escapeHtml(feed.sourcePath)}`
+                  }</span></li>`
+              )
+              .join("\n            ")}
+          </ul>
+        </article>`;
+
+  return `
+    <section class="section" aria-labelledby="archives-heading">
+      <div class="section-heading">
+        <h2 id="archives-heading">Listings</h2>
+        <p>Archive pages WordPress generated from its own settings. Term and author listings are generated when the export carries them; date lists, a posts index and feeds have to be asked for, because WXR does not carry the settings behind them.</p>
+      </div>
+
+      <div class="metric-grid">
+        <article class="metric"><span>Term archives</span><strong>${summary.taxonomies}</strong><small>Categories, tags and custom taxonomies the content uses</small></article>
+        <article class="metric"><span>Author archives</span><strong>${summary.authors}</strong><small>One listing per author with published content</small></article>
+        <article class="metric"><span>Routes from live URLs</span><strong>${summary.fromLiveUrls}</strong><small>Archive routes the supplied sitemap confirms</small></article>
+        <article class="metric"><span>Routes that assume a base</span><strong>${summary.assumed}</strong><small>Distinct bases a live URL did not confirm</small></article>
+      </div>
+
+      ${pages.length === 0 ? `
+        <div class="empty-state">
+          <h3>No listings were generated</h3>
+          <p>Either the export carries no terms or authors, or this run was configured not to generate their archives.</p>
+        </div>` : `
+        <article class="panel">
+          <h3>Generated listings</h3>
+          <div class="inventory-scroll">
+            <table class="inventory-table">
+              <thead>
+                <tr><th scope="col">Route</th><th scope="col">Kind</th><th scope="col">Title</th><th scope="col">Route source</th><th scope="col">Records</th></tr>
+              </thead>
+              <tbody>
+                ${rows}
+              </tbody>
+            </table>
+          </div>
+          ${pages.length > shown.length ? `<p class="inventory-note">Showing ${shown.length} of ${pages.length} listings. Every entry is in <code>migration/archives.json</code>.</p>` : ""}
+        </article>`}
+
+      ${feedList}
+    </section>`;
+}
+
+/** The navigation WordPress served, so a missing menu is visible before launch. */
+function renderMenuSection(project: MigrationProject): string {
+  const { trees, summary } = project.menus;
+  if (trees.length === 0) {
+    return "";
+  }
+
+  const renderItem = (item: MenuItem): string =>
+    `<li><span>${escapeHtml(item.label)}</span><code>${escapeHtml(item.targetRoute ?? item.url ?? "no target")}</code>${
+      item.children.length === 0 ? "" : `\n<ul>\n${item.children.map(renderItem).join("\n")}\n</ul>`
+    }</li>`;
+
+  return `
+    <section class="section" aria-labelledby="menus-heading">
+      <div class="section-heading">
+        <h2 id="menus-heading">Navigation</h2>
+        <p>The menus the export carries, resolved against the routes this plan generates. Placement in the new theme is still yours to decide.</p>
+      </div>
+
+      <div class="metric-grid">
+        <article class="metric"><span>Menus</span><strong>${summary.menus}</strong><small>Menu groups the export carries</small></article>
+        <article class="metric"><span>Entries</span><strong>${summary.items}</strong><small>Menu items, including nested ones</small></article>
+        <article class="metric"><span>Without a target</span><strong>${summary.unresolved}</strong><small>Entries nothing in this plan serves</small></article>
+      </div>
+
+      ${trees
+        .map(
+          (menu) => `<article class="panel">
+        <h3>${escapeHtml(menu.name)}</h3>
+        <ul class="inventory-list">
+          ${menu.items.map(renderItem).join("\n          ")}
+        </ul>
+      </article>`
+        )
+        .join("\n      ")}
+    </section>`;
+}
 
 function renderLinkSection(project: MigrationProject): string {
   const { summary, references } = project.links;
@@ -1252,6 +1402,10 @@ export function renderReport(project: MigrationProject): string {
     ${renderCoverageSection(project)}
 
     ${renderLinkSection(project)}
+
+    ${renderArchiveSection(project)}
+
+    ${renderMenuSection(project)}
 
     <section class="section" aria-labelledby="targets-heading">
       <div class="section-heading">

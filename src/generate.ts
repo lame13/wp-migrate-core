@@ -2,6 +2,7 @@ import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, parse, resolve } from "node:path";
 
 import {
+  contentCollectionName,
   linkRewrites,
   mediaPath,
   normalizeRoute,
@@ -20,9 +21,12 @@ import { coverageEntryRecords } from "./live-urls.js";
 import { deliverMedia, mediaDeliveryRecord } from "./media.js";
 import { redirectRuleFiles } from "./redirect-rules.js";
 import type {
+  ArchivePage,
   ContentRecord,
+  FeedFile,
   MediaAsset,
   MediaDeliveryEntry,
+  MenuItem,
   MigrationIssue,
   MigrationNode,
   MigrationProject
@@ -33,12 +37,25 @@ const GENERATOR_NAME = "wp-migrate-core";
 const SAFE_ELEMENTOR_HREF_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
 
 interface GeneratedRecord {
+  readonly kind: "content";
   readonly record: ContentRecord;
-  readonly collection: "pages" | "posts";
+  readonly collection: string;
   readonly fileName: string;
   readonly route: string;
   readonly sourceUrl: string;
 }
+
+/** A listing page: an archive WordPress generated, written as a content entry. */
+interface GeneratedListing {
+  readonly kind: "listing";
+  readonly archive: ArchivePage;
+  readonly collection: "listings";
+  readonly fileName: string;
+  readonly route: string;
+  readonly sourceUrl: string;
+}
+
+type GeneratedPage = GeneratedRecord | GeneratedListing;
 
 export interface GenerateOptions {
   /**
@@ -46,6 +63,12 @@ export interface GenerateOptions {
    * instead of the source permalinks. Defaults to true.
    */
   readonly rewriteLinks?: boolean;
+  /**
+   * Write a site that is ready to be indexed: a canonical URL per page, and a
+   * robots.txt that allows crawling and names the sitemap. The default handoff
+   * stays private on purpose, and `verify` reports whichever one it finds.
+   */
+  readonly publishReady?: boolean;
 }
 
 export async function generateAstroProject(
@@ -55,6 +78,8 @@ export async function generateAstroProject(
 ): Promise<void> {
   const outputDirectory = await prepareOutputDirectory(outDir);
   const records = prepareRecords(project);
+  const listings = prepareListings(project);
+  const pages: readonly GeneratedPage[] = [...records, ...listings];
   const linkRewritesByRecord = createLinkRewriteMap(project, options.rewriteLinks !== false);
   const media = createMediaRenderer(project);
 
@@ -68,23 +93,35 @@ export async function generateAstroProject(
     ["package.json", renderPackageJson(project)],
     ["astro.config.mjs", renderAstroConfig(project)],
     ["tsconfig.json", renderTsConfig()],
-    ["src/content.config.ts", renderContentConfig()],
-    ["src/pages/[...slug].astro", renderCatchAllPage()],
-    ["src/layouts/Layout.astro", renderLayout()],
+    ["src/content.config.ts", renderContentConfig(project)],
+    ["src/pages/[...slug].astro", renderCatchAllPage(project, options.publishReady === true)],
+    ["src/layouts/Layout.astro", renderLayout(project, options.publishReady === true)],
     ["src/styles/global.css", renderStyles()],
-    ["public/robots.txt", renderRobotsTxt()],
+    ["public/robots.txt", renderRobotsTxt(project, options.publishReady === true)],
     ["migration/issues.json", renderIssues(project.issues)],
     ["migration/media.json", renderMedia(project)],
     ["migration/redirects.json", renderRedirects(project)],
     ["migration/links.json", renderLinks(project)],
     ["migration/coverage.json", renderCoverage(project)],
-    ["migration/manifest.json", renderManifest(project, records)],
+    ["migration/archives.json", renderArchives(project)],
+    ["migration/menus.json", renderMenus(project)],
+    ["migration/manifest.json", renderManifest(project, pages)],
     ["README.md", renderReadme(project, options.rewriteLinks !== false)]
   ]);
 
+  if (project.menus.trees.length > 0) {
+    files.set("src/components/Nav.astro", renderNavComponent(project));
+  }
+
   const origin = siteOrigin(project);
   if (origin !== undefined) {
-    files.set("public/sitemap.xml", renderSitemap(records, origin));
+    files.set("public/sitemap.xml", renderSitemap(pages, origin));
+  }
+  for (const feed of project.archives.feeds) {
+    if (origin === undefined) {
+      continue;
+    }
+    files.set(`public${feed.path}`, renderFeed(feed, project, origin));
   }
 
   for (const ruleFile of redirectRuleFiles(project)) {
@@ -95,10 +132,12 @@ export async function generateAstroProject(
     files.set(checkFile.path, checkFile.contents);
   }
 
-  for (const generated of records) {
+  for (const generated of pages) {
     files.set(
       `src/content/${generated.collection}/${generated.fileName}`,
-      renderContentRecord(generated, linkRewritesByRecord.get(generated.record.sourceId), media)
+      generated.kind === "listing"
+        ? renderListingPage(generated, project)
+        : renderContentRecord(generated, linkRewritesByRecord.get(generated.record.sourceId), media)
     );
   }
 
@@ -166,9 +205,10 @@ function createLinkRewriteMap(
 function prepareRecords(project: MigrationProject): GeneratedRecord[] {
   const usedFileNames = new Set<string>();
   const usedRoutes = new Set<string>();
+  const collections = collectionByType(project);
 
   return project.records.map((record) => {
-    const collection = record.type === "page" ? "pages" : "posts";
+    const collection = collections.get(record.type) ?? contentCollectionName(record.type);
     const route = normalizeRoute(record.route ?? `/${record.slug}/`);
 
     if (usedRoutes.has(route)) {
@@ -186,11 +226,54 @@ function prepareRecords(project: MigrationProject): GeneratedRecord[] {
     usedFileNames.add(`${collection}/${fileName}`);
 
     return {
+      kind: "content",
       record,
       collection,
       fileName,
       route,
       sourceUrl: sourceUrlFor(project, record, route)
+    };
+  });
+}
+
+/** The content collection each post type generates into, from the plan. */
+function collectionByType(project: MigrationProject): ReadonlyMap<string, string> {
+  return new Map(project.types.filter((entry) => entry.included).map((entry) => [entry.name, entry.collection]));
+}
+
+/** Every content collection the handoff writes, in a stable order. */
+function generatedCollections(project: MigrationProject): readonly string[] {
+  const names = project.types.filter((entry) => entry.included).map((entry) => entry.collection);
+  const archives = project.archives.pages.length > 0 ? ["listings"] : [];
+  return [...new Set([...names, ...archives])].sort();
+}
+
+/**
+ * Archive pages become ordinary content entries, so the catch-all route, the
+ * sitemap, the manifest and the delivery checks all treat them like any other
+ * page instead of growing a second rendering path.
+ */
+function prepareListings(project: MigrationProject): GeneratedListing[] {
+  const usedFileNames = new Set<string>();
+
+  return project.archives.pages.map((archive) => {
+    const route = normalizeRoute(archive.route);
+    const stem = safeFileStem(route.replace(/^\/|\/$/g, "").replaceAll("/", "-") || "index");
+    let fileName = `${stem}.md`;
+    let suffix = 2;
+    while (usedFileNames.has(fileName)) {
+      fileName = `${stem}-${suffix}.md`;
+      suffix += 1;
+    }
+    usedFileNames.add(fileName);
+
+    return {
+      kind: "listing",
+      archive,
+      collection: "listings",
+      fileName,
+      route,
+      sourceUrl: archive.sourceUrl ?? route
     };
   });
 }
@@ -389,7 +472,16 @@ function renderTsConfig(): string {
   });
 }
 
-function renderContentConfig(): string {
+function renderContentConfig(project: MigrationProject): string {
+  const collections = generatedCollections(project)
+    .map(
+      (name) => `  ${JSON.stringify(name)}: defineCollection({
+    loader: glob({ base: "./src/content/${name}", pattern: "**/*.{md,mdx}" }),
+    schema: migrationSchema
+  })`
+    )
+    .join(",\n");
+
   return `import { defineCollection, z } from "astro:content";
 import { glob } from "astro/loaders";
 
@@ -402,27 +494,25 @@ const migrationSchema = z.object({
 });
 
 export const collections = {
-  pages: defineCollection({
-    loader: glob({ base: "./src/content/pages", pattern: "**/*.{md,mdx}" }),
-    schema: migrationSchema
-  }),
-  posts: defineCollection({
-    loader: glob({ base: "./src/content/posts", pattern: "**/*.{md,mdx}" }),
-    schema: migrationSchema
-  })
+${collections}
 };
 `;
 }
 
-function renderCatchAllPage(): string {
+function renderCatchAllPage(project: MigrationProject, publishReady: boolean): string {
+  const collections = generatedCollections(project);
+  const sources = collections.map((name) => `    ...(await getCollection(${JSON.stringify(name)}))`).join(",\n");
+  const layoutProps = publishReady
+    ? '\n  route={entry.data.route}'
+    : "";
+
   return `---
 import { getCollection, render } from "astro:content";
 import Layout from "../layouts/Layout.astro";
 
 export async function getStaticPaths() {
   const entries = [
-    ...(await getCollection("pages")),
-    ...(await getCollection("posts"))
+${sources}
   ];
 
   return entries.map((entry) => ({
@@ -440,22 +530,38 @@ const { Content } = await render(entry);
 ---
 
 <Layout
-  title={entry.data.title}
+  title={entry.data.title}${layoutProps}
 >
   <Content />
 </Layout>
 `;
 }
 
-function renderLayout(): string {
+function renderLayout(project: MigrationProject, publishReady: boolean): string {
+  const hasNavigation = project.menus.trees.length > 0;
+  const importLine = hasNavigation ? '\nimport Nav from "../components/Nav.astro";' : "";
+  const navLine = hasNavigation ? "\n    <Nav />" : "";
+  const robotsMeta = publishReady ? "" : '\n    <meta name="robots" content="noindex, nofollow" />';
+  const canonical = publishReady
+    ? `
+const canonical = route === undefined || Astro.site === undefined
+  ? undefined
+  : new URL(route, Astro.site).toString();`
+    : "";
+  const canonicalTag = publishReady
+    ? '\n    {canonical !== undefined && <link rel="canonical" href={canonical} />}'
+    : "";
+  const routeProp = publishReady ? "\n  route?: string;" : "";
+  const propsLine = publishReady ? "const { title, route } = Astro.props;" : "const { title } = Astro.props;";
+
   return `---
-import "../styles/global.css";
+import "../styles/global.css";${importLine}
 
 interface Props {
-  title: string;
+  title: string;${routeProp}
 }
 
-const { title } = Astro.props;
+${propsLine}${canonical}
 ---
 
 <!doctype html>
@@ -463,11 +569,10 @@ const { title } = Astro.props;
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width" />
-    <meta name="generator" content={Astro.generator} />
-    <meta name="robots" content="noindex, nofollow" />
+    <meta name="generator" content={Astro.generator} />${robotsMeta}${canonicalTag}
     <title>{title}</title>
   </head>
-  <body>
+  <body>${navLine}
     <main>
       <article>
         <slot />
@@ -507,8 +612,18 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 `;
 }
 
-function renderRobotsTxt(): string {
-  return "User-agent: *\nDisallow: /\n";
+/**
+ * The private default asks crawlers to stay away. `--publish-ready` writes the
+ * file a launch needs instead: crawling allowed, and the sitemap named when
+ * the site URL is known.
+ */
+function renderRobotsTxt(project: MigrationProject, publishReady: boolean): string {
+  if (!publishReady) {
+    return "User-agent: *\nDisallow: /\n";
+  }
+
+  const origin = siteOrigin(project);
+  return `User-agent: *\nAllow: /\n${origin === undefined ? "" : `\nSitemap: ${absoluteOnOrigin(origin, "/sitemap.xml")}\n`}`;
 }
 
 /**
@@ -516,9 +631,10 @@ function renderRobotsTxt(): string {
  * plan rather than from a build, so it doubles as the target list another
  * checker can be pointed at while the site is still being rebuilt.
  */
-function renderSitemap(records: readonly GeneratedRecord[], origin: string): string {
-  const entries = records.map((generated) => {
-    const lastModified = sitemapLastModified(generated.record.modifiedAt);
+function renderSitemap(pages: readonly GeneratedPage[], origin: string): string {
+  const entries = pages.map((generated) => {
+    const lastModified =
+      generated.kind === "content" ? sitemapLastModified(generated.record.modifiedAt) : undefined;
     return `  <url>
     <loc>${escapeHtml(absoluteOnOrigin(origin, generated.route))}</loc>${lastModified === undefined
       ? ""
@@ -545,6 +661,183 @@ function sitemapLastModified(value: string | undefined): string | undefined {
     ? date : undefined;
 }
 
+/**
+ * The navigation WordPress served, as a component the layout renders. The tree
+ * is serialized as HTML because a menu can nest to any depth and Astro
+ * templates cannot recurse; every label and href is escaped here.
+ */
+function renderNavComponent(project: MigrationProject): string {
+  const html = project.menus.trees
+    .map((menu) => `<nav aria-label="${escapeHtmlAttribute(menu.name)} navigation">\n${renderMenuList(menu.items)}\n</nav>`)
+    .join("\n");
+
+  return `---
+const navigation = ${JSON.stringify(html)};
+---
+
+<div set:html={navigation} />
+`;
+}
+
+function renderMenuList(items: readonly MenuItem[]): string {
+  return `<ul>\n${items.map((item) => renderMenuItem(item)).join("\n")}\n</ul>`;
+}
+
+function renderMenuItem(item: MenuItem): string {
+  const href = item.targetRoute ?? item.url;
+  const label = escapeHtml(item.label);
+  const target = href === undefined ? `<span>${label}</span>` : `<a href="${escapeHtmlAttribute(href)}">${label}</a>`;
+  const children = item.children.length === 0 ? "" : `\n${renderMenuList(item.children)}`;
+  return `  <li>${target}${children}</li>`;
+}
+
+/** The archives this handoff generates, with the subject each one lists. */
+function renderArchives(project: MigrationProject): string {
+  return renderJson({
+    schemaVersion: "0.8",
+    generator: {
+      name: GENERATOR_NAME,
+      version: packageVersion,
+      target: "astro"
+    },
+    summary: project.archives.summary,
+    pages: project.archives.pages.map((page) => ({
+      id: page.id,
+      kind: page.kind,
+      title: page.title,
+      route: page.route,
+      subject: page.subject,
+      ...(page.sourceUrl === undefined ? {} : { sourceUrl: page.sourceUrl }),
+      routeSource: page.routeSource,
+      paginated: page.paginated,
+      sourceIds: page.sourceIds
+    })),
+    feeds: project.archives.feeds.map((feed) => ({
+      id: feed.id,
+      path: feed.path,
+      ...(feed.sourcePath === undefined ? {} : { sourcePath: feed.sourcePath }),
+      title: feed.title,
+      sourceIds: feed.sourceIds
+    }))
+  });
+}
+
+/** The menus WordPress served, so the new theme can rebuild them deliberately. */
+function renderMenus(project: MigrationProject): string {
+  return renderJson({
+    schemaVersion: "0.8",
+    generator: {
+      name: GENERATOR_NAME,
+      version: packageVersion,
+      target: "astro"
+    },
+    summary: project.menus.summary,
+    trees: project.menus.trees.map((menu) => ({
+      id: menu.id,
+      name: menu.name,
+      slug: menu.slug,
+      items: menu.items.map(menuItemRecord)
+    }))
+  });
+}
+
+function menuItemRecord(item: MenuItem): object {
+  return {
+    id: item.id,
+    label: item.label,
+    kind: item.kind,
+    ...(item.url === undefined ? {} : { url: item.url }),
+    ...(item.targetRoute === undefined ? {} : { targetRoute: item.targetRoute }),
+    ...(item.parentId === undefined ? {} : { parentId: item.parentId }),
+    ...(item.reason === undefined ? {} : { reason: item.reason }),
+    children: item.children.map(menuItemRecord)
+  };
+}
+
+/**
+ * A listing page, written as a content entry: the title, a link to every
+ * record it lists, and the page links when a listing is paginated.
+ */
+function renderListingPage(listing: GeneratedListing, project: MigrationProject): string {
+  const { archive } = listing;
+  const recordsById = new Map(project.records.map((record) => [record.sourceId, record]));
+  const items = archive.sourceIds.flatMap((sourceId) => {
+    const record = recordsById.get(sourceId);
+    if (record === undefined) {
+      return [];
+    }
+    const route = normalizeRoute(record.route ?? `/${record.slug}/`);
+    return [`  <li><a href="${escapeHtmlAttribute(route)}">${escapeHtml(record.title)}</a></li>`];
+  });
+
+  const siblings = project.archives.pages.filter((page) => page.subject === archive.subject);
+  const paging =
+    siblings.length <= 1
+      ? ""
+      : `\n<p class="listing-pages">${siblings
+          .map((page, index) =>
+            page.route === archive.route
+              ? `<span>Page ${index + 1}</span>`
+              : `<a href="${escapeHtmlAttribute(page.route)}">Page ${index + 1}</a>`
+          )
+          .join(" ")}</p>`;
+
+  const frontmatter = [
+    "---",
+    `title: ${yamlString(archive.title)}`,
+    `route: ${yamlString(listing.route)}`,
+    "categories: []",
+    "---"
+  ].join("\n");
+  const body = `<h1>${escapeHtml(archive.title)}</h1>\n<ul>\n${items.join("\n")}\n</ul>${paging}`;
+
+  return `${frontmatter}\n\n${body}\n`;
+}
+
+/**
+ * A static RSS 2.0 feed. Items carry a publication date only when the export
+ * recorded one in GMT, so this never asserts a timezone WordPress did not.
+ */
+function renderFeed(feed: FeedFile, project: MigrationProject, origin: string): string {
+  const recordsById = new Map(project.records.map((record) => [record.sourceId, record]));
+  const items = feed.sourceIds.flatMap((sourceId) => {
+    const record = recordsById.get(sourceId);
+    if (record === undefined) {
+      return [];
+    }
+    const link = absoluteOnOrigin(origin, normalizeRoute(record.route ?? `/${record.slug}/`));
+    const published = rssPublicationDate(record.publishedAtGmt);
+    return [
+      `    <item>
+      <title>${escapeHtml(record.title)}</title>
+      <link>${escapeHtml(link)}</link>
+      <guid isPermaLink="true">${escapeHtml(link)}</guid>${published === undefined ? "" : `\n      <pubDate>${escapeHtml(published)}</pubDate>`}
+    </item>`
+    ];
+  });
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>${escapeHtml(feed.title)}</title>
+    <link>${escapeHtml(origin)}</link>
+    <description>${escapeHtml(feed.title)}</description>
+${items.join("\n")}
+  </channel>
+</rss>
+`;
+}
+
+/** A GMT timestamp from the export, in the form RSS expects. */
+function rssPublicationDate(value: string | undefined): string | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(value ?? "");
+  if (match === null || match[1] === "0000") {
+    return undefined;
+  }
+  const timestamp = new Date(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`);
+  return Number.isFinite(timestamp.getTime()) ? timestamp.toUTCString() : undefined;
+}
+
 function renderIssues(issues: readonly MigrationIssue[]): string {
   return renderJson(
     issues.map((issue) => ({
@@ -562,10 +855,12 @@ function renderIssues(issues: readonly MigrationIssue[]): string {
   );
 }
 
-function renderManifest(project: MigrationProject, records: readonly GeneratedRecord[]): string {
+function renderManifest(project: MigrationProject, pages: readonly GeneratedPage[]): string {
   const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
+  const records = pages.filter((page): page is GeneratedRecord => page.kind === "content");
+  const listings = pages.filter((page): page is GeneratedListing => page.kind === "listing");
   return renderJson({
-    schemaVersion: "0.7",
+    schemaVersion: "0.8",
     generator: {
       name: GENERATOR_NAME,
       version: packageVersion,
@@ -599,11 +894,35 @@ function renderManifest(project: MigrationProject, records: readonly GeneratedRe
       file: "migration/coverage.json",
       summary: project.coverage.summary
     },
+    types: project.types.map((entry) => ({
+      name: entry.name,
+      label: entry.label,
+      collection: entry.collection,
+      sourceItems: entry.sourceItems,
+      records: entry.records,
+      included: entry.included,
+      ...(entry.reason === undefined ? {} : { reason: entry.reason })
+    })),
+    archives: {
+      file: "migration/archives.json",
+      summary: project.archives.summary
+    },
+    menus: {
+      file: "migration/menus.json",
+      summary: project.menus.summary
+    },
     records: records.map(({ record, collection, fileName, route, sourceUrl }) => ({
       sourceId: record.sourceId,
       wordpressId: record.wordpressId,
       postType: record.type,
       sourceEditor: record.editor,
+      route,
+      sourceUrl: sanitizeSourceUrl(sourceUrl) ?? route,
+      outputFile: `src/content/${collection}/${fileName}`
+    })),
+    listings: listings.map(({ archive, collection, fileName, route, sourceUrl }) => ({
+      archiveId: archive.id,
+      kind: archive.kind,
       route,
       sourceUrl: sanitizeSourceUrl(sourceUrl) ?? route,
       outputFile: `src/content/${collection}/${fileName}`

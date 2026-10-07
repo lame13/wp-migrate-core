@@ -2,11 +2,11 @@
 
 Plan a WordPress migration, generate an Astro starting point, and check the result before publishing.
 
-`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate an Astro project with your content, images, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache.
+`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate an Astro project with your content, images, navigation, the archive pages WordPress generated, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache.
 
 To include images, supply a local copy of `wp-content/uploads` or the URL of a host that already serves them. A migration config lets you save route choices, excluded pages and findings you've reviewed, so you can repeat the migration without patching the output each time.
 
-After a build, `verify` checks for missing or substantially changed content. Add a saved SSRWire audit to check responses, metadata and indexing too.
+After a build, `verify` checks for missing or substantially changed content, and then for launch readiness: media that never reached the build, links that lead nowhere, canonical URLs, `robots.txt` and the sitemap. Add a saved SSRWire audit to check responses, metadata and indexing too.
 
 This is an early tool, and Astro is the only supported output. You'll still need to rebuild your theme, forms and plugin behavior, bring over your media, and review the generated site.
 
@@ -22,6 +22,8 @@ npx wp-migrate-core demo --out wp-migrate-core-demo
 Open `wp-migrate-core-demo/migration-plan/report.html` in your browser. The fictional Bright Path Plumbing site includes Gutenberg and Elementor content, missing features, and URLs that need attention. Explore the generated project and its checks in `wp-migrate-core-demo/astro-site/`.
 
 The demo includes placeholder images. You'll find the copied files in `astro-site/public/wp-content/uploads/` and their delivery details in `migration/media.json`. Try `--uploads` with your own media library when you're ready to convert a real export.
+
+It also carries a category and an author, so `astro-site/src/content/listings/` holds the archive pages WordPress would have served and `migration/archives.json` says how each route was decided. Add `--publish-ready` to the demo command to see the indexable version of the same handoff.
 
 ![Version 0.4.0 migration report for the fictional Bright Path Plumbing site, showing blockers and the source summary.](https://raw.githubusercontent.com/lame13/wp-migrate-core/v0.4.0/docs/screenshots/demo-report.png)
 
@@ -60,7 +62,7 @@ The project starts with indexing disabled and placeholders for source images and
 
 ## What you get
 
-Alongside the generated content in `src/content/pages/` and `src/content/posts/`, conversion writes:
+Conversion writes one content collection per post type in the export, such as `src/content/pages/` and `src/content/posts/`, plus a `src/content/listings/` collection for the archive pages it generates. Alongside them it writes:
 
 | File | Use it to |
 | --- | --- |
@@ -70,12 +72,65 @@ Alongside the generated content in `src/content/pages/` and `src/content/posts/`
 | `migration/redirects.json` | Review old page/post permalinks, proposed routes, path redirect rules, and URLs needing a decision. |
 | `migration/links.json` | Check recognized content links, their routes, proposed rewrites, and targets this export cannot vouch for. |
 | `migration/coverage.json` | Compare every live URL you supplied with the routes and rules this plan has. |
+| `migration/archives.json` | Review the archive pages this run generated, what each one lists, and how its route was decided. |
+| `migration/menus.json` | Rebuild the navigation WordPress served in the new theme, including the entries nothing generated yet. |
 | `migration/checks/` | Audit WordPress and your preview with matching SSRWire checks. |
 | `migration/redirect-rules/` | Publish the redirect rules in the format your host expects: Netlify, Vercel, nginx or Apache. |
 | `migration/manifest.json` | Connect WordPress IDs to generated files and routes. |
 | `public/sitemap.xml` | List the generated routes, using the configured site URL or the URL from the export. |
 
-The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, the coverage check uses `"0.4"`, and the verification artefact uses `"0.6"`. The media inventory and the manifest use `"0.7"`. These describe each file's data format separately from the npm package version.
+The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The manifest, the archive inventory, the menu inventory and the verification artefact use `"0.8"`. These describe each file's data format separately from the npm package version.
+
+### Content types
+
+Every content post type in the export comes across, not just pages and posts. A portfolio, a testimonial or a case study becomes a collection of its own under `src/content/`, with its own files and routes, and `migration/manifest.json` records what the export carried and what this run did with it.
+
+Types that are not content — revisions, customizer drafts, WordPress's own caches — are reported once per type rather than dropped in silence, and `postTypes.include` or `postTypes.exclude` in the migration config decides anything you want decided differently:
+
+```json
+{ "postTypes": { "include": ["page", "post", "portfolio"] } }
+```
+
+An `include` list brings across exactly those types; an `exclude` list leaves the named ones out while everything else still comes across. Items of a type you leave out keep a route entry marked `excluded`, so the URLs they served still show up as something to decide.
+
+### Listings and feeds
+
+WordPress served archive pages that a WXR export does not describe, and dropping them is how a migration loses URLs. This tool generates the ones it can justify:
+
+- **Term archives** for the categories, tags and custom taxonomies the included content uses.
+- **Author archives** for the people who wrote it, listing posts rather than pages, as WordPress does.
+
+Both default on. When a live URL you supplied serves the archive, its route is taken from that URL and the plan says so; otherwise the route uses the WordPress default base (`/category/guides/`, `/author/niko/`) and the plan reports it as an assumption (`ARCHIVE_ROUTE_ASSUMED`) rather than presenting a guess as fact.
+
+The rest need a setting the export does not carry, so each one is opt-in:
+
+| Setting | What it generates |
+| --- | --- |
+| `archives.postsIndex` | A posts index at the route you name, such as `/blog/`. |
+| `archives.perPage` | Paginated listings, `/page/2/` and on, at that many records per page. |
+| `archives.dates` | Month archives such as `/2026/06/`. |
+| `archives.feeds` | Static RSS 2.0 files, plus a redirect rule from the address WordPress served. |
+| `archives.attachmentPages` | `redirect` (the default) sends an attachment page to its upload; `ignore` leaves it alone. |
+
+```json
+{
+  "archives": {
+    "postsIndex": "/blog/",
+    "perPage": 10,
+    "dates": true,
+    "feeds": ["/feed/"],
+    "attachmentPages": "redirect"
+  }
+}
+```
+
+Listing pages are written as ordinary content entries, so the sitemap, redirect map, coverage check and delivery checks treat them like any other page. They are not judged by text similarity, though: a listing carries titles, not the source site's prose.
+
+Feeds are assembled from the records themselves rather than through a dependency. An item carries a publication date only when the export recorded one in GMT, so the feed never asserts a timezone WordPress did not.
+
+### Navigation
+
+The menu items in the export become `src/components/Nav.astro`, rendered by the layout, with nesting, custom links and entries that point at a taxonomy archive. `migration/menus.json` records the tree, and an entry nothing in the plan serves is reported as `MENU_TARGET_UNRESOLVED` instead of quietly disappearing. Where the menu appears in the new theme is still yours to decide.
 
 ### Images
 
@@ -204,7 +259,30 @@ Pass `--routelint-report` instead when the site is already crawled: [RouteLint](
 
 Every planned route is classified as `verified`, `diverged` (substantially less or different text), `missing-content`, `route-missing`, or `skipped` (too little source text or no observed content evidence). Missing pages remain blockers even for short records. `--fail-on blocker` gates on missing pages and nearly empty content; `--fail-on warning` also gates on diverged text. The summary separately counts observed pages without a `<title>` and without an `<h1>`.
 
-RouteLint measures normalized text; the comparison uses word counts and 64-bit SimHash distances. Records below 12 words are not compared. A page with no words or less than 10% of the source word count is a blocker; less than 60% or a SimHash distance above 12 bits is a warning. These are heuristics: navigation and boilerplate can affect the result, so review both passing pages and findings. `migration-verification.json` (schema version `0.6`) stores counts, fingerprint distances, delivery finding codes and indexing decisions, and never the text of either page. Routes and local file paths remain visible. Layout, media and behavior still need separate review.
+RouteLint measures normalized text; the comparison uses word counts and 64-bit SimHash distances. Records below 12 words are not compared. A page with no words or less than 10% of the source word count is a blocker; less than 60% or a SimHash distance above 12 bits is a warning. These are heuristics: navigation and boilerplate can affect the result, so review both passing pages and findings. `migration-verification.json` stores counts, fingerprint distances, delivery finding codes and indexing decisions, and never the text of either page. Routes and local file paths remain visible. Layout, media and behavior still need separate review.
+
+### The launch gate
+
+Checking content is not the same as being ready for DNS. When `verify` reads a built site, it also checks the build itself:
+
+| Check | Code | Severity |
+| --- | --- | --- |
+| Every copied media file is in the build and carries bytes | `MEDIA_MISSING_IN_BUILD`, `MEDIA_EMPTY_IN_BUILD` | blocker, warning |
+| Internal links resolve to a route, a rule or a built file | `LINK_TARGET_MISSING_IN_BUILD` | warning |
+| Each page carries a canonical URL that points at itself | `CANONICAL_MISSING` | warning |
+| `robots.txt` does not disallow crawling | `ROBOTS_BLOCKED` | blocker |
+| The sitemap lists every generated route | `SITEMAP_INCOMPLETE` | warning |
+
+Links are grouped by target rather than by page, because a link in a shared layout is one problem even when it appears on every page. A link that misses only the trailing slash is reported as exactly that, since the host may or may not normalize it.
+
+The generated handoff starts private on purpose: `robots.txt` disallows crawling and the layout sets `noindex, nofollow`. `convert --publish-ready` writes the other version — a canonical URL per page, no `noindex`, and a `robots.txt` that allows crawling and names the sitemap — so the same command that produced the site can produce the one you launch:
+
+```bash
+npx wp-migrate-core convert export.xml --out new-site --uploads ../uploads --publish-ready
+npx wp-migrate-core verify export.xml --html-dir new-site/dist --fail-on blocker
+```
+
+`migration-verification.json` (schema version `0.8`) records every check with a `checked` flag. A check that needs the built site on disk is **not checked** when you pass a crawl report instead of a build, and the summary counts those separately: a check that could not run is never reported as passed.
 
 ### Check responses and metadata
 
@@ -252,7 +330,7 @@ The generated checks cover the **first 50 planned routes**. Edit both files to c
 
 `--fail-on blocker` fails on missing content or pages, blocked indexing, failed responses and delivery findings marked as blockers. `--fail-on warning` also includes changed content, contract warnings, timing regressions, lost social tags and incomplete audit coverage.
 
-The generated site starts with `noindex, nofollow` in its layout and `Disallow: /` in `public/robots.txt`. Remove both before publishing. **`verify` detects page and response indexing directives; it does not check `robots.txt`.**
+The generated site starts with `noindex, nofollow` in its layout and `Disallow: /` in `public/robots.txt`. `verify` reports both as publishing blockers, and `convert --publish-ready` writes the indexable version instead. Change the site URL in `astro.config.mjs` and the canonical URLs follow it.
 
 `verify` reads saved files and never runs a browser or requests a URL. Keep the original SSRWire reports for full timings and metadata values; the migration report includes only the details needed to review the findings.
 
@@ -263,6 +341,7 @@ wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro] [--
 wp-migrate-core convert <export.xml> --out <new-site> [--target astro] [--live-urls sitemap.xml]
 wp-migrate-core convert <export.xml> --out <new-site> --uploads ../wordpress/wp-content/uploads
 wp-migrate-core convert <export.xml> --out <new-site> --media-base https://cdn.example.com/uploads
+wp-migrate-core convert <export.xml> --out <new-site> --publish-ready
 wp-migrate-core report <export.xml> [--out migration-report.html] [--live-urls sitemap.xml]
 wp-migrate-core verify <export.xml> --html-dir dist [--out migration-verification.json]
 wp-migrate-core verify <export.xml> --routelint-report routelint.json
@@ -273,7 +352,7 @@ wp-migrate-core --version
 wp-migrate-core inspect --help
 ```
 
-`report` writes just the HTML report. `verify` compares a built site, or a saved RouteLint report, with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `--config` applies a migration config to any command; `--uploads`, `--media-base` and `--copy-unused-media` belong to `convert` and `demo`, because they write files into a generated project. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `next` and `nuxt` are planned targets and currently return an error.
+`report` writes just the HTML report. `verify` compares a built site, or a saved RouteLint report, with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `--config` applies a migration config to any command; `--uploads`, `--media-base`, `--copy-unused-media` and `--publish-ready` belong to `convert` and `demo`, because they write files into a generated project. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `next` and `nuxt` are planned targets and currently return an error.
 
 | Option | What it does |
 | --- | --- |
@@ -283,6 +362,7 @@ wp-migrate-core inspect --help
 | `--uploads <dir>` | Copies referenced uploads from a local copy of the media library into the generated site. Nothing is fetched: the directory has to exist on this machine. |
 | `--media-base <url>` | Points the generated markup at a host that already serves the uploads, such as a CDN origin, instead of copying files. |
 | `--copy-unused-media` | Also delivers attachments no included content record references, for uploads whose URLs still have to resolve. |
+| `--publish-ready` | Writes a site ready to be indexed: a canonical URL per page, no `noindex` meta, and a `robots.txt` that allows crawling and names the sitemap. The default handoff stays private. |
 | `--live-urls <file>` | Compares a downloaded sitemap, sitemap index, or URL list with the routes and rules in the plan. Repeat it to check several files. It reads local files only and never fetches one. |
 | `--html-dir <dir>` | Compares every planned route with the page built for it in a local directory, such as Astro's `dist`. |
 | `--routelint-report <file>` | Reads a saved RouteLint JSON report instead of a local build, for a site that is already crawled. |
@@ -304,6 +384,21 @@ Argument, input, and write errors go to stderr without a JSON result. A successf
 The parser supports a limited subset of Gutenberg blocks and Elementor data. It keeps classic HTML for review and flags dynamic blocks, unsupported shortcodes, forms, queries, and unknown widgets. Items with missing, invalid, or duplicate WordPress IDs are skipped and reported.
 
 You'll need to rebuild the theme, responsive layouts and features such as forms, search, comments, memberships and ecommerce. Media delivery copies files or updates their URLs; it doesn't recreate missing images or the original design. Content verification compares text, so review layout, images and behavior yourself. URL coverage is limited to the files you supply; include every relevant sitemap.
+
+### What the export cannot tell us
+
+A WXR file carries content, not the settings behind it. These are the places where this tool has to be told, or has to say that it guessed:
+
+| WordPress setting | Where it lives | How this tool fills the gap |
+| --- | --- | --- |
+| Permalink structure and the taxonomy base | `wp_options` | `--live-urls` first, a WordPress default second, and the plan labels which it used |
+| `posts_per_page` | `wp_options` | `archives.perPage` in the migration config, or no pagination at all |
+| `show_on_front`, `page_on_front` | `wp_options` | `archives.postsIndex`, when you name one; no posts index is invented |
+| Menu locations (primary, footer) | theme and options | the menu tree is generated; placement is left to your theme |
+| Sticky posts, custom queries, related posts | post meta and plugins | still manual, still flagged |
+| WooCommerce and other plugin archives | plugin tables, not WXR | reported as unsupported shapes, never guessed |
+
+The rule behind that table is simple: every generated route is traceable to the export, to a live URL you supplied, or to a decision in your config. Where WordPress generated a page from a setting the export does not carry, the plan says so rather than guessing.
 
 SSRWire audits capture one point in time using crawler user-agent strings. They don't prove what a real search engine will receive or how a shared link will look. Repeat the preview audit after changing your layout or host, and check browser behavior, accessibility and social previews manually. Review and publish the generated redirect rules on your host.
 
@@ -343,6 +438,9 @@ console.log(parsed.media.summary);
 console.log(parsed.routes.redirects);
 console.log(parsed.links.summary);
 console.log(parsed.coverage.summary);
+console.log(parsed.types.map((type) => [type.name, type.records]));
+console.log(parsed.archives.summary);
+console.log(parsed.menus.summary);
 console.log(linkRewrites(parsed.links));
 console.log(redirectRuleFiles(parsed));
 console.log(deliveryCheckFiles(parsed).map((file) => file.path));
@@ -371,6 +469,8 @@ console.log(deliveryLaunchFindings(delivery));
 Pass `{ includeDrafts: true }` as the second argument to include non-published content, and `parseLiveUrlSource(contents, { sourcePath: 'sitemap.xml' })` to name the file in an error message. `mergeLiveUrlSources([...])` combines several files, and `coverageEntryRecords(project.coverage)` is the sanitized shape the CLI writes. `generateAstroProject(project, directory, { rewriteLinks: false })` is the library equivalent of `--keep-source-links`. The library model also retains raw source content, link targets, and metadata; handle it with the same care as the export.
 
 `loadMigrationConfig(path)` reads a config file and `parseMigrationConfig(text)` validates one you already have; either way it is the `config` option for `parseWxr`. `planMediaDelivery(project, { uploadsDirectory })` reads the files and measures them, `applyMediaDelivery(project, plan)` folds the decisions into the project, and `generateAstroProject()` then writes the copies along with the rewritten markup. `mediaDeliveryRecord(plan)` is the sanitized shape the artifacts use. A plan holds the absolute paths it read, so keep it out of anything you publish; `applyMediaDelivery` never copies a file itself, which is what lets a caller inspect the plan before anything is written.
+
+The same config decides what the scan brings across: `postTypes.include` and `postTypes.exclude` widen or narrow the content types, and `archives` turns the generated listings on and off. `contentCollectionName(postType)` is the collection name a type maps to, so a library caller can find the files this tool would write. `generateAstroProject(project, directory, { publishReady: true })` is the library equivalent of `--publish-ready`, and `verifySite(project, { htmlDirectory })` returns both the content comparison and the launch `checks` it was able to take.
 
 `verifySite()` requires either `htmlDirectory` or `routelintReportPath`; the SSRWire report and baseline are optional additions. Its `launch` list contains the publishing findings. Use `readDeliveryEvidence()` and `deliveryLaunchFindings()` when you only need the audit results. For custom integrations, `deliveryCheckTargets()` maps routes to audit targets, and `launchFindings({ indexing, delivery })` combines audit results with indexing evidence from `indexingFromSignals()`.
 
