@@ -219,7 +219,7 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   assert.match(previewCheck, /url: "http:\/\/localhost:4321\/guides\/stop-a-leaking-tap\/"/);
   assert.equal(
     [...previewCheck.matchAll(/^  - id: "(.+)"$/gm)].length,
-    plan.records.length,
+    plan.records.length + archives.pages.length,
     "every planned route is a delivery target"
   );
   assert.match(sitemap, /<loc>https:\/\/brightpath\.example\/guides\/stop-a-leaking-tap\/<\/loc>/);

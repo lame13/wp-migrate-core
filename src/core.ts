@@ -398,7 +398,8 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
     records,
     liveUrlSource: options.liveUrlSource,
     config,
-    siteTitle: source.title
+    siteTitle: source.title,
+    siteUrl
   });
   for (const page of archives.pages) {
     pendingRoutes.push({
@@ -411,13 +412,10 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
     });
   }
   for (const feed of archives.feeds) {
-    if (feed.sourcePath === undefined) {
-      continue;
-    }
     pendingRoutes.push({
       id: `route:${feed.id}`,
       sourceId: feed.id,
-      sourceUrl: feed.sourcePath,
+      sourceUrl: feed.sourcePath ?? feed.path,
       status: "generated",
       override: feed.path,
       raw: true,
@@ -466,7 +464,7 @@ export function parseWxr(xml: string, options: InspectOptions = {}): MigrationPr
       linkReferencesByRecord[index] ?? []
     )
   );
-  const menus = buildMenus({ items, records, archives, termRegistry });
+  const menus = buildMenus({ items, records, archives, termRegistry, linkIndex });
   const links = finalizeLinks(linkReferencesByRecord.flat());
   const media = finalizeMedia(baseAssets, referencesByRecord.flat());
   const coverage = buildLiveUrlCoverage(
@@ -735,7 +733,7 @@ function buildTypePolicy(
 ): Map<string, TypePolicy> {
   const include = config?.postTypes?.include;
   const exclude = config?.postTypes?.exclude ?? [];
-  const usedCollections = new Map<string, string>();
+  const usedCollections = new Map<string, string>([["listings", "archives"]]);
   const policies = new Map<string, TypePolicy>();
 
   for (const name of [...postTypes].sort()) {
@@ -744,7 +742,9 @@ function buildTypePolicy(
       : include !== undefined && !include.includes(name)
         ? "The migration config lists the types to bring across, and this one is not in that list."
         : undefined;
-    const internalReason = NON_CONTENT_POST_TYPES[name];
+    const internalReason = Object.hasOwn(NON_CONTENT_POST_TYPES, name) &&
+      (CONSUMED_POST_TYPES.has(name) || !include?.includes(name))
+      ? NON_CONTENT_POST_TYPES[name] : undefined;
     const reason = internalReason ?? configReason;
 
     policies.set(name, {
@@ -1422,7 +1422,8 @@ function parseAttachment(itemXml: string): MediaAssetDraft | undefined {
   }
 
   const path = mediaPath(attachmentUrl) ?? mediaPath(file === undefined ? undefined : `/wp-content/uploads/${file}`);
-  const pagePath = sourcePath(cleanOptionalField(readTag(itemXml, "link")));
+  const pageUrl = cleanOptionalField(readTag(itemXml, "link"));
+  const pagePath = urlHasQuery(pageUrl) ? undefined : sourcePath(pageUrl);
 
   return {
     id: `media:${wordpressId}`,
@@ -2989,6 +2990,7 @@ interface ArchiveInput {
   readonly liveUrlSource: LiveUrlSource | undefined;
   readonly config: MigrationConfig | undefined;
   readonly siteTitle: string | undefined;
+  readonly siteUrl: string | undefined;
 }
 
 /**
@@ -3003,7 +3005,7 @@ function buildArchives(input: ArchiveInput): MigrationArchives {
   const settings = input.config?.archives;
   const pages: ArchivePage[] = [];
   const feeds: FeedFile[] = [];
-  const livePaths = liveArchivePaths(input.liveUrlSource);
+  const livePaths = liveArchivePaths(input);
   const posts = input.records.filter((record) => record.type === "post");
   const perPage = settings?.perPage;
 
@@ -3031,7 +3033,9 @@ function buildArchives(input: ArchiveInput): MigrationArchives {
         kind: listing.kind,
         title: index === 0 ? listing.title : `${listing.title} (page ${index + 1})`,
         route: index === 0 ? normalizeRoute(listing.route) : paginatedRoute(listing.route, index + 1),
-        ...(listing.sourceUrl === undefined ? {} : { sourceUrl: listing.sourceUrl }),
+        ...(listing.sourceUrl === undefined ? {} : {
+          sourceUrl: index === 0 ? listing.sourceUrl : `${listing.sourceUrl.replace(/\/+$/, "")}/page/${index + 1}/`
+        }),
         sourceIds,
         subject: listing.subject,
         routeSource: listing.routeSource,
@@ -3071,7 +3075,7 @@ function buildArchives(input: ArchiveInput): MigrationArchives {
 
     for (const [key, entry] of [...termRecords].sort(([left], [right]) => left.localeCompare(right))) {
       const base = defaultArchiveBase(entry.domain);
-      const match = matchLiveArchive(livePaths, entry.slug, [base, entry.domain, "category", "tag", "post_tag"]);
+      const match = matchLiveArchive(livePaths, entry.slug, [base, entry.domain]);
       addListing({
         id: `archive:${key}`,
         kind: "taxonomy",
@@ -3154,8 +3158,9 @@ function buildArchives(input: ArchiveInput): MigrationArchives {
   }
 
   for (const configured of settings?.feeds ?? []) {
-    const asFile = /\.xml$/i.test(configured);
-    const path = asFile ? normalizeRoute(configured) : `${configured.replace(/\/+$/, "")}.xml`;
+    const normalized = normalizeRoute(configured).replace(/\/$/, "");
+    const asFile = /\.xml$/i.test(normalized);
+    const path = asFile ? normalized : `${normalized}.xml`;
     feeds.push({
       id: `feed:${path}`,
       path,
@@ -3187,11 +3192,15 @@ function buildArchives(input: ArchiveInput): MigrationArchives {
 }
 
 /** Every live URL path the caller supplied, mapped to the URL as it was given. */
-function liveArchivePaths(source: LiveUrlSource | undefined): ReadonlyMap<string, string> {
+function liveArchivePaths(input: ArchiveInput): ReadonlyMap<string, string> {
   const paths = new Map<string, string>();
-  for (const url of source?.urls ?? []) {
+  const contentPaths = new Set(input.records.map((record) => targetRouteFor(record)));
+  const siteHost = parseLiveUrl(input.siteUrl ?? "")?.host;
+  for (const url of input.liveUrlSource?.urls ?? []) {
+    const host = parseLiveUrl(url)?.host;
+    if (urlHasQuery(url) || (host !== undefined && host !== siteHost)) continue;
     const path = sourcePath(url);
-    if (path !== undefined && !paths.has(path)) {
+    if (path !== undefined && !contentPaths.has(normalizeRoute(path)) && !paths.has(path)) {
       paths.set(path, sanitizeSourceUrl(url) ?? path);
     }
   }
@@ -3218,15 +3227,18 @@ function matchLiveArchive(
     if (segments.length < 2) {
       continue;
     }
-    const last = (segments[segments.length - 1] ?? "").toLowerCase();
-    const first = (segments[0] ?? "").toLowerCase();
-    if (last !== slug.toLowerCase() || (segments.length > 2 && !bases.includes(first))) {
+    const last = segments[segments.length - 1] ?? "";
+    const first = segments[0] ?? "";
+    const otherBase = ["category", "tag", "post_tag", "author"].includes(first) && !bases.includes(first);
+    if (last !== slug || otherBase || (segments.length > 2 && !bases.includes(first))) {
       continue;
     }
     candidates.push({ path, url, known: bases.includes(first) });
   }
 
-  const chosen = candidates.find((candidate) => candidate.known) ?? candidates[0];
+  const known = candidates.filter((candidate) => candidate.known);
+  const choices = known.length > 0 ? known : candidates;
+  const chosen = choices.length === 1 ? choices[0] : undefined;
   return chosen === undefined ? undefined : { path: chosen.path, url: chosen.url };
 }
 
@@ -3326,6 +3338,7 @@ function emptyMenus(): MigrationMenus {
 interface MenuTarget {
   readonly kind: MenuItemKind;
   readonly url?: string | undefined;
+  readonly href?: string | undefined;
   readonly targetRoute?: string | undefined;
   readonly reason?: string | undefined;
 }
@@ -3346,6 +3359,7 @@ interface MenuInput {
   readonly records: readonly ContentRecord[];
   readonly archives: MigrationArchives;
   readonly termRegistry: ReadonlyMap<number, TermRegistryEntry>;
+  readonly linkIndex: LinkTargetIndex;
 }
 
 /**
@@ -3385,7 +3399,9 @@ function buildMenus(input: MenuInput): MigrationMenus {
     drafts.push({
       id: `menu:${wordpressId}`,
       wordpressId,
-      label: cleanField(readTag(item.xml, "title")) || `Menu item ${wordpressId}`,
+      label: cleanField(readTag(item.xml, "title")) ||
+        (objectId === undefined ? undefined : recordsByKey.get(`${objectType}:${objectId}`)?.title) ||
+        (objectId === undefined ? undefined : input.termRegistry.get(objectId)?.name) || `Menu item ${wordpressId}`,
       menuSlug: menuTerm?.nicename ?? "menu",
       menuName: menuTerm === undefined || menuTerm.name === "" ? "Menu" : menuTerm.name,
       order: Number.isSafeInteger(order) ? order : 0,
@@ -3396,7 +3412,8 @@ function buildMenus(input: MenuInput): MigrationMenus {
         customUrl: cleanOptionalField(meta._menu_item_url?.[0] ?? ""),
         recordsByKey,
         termRegistry: input.termRegistry,
-        archivesBySubject
+        archivesBySubject,
+        linkIndex: input.linkIndex
       }),
       parentWordpressId: parseWordPressId(cleanField(meta._menu_item_menu_item_parent?.[0] ?? ""))
     });
@@ -3413,6 +3430,7 @@ function resolveMenuTarget(input: {
   readonly recordsByKey: ReadonlyMap<string, ContentRecord>;
   readonly termRegistry: ReadonlyMap<number, TermRegistryEntry>;
   readonly archivesBySubject: ReadonlyMap<string, ArchivePage>;
+  readonly linkIndex: LinkTargetIndex;
 }): MenuTarget {
   if (input.itemType === "post_type") {
     const record =
@@ -3449,9 +3467,33 @@ function resolveMenuTarget(input: {
     if (url === undefined || url === "") {
       return { kind: "custom", reason: "The menu item carries no URL." };
     }
-    return url.startsWith("/")
-      ? { kind: "custom", url, targetRoute: normalizeRoute(url) }
-      : { kind: "custom", url: sanitizeSourceUrl(url) ?? url };
+    let parsed: URL;
+    try {
+      parsed = new URL(url, input.linkIndex.siteUrl ?? "https://menu.invalid/");
+    } catch {
+      return { kind: "custom", reason: "The menu item carries an invalid URL." };
+    }
+    if (!["http:", "https:", "mailto:", "tel:"].includes(parsed.protocol)) {
+      return { kind: "custom", reason: "The menu URL uses an unsupported scheme." };
+    }
+    const reportingUrl = sanitizeLinkHref(url);
+    const target: MenuTarget = { kind: "custom", ...(reportingUrl === "" ? {} : { url: reportingUrl }) };
+    if (url.startsWith("#") || parsed.protocol === "mailto:" || parsed.protocol === "tel:") {
+      return { ...target, href: url };
+    }
+    parsed.username = "";
+    parsed.password = "";
+    const absolute = /^[a-z][a-z0-9+.-]*:|^[\/\\]{2}/i.test(url);
+    if (absolute && !input.linkIndex.siteHosts.has(parsed.host)) {
+      return { ...target, href: parsed.href };
+    }
+    const entries = input.linkIndex.byPath.get(linkPathKey(parsed.pathname) ?? "/") ?? [];
+    const entry = entries[0];
+    if (!WORDPRESS_ID_QUERY_PATTERN.test(parsed.search) && entries.length === 1 &&
+      entry?.status === "generated" && entry.targetRoute !== undefined) {
+      return { ...target, targetRoute: entry.targetRoute, href: `${entry.targetRoute}${parsed.search}${parsed.hash}` };
+    }
+    return { ...target, href: url, reason: "No unambiguous generated route serves this menu URL." };
   }
 
   if (input.itemType === "post_type_archive") {
@@ -3497,6 +3539,7 @@ function assembleMenus(drafts: readonly MenuDraft[]): MigrationMenus {
         label: draft.label,
         kind: draft.target.kind,
         ...(draft.target.url === undefined ? {} : { url: draft.target.url }),
+        ...(draft.target.href === undefined ? {} : { href: draft.target.href }),
         ...(draft.target.targetRoute === undefined ? {} : { targetRoute: draft.target.targetRoute }),
         ...(draft.parentWordpressId === undefined || !ids.has(draft.parentWordpressId)
           ? {}

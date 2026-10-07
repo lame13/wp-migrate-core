@@ -85,11 +85,11 @@ Options:
                         items and waives reviewed findings; without this option
                         a ${defaultMigrationConfigFileName} next to the export is used
   --uploads <dir>       copy referenced media from a local uploads directory
-                        into the generated site (convert and demo)
+                        into the generated site; verify uses it to check copies
   --media-base <url>    point generated markup at a media host instead of
-                        copying the files (convert and demo)
+                        copying the files (convert, demo and verify)
   --copy-unused-media   also deliver attachments no included content uses
-                        (convert and demo)
+                        (convert, demo and verify)
   --publish-ready       write a site ready to be indexed: canonical URLs, no
                         noindex meta, and a robots.txt that allows crawling
                         (convert and demo). The default handoff stays private.
@@ -238,9 +238,9 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
     const hasDelivery = ssrwireReport !== undefined || ssrwireBaseline !== undefined;
     const hasMediaOptions =
       uploadsDirectory !== undefined || mediaBaseUrl !== undefined || copyUnusedMedia;
-    if (command !== "convert" && command !== "demo" && hasMediaOptions) {
+    if (command !== "convert" && command !== "demo" && command !== "verify" && hasMediaOptions) {
       throw new Error(
-        "--uploads, --media-base and --copy-unused-media write files into a generated project, so they are only supported by convert and demo."
+        "--uploads, --media-base and --copy-unused-media are only supported by convert, demo and verify."
       );
     }
     if (command !== "convert" && command !== "demo" && publishReady) {
@@ -1236,7 +1236,8 @@ async function run(): Promise<void> {
   }
 
   if (options.command === "verify") {
-    const verification = await verifySite(project, {
+    const delivered = await deliverProjectMedia(project, options, config);
+    const verification = await verifySite(delivered, {
       ...(options.htmlDirectory === undefined ? {} : { htmlDirectory: options.htmlDirectory }),
       ...(options.routelintReport === undefined ? {} : { routelintReportPath: options.routelintReport }),
       ...(options.ssrwireReport === undefined ? {} : { ssrwireReportPath: options.ssrwireReport }),

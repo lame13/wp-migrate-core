@@ -199,14 +199,14 @@ test("generated check files pair the source and preview origins on the same ids"
   assert.match(source, /  - id: "home"\n    url: "https:\/\/brightpath\.example\/"\n/);
   assert.match(preview, /  - id: "home"\n    url: "http:\/\/localhost:4321\/"\n/);
   assert.deepEqual(targetIds(preview), targetIds(source));
-  assert.equal(targetIds(source).length, 4);
+  assert.equal(targetIds(source).length, 6);
 
   // Both files have to satisfy SSRWire's own strict configuration loader.
   for (const file of files) {
     const path = join(workspace, file.path.replace("migration/checks/", ""));
     await writeFile(path, file.contents, "utf8");
     const config = await loadConfig({ configPath: path });
-    assert.equal(config.targets.length, 4);
+    assert.equal(config.targets.length, 6);
     assert.equal(config.targets.every((target) => target.id !== undefined), true);
     // Both files ask for the same metadata, including the social tags a
     // WordPress SEO plugin emits and a hand-written layout usually does not.
@@ -312,7 +312,7 @@ test("delivery evidence reports status, indexing and findings per route", async 
   assert.equal(evidence.summary.covered, 4);
   assert.equal(evidence.summary.delivered, 3);
   assert.equal(evidence.summary.failed, 1);
-  assert.equal(evidence.summary.unobserved, 0);
+  assert.equal(evidence.summary.unobserved, 2);
   assert.equal(evidence.summary.blockedIndexing, 1);
   assert.equal(evidence.summary.unmatchedTargets, 1);
   assert.equal(evidence.summary.errors, 1);
@@ -340,6 +340,7 @@ test("delivery evidence reports status, indexing and findings per route", async 
     [
       ["DELIVERY_CONTRACT", "warning", "/services/"],
       ["DELIVERY_FAILED", "blocker", "/guides/stop-a-leaking-tap/"],
+      ["DELIVERY_UNOBSERVED", "warning", ["/author/niko/", "/category/guides/"]],
       ["INDEXING_BLOCKED", "blocker", "/guides/stop-a-leaking-tap/"]
     ].sort()
   );
@@ -380,7 +381,7 @@ test("delivery evidence matches a source audit by target id and leaves routes un
   const byRoute = new Map(evidence.routes.map((route) => [route.route, route]));
 
   assert.equal(evidence.summary.covered, 2);
-  assert.equal(evidence.summary.unobserved, 2);
+  assert.equal(evidence.summary.unobserved, 4);
   assert.equal(evidence.summary.unmatchedTargets, 0);
   assert.equal(byRoute.get("/")?.targetId, "home");
   assert.equal(byRoute.get("/guides/stop-a-leaking-tap/")?.status, "delivered");
@@ -770,13 +771,13 @@ test("a report that covers none of the plan is a blocker, partial coverage is no
 
   const evidence = await readDeliveryEvidence(await demoProject(), { reportPath });
   assert.equal(evidence.summary.covered, 0);
-  assert.equal(evidence.summary.unobserved, 4);
+  assert.equal(evidence.summary.unobserved, 6);
 
   const findings = launchFindings({ delivery: evidence });
   const unobserved = findings.filter((finding) => finding.code === "DELIVERY_UNOBSERVED");
   assert.equal(unobserved.length, 1, "one uncovered-coverage finding, not one per route");
   assert.equal(unobserved[0]?.severity, "blocker");
-  assert.equal(unobserved[0]?.routes?.length, 4);
+  assert.equal(unobserved[0]?.routes?.length, 6);
   assert.match(unobserved[0]?.requiredAction ?? "", /covers none of the planned routes/);
 });
 
@@ -915,7 +916,7 @@ test("generated check files accept multiline site titles", async (context) => {
   for (const [index, file] of deliveryCheckFiles({ ...project, site: { ...project.site, title: "First line\nSecond line" } }).entries()) {
     const path = join(workspace, `${index}.yml`);
     await writeFile(path, file.contents);
-    assert.equal((await loadConfig({ configPath: path })).targets.length, project.records.length);
+    assert.equal((await loadConfig({ configPath: path })).targets.length, project.records.length + project.archives.pages.length);
   }
 });
 

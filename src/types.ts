@@ -415,6 +415,8 @@ export interface MenuItem {
   readonly kind: MenuItemKind;
   /** The target as the export recorded it, sanitized. */
   readonly url?: string;
+  /** Rendering destination, including query and fragment; omitted from review artifacts. */
+  readonly href?: string;
   /** The generated route this plan serves the target at, when it serves one. */
   readonly targetRoute?: string;
   readonly parentId?: string;

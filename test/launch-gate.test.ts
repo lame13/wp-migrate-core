@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,6 +8,7 @@ import test from "node:test";
 import { parseWxr } from "../src/core.js";
 import { extractContentEvidence } from "routelint";
 import { generateAstroProject } from "../src/generate.js";
+import { deliveryCheckTargets } from "../src/delivery.js";
 import { applyMediaDelivery, planMediaDelivery } from "../src/media.js";
 import type { MigrationProject } from "../src/types.js";
 import { verifySite } from "../src/verify.js";
@@ -308,4 +310,76 @@ test("publish-ready writes the files a launch needs, and the default does not", 
     await readFile(join(readySite, "public/robots.txt"), "utf8"),
     /User-agent: \*\nAllow: \/\n\nSitemap: https:\/\/example\.test\/sitemap\.xml\n/
   );
+});
+
+test("verification and delivery checks include generated archives", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "wp-migrate-core-gate-archive-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const project = parseWxr(wxrDocument(page().replace("</item>",
+    '<category domain="category" nicename="guides">Guides</category></item>')));
+  await writeBuiltPage(root, "/example-page/", `<h1>Built</h1><p>${pageText}</p>`);
+  const missing = await verifySite(project, { htmlDirectory: root });
+  assert.equal(missing.routes.find((route) => route.route === "/category/guides/")?.status, "route-missing");
+  assert.ok(deliveryCheckTargets(project).some((target) => target.route === "/category/guides/"));
+  await writeBuiltPage(root, "/category/guides/", '<h1>Guides</h1><a href="/example-page/">Example</a>',
+    '<meta name="robots" content="noindex">');
+  const blocked = await verifySite(project, { htmlDirectory: root });
+  assert.ok(blocked.launch.some((finding) => finding.code === "INDEXING_BLOCKED" &&
+    (finding.route === "/category/guides/" || finding.routes?.includes("/category/guides/"))));
+});
+
+test("CLI verification plans media from the config and reports missing build files", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "wp-migrate-core-gate-cli-media-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "uploads/2026/05"), { recursive: true });
+  await writeFile(join(root, "uploads/2026/05/photo.jpg"), "photo bytes");
+  await writeFile(join(root, "export.xml"), wxrDocument(page(
+    `<p>${pageText}</p><img src="https://example.test/wp-content/uploads/2026/05/photo.jpg">`), attachment()));
+  await writeFile(join(root, "wp-migrate-core.config.json"), JSON.stringify({ media: { uploadsDir: "uploads" } }));
+  await writeBuiltPage(join(root, "dist"), "/example-page/", `<h1>Built</h1><p>${pageText}</p>`);
+  const result = spawnSync(process.execPath, [join(process.cwd(), "dist/src/cli.js"),
+    "verify", "export.xml", "--html-dir", "dist", "--json", "--fail-on", "blocker"],
+    { cwd: root, encoding: "utf8" });
+  assert.equal(result.status, 1, result.stderr);
+  assert.ok(JSON.parse(result.stdout).launch.findings.some((finding: { code: string }) => finding.code === "MEDIA_MISSING_IN_BUILD"));
+});
+
+test("media without a delivery plan is reported as unchecked", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "wp-migrate-core-gate-unplanned-media-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeBuiltPage(root, "/example-page/", `<h1>Built</h1><p>${pageText}</p>`);
+  const project = parseWxr(wxrDocument(page(), attachment()));
+  const verification = await verifySite(project, { htmlDirectory: root });
+  assert.equal(verification.checks.find((check) => check.id === "media")?.checked, false);
+});
+
+test("robots checks handle multiple agents in one group and equally specific allow rules", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "wp-migrate-core-gate-robots-groups-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeBuiltPage(root, "/example-page/", `<h1>Built</h1><p>${pageText}</p>`);
+  const project = parseWxr(wxrDocument(page()));
+  await writeFile(join(root, "robots.txt"), "User-agent: *\nUser-agent: crawler\nDisallow: /\n");
+  assert.equal(findingsFor(await verifySite(project, { htmlDirectory: root }), "ROBOTS_BLOCKED").length, 1);
+  await writeFile(join(root, "robots.txt"), "User-agent: *\nDisallow: /\nAllow: /\n");
+  assert.equal(findingsFor(await verifySite(project, { htmlDirectory: root }), "ROBOTS_BLOCKED").length, 0);
+});
+
+test("a canonical on another origin or with an invalid scheme does not pass", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "wp-migrate-core-gate-canonical-origin-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  for (const canonical of ["https://wrong.test/example-page/", "javascript:alert(1)"]) {
+    await writeBuiltPage(root, "/example-page/", `<h1>Built</h1><p>${pageText}</p>`,
+      `<link rel="canonical" href="${canonical}">`);
+    const verification = await verifySite(parseWxr(wxrDocument(page())), { htmlDirectory: root });
+    assert.equal(findingsFor(verification, "CANONICAL_MISSING").length, 1, canonical);
+  }
+});
+
+test("encoded download links resolve to the actual build filename", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "wp-migrate-core-gate-encoded-file-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeBuiltPage(root, "/example-page/", `<h1>Built</h1><p>${pageText}</p><a href="/guide%20notes.pdf">Download</a>`);
+  await writeFile(join(root, "guide notes.pdf"), "pdf bytes");
+  const verification = await verifySite(parseWxr(wxrDocument(page())), { htmlDirectory: root });
+  assert.equal(findingsFor(verification, "LINK_TARGET_MISSING_IN_BUILD").length, 0);
 });

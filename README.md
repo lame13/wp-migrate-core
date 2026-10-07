@@ -279,10 +279,12 @@ The generated handoff starts private on purpose: `robots.txt` disallows crawling
 
 ```bash
 npx wp-migrate-core convert export.xml --out new-site --uploads ../uploads --publish-ready
-npx wp-migrate-core verify export.xml --html-dir new-site/dist --fail-on blocker
+npx wp-migrate-core verify export.xml --html-dir new-site/dist --uploads ../uploads --fail-on blocker
 ```
 
 `migration-verification.json` (schema version `0.8`) records every check with a `checked` flag. A check that needs the built site on disk is **not checked** when you pass a crawl report instead of a build, and the summary counts those separately: a check that could not run is never reported as passed.
+
+For media verification, reuse the conversion's `--uploads`, `--media-base`, and `--copy-unused-media` options, or its `media` config. Verification reads the delivery sources without copying files. If the export contains media but no delivery plan is available, the media check is marked unchecked. Archive pages are checked for presence and indexing; their generated listing text has no WXR body to compare.
 
 ### Check responses and metadata
 
@@ -352,7 +354,7 @@ wp-migrate-core --version
 wp-migrate-core inspect --help
 ```
 
-`report` writes just the HTML report. `verify` compares a built site, or a saved RouteLint report, with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `--config` applies a migration config to any command; `--uploads`, `--media-base`, `--copy-unused-media` and `--publish-ready` belong to `convert` and `demo`, because they write files into a generated project. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `next` and `nuxt` are planned targets and currently return an error.
+`report` writes just the HTML report. `verify` compares a built site, or a saved RouteLint report, with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `--config` applies a migration config to any command. `--uploads`, `--media-base` and `--copy-unused-media` apply to `convert`, `demo` and `verify`; verification only reads the files. `--publish-ready` belongs to `convert` and `demo`. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `next` and `nuxt` are planned targets and currently return an error.
 
 | Option | What it does |
 | --- | --- |

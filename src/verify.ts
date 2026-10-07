@@ -99,7 +99,8 @@ interface ObservedPage {
 }
 
 interface PlannedRoute {
-  readonly record: ContentRecord;
+  readonly record?: ContentRecord;
+  readonly sourceId: string;
   readonly route: string;
 }
 
@@ -271,12 +272,12 @@ function classifyRoute(
   page: ObservedPage | undefined,
   ordinal: number
 ): VerifiedRoute {
-  const sourceEvidence = sourceContentEvidence(entry.record);
+  const sourceEvidence = entry.record === undefined ? undefined : sourceContentEvidence(entry.record);
   const identified = {
     id: `verification:${ordinal}`,
-    sourceId: entry.record.sourceId,
+    sourceId: entry.sourceId,
     route: entry.route,
-    sourceWords: sourceEvidence.words
+    sourceWords: sourceEvidence?.words ?? 0
   };
 
   if (page === undefined || page.unavailableReason !== undefined) {
@@ -287,6 +288,10 @@ function classifyRoute(
       requiredAction:
         "Build the site and point the check at its output, or confirm this route is intentionally unpublished."
     };
+  }
+
+  if (sourceEvidence === undefined) {
+    return { ...identified, status: "skipped", reason: "The archive page exists; its generated listing has no source text to compare." };
   }
 
   if (sourceEvidence.words < MINIMUM_SOURCE_WORDS) {
@@ -382,7 +387,14 @@ function plannedRoutes(project: MigrationProject): readonly PlannedRoute[] {
     }
 
     seen.add(route);
-    planned.push({ record, route });
+    planned.push({ record, route, sourceId: record.sourceId });
+  }
+
+  for (const archive of project.archives.pages) {
+    const route = normalizeRoute(archive.route);
+    if (seen.has(route)) throw new Error(`Cannot verify duplicate route: ${route}`);
+    seen.add(route);
+    planned.push({ route, sourceId: archive.id });
   }
 
   if (planned.length === 0) {
@@ -480,7 +492,10 @@ async function readBuildGate(
     findings,
     checks: [
       { id: "content", label: "Built pages carry the content the export records", checked: true },
-      ...BUILD_CHECKS.map((check) => ({ id: check.id, label: check.label, checked: true })),
+      ...BUILD_CHECKS.map((check) => check.id === "media" && project.media.delivery === undefined &&
+        (project.media.assets.length > 0 || project.media.references.length > 0)
+        ? { ...check, checked: false, reason: "No media delivery plan was supplied; reuse the conversion's uploads options or media config." }
+        : { ...check, checked: true }),
       { id: "delivery", label: "Delivered responses match the plan", checked: false }
     ]
   };
@@ -636,8 +651,20 @@ function checkCanonicalUrls(pages: readonly BuiltPage[]): readonly LaunchFinding
       missing.push(page.route);
       continue;
     }
-    const resolved = resolveInternalLink(canonical, page.href);
-    if (resolved !== undefined && withoutTrailingSlash(resolved) !== withoutTrailingSlash(page.route)) {
+    let resolved: URL;
+    try {
+      resolved = new URL(canonical, page.href);
+    } catch {
+      missing.push(page.route);
+      continue;
+    }
+    if (resolved.protocol !== "http:" && resolved.protocol !== "https:") {
+      missing.push(page.route);
+      continue;
+    }
+    const expected = new URL(page.href);
+    if (resolved.origin !== expected.origin ||
+      withoutTrailingSlash(resolved.pathname) !== withoutTrailingSlash(expected.pathname)) {
       findings.push({
         id: `launch:CANONICAL_MISSING:${page.route}`,
         severity: "warning",
@@ -646,7 +673,7 @@ function checkCanonicalUrls(pages: readonly BuiltPage[]): readonly LaunchFinding
         route: page.route,
         field: "canonical",
         title: `The canonical URL of ${page.route} points somewhere else`,
-        message: `This page declares ${resolved} as its canonical URL.`,
+        message: `This page declares ${sanitizeSourceUrl(resolved.href)} as its canonical URL.`,
         requiredAction:
           "Check the layout and the site URL, so a page does not ask search engines to prefer another address."
       });
@@ -824,9 +851,17 @@ async function buildFileExists(
     return cached;
   }
 
-  const candidates = path.endsWith("/")
-    ? [path, `${path}index.html`]
-    : [path, `${path}/index.html`, `${path}.html`];
+  let filePath: string;
+  try {
+    const segments = path.split("/").map((segment) => decodeURIComponent(segment));
+    if (segments.some((segment) => /[/\\]/.test(segment))) return false;
+    filePath = segments.join("/");
+  } catch {
+    return false;
+  }
+  const candidates = filePath.endsWith("/")
+    ? [filePath, `${filePath}index.html`]
+    : [filePath, `${filePath}/index.html`, `${filePath}.html`];
   let found = false;
   for (const candidate of candidates) {
     const file = resolveInside(directory, candidate);
@@ -872,7 +907,9 @@ async function readTextFile(path: string): Promise<string | undefined> {
  */
 function robotsDisallowsAll(contents: string): boolean {
   let appliesToAll = false;
+  let hasRules = false;
   let disallows = false;
+  let allows = false;
 
   for (const rawLine of contents.split(/\r?\n/)) {
     const line = (rawLine.split("#")[0] ?? "").trim();
@@ -887,15 +924,19 @@ function robotsDisallowsAll(contents: string): boolean {
     const value = line.slice(separator + 1).trim();
 
     if (field === "user-agent") {
-      appliesToAll = value === "*";
+      if (hasRules) appliesToAll = false;
+      appliesToAll ||= value === "*";
+      hasRules = false;
       continue;
     }
+    if (field === "allow" || field === "disallow") hasRules = true;
     if (field === "disallow" && appliesToAll && value.replace(/\s+/g, "") === "/") {
       disallows = true;
     }
+    if (field === "allow" && appliesToAll && value === "/") allows = true;
   }
 
-  return disallows;
+  return disallows && !allows;
 }
 
 function withoutTrailingSlash(value: string): string {

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-07
+
+- Fixes archive pagination redirecting the first page to a later page, and prevents query-based attachment permalinks from becoming homepage redirects.
+- Writes explicit `.xml` feeds as files and includes them in route coverage. Feeds cannot overwrite another generated public file.
+- Keeps external URLs, content permalinks and other taxonomy bases out of archive matching. Refuses duplicate content/archive routes and reserves the listings collection so custom content cannot be overwritten.
+- Preserves menu query strings, fragments and external destinations, rewrites confirmed internal targets, and reports missing or unsafe targets. Unlabelled menu entries use the linked content's title. Review artifacts still omit query strings and credentials.
+- Makes explicit post-type includes work for types normally skipped as internal content; attachments and menu items retain their dedicated handling.
+- Includes archives in presence, indexing and SSRWire delivery checks. CLI verification now reads media config and accepts media options; media without a delivery plan is marked unchecked.
+- Fixes canonical checks accepting another origin or an invalid URL scheme, encoded download links being reported missing, and robots checks mishandling grouped user agents and matching allow rules.
+
 ## [0.8.0] - 2026-10-07
 
 The handoff now carries the parts of a WordPress site it used to leave behind, and `verify` can say whether the result is ready for DNS. Custom post types, navigation menus and archive pages come across instead of being dropped, and the publishing gate reads the build itself: media that never arrived, links that lead nowhere, canonical URLs, robots.txt and the sitemap.
@@ -134,7 +144,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/lame13/wp-migrate-core/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/lame13/wp-migrate-core/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/lame13/wp-migrate-core/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/lame13/wp-migrate-core/compare/v0.6.0...v0.6.1

@@ -259,3 +259,59 @@ test("redirects attachment pages to the upload they describe", () => {
   });
   assert.deepEqual(ignored.routes.redirects, []);
 });
+
+test("pagination keeps distinct source URLs and never redirects the first archive page", () => {
+  const project = parseWxr(wxrDocument(
+    post({ id: 10, slug: "first", date: "2026-06-01", category: "guides" }),
+    post({ id: 11, slug: "second", date: "2026-06-02", category: "guides" })
+  ), {
+    config: { archives: { perPage: 1 } },
+    liveUrlSource: { urls: ["https://example.test/category/guides/"], sitemapRefs: [] }
+  });
+  assert.deepEqual(project.routes.redirects, []);
+  assert.equal(project.archives.pages.find((entry) => entry.paginated)?.sourceUrl,
+    "https://example.test/category/guides/page/2/");
+});
+
+test("query attachment permalinks never become path-only redirects", () => {
+  const project = parseWxr(wxrDocument(page(1, "home"), attachment().replace(
+    "https://example.test/2026/05/tap/", "https://example.test/?attachment_id=300"
+  )));
+  assert.deepEqual(project.routes.redirects, []);
+});
+
+test("an explicit XML feed is a file and participates in route coverage", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "wp-migrate-core-xml-feed-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const project = parseWxr(wxrDocument(post({ id: 10, slug: "first", date: "2026-06-01" })), {
+    config: { archives: { feeds: ["/rss.xml"] } },
+    liveUrlSource: { urls: ["https://example.test/rss.xml"], sitemapRefs: [] }
+  });
+  assert.equal(project.archives.feeds[0]?.path, "/rss.xml");
+  assert.equal(coverageEntry(project, "/rss.xml")?.status, "routed");
+  await generateAstroProject(project, root);
+  assert.match(await readFile(join(root, "public/rss.xml"), "utf8"), /<rss version="2.0">/);
+});
+
+test("conversion refuses content and archive route collisions", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "wp-migrate-core-archive-collision-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const project = parseWxr(wxrDocument(
+    page(1, "category/guides"),
+    post({ id: 10, slug: "first", date: "2026-06-01", category: "guides" })
+  ));
+  await assert.rejects(generateAstroProject(project, root), /Cannot generate duplicate route/);
+});
+
+test("archive matching ignores external URLs, content permalinks and other taxonomy bases", () => {
+  const document = wxrDocument(
+    post({ id: 10, slug: "blog/guides", date: "2026-06-01", category: "guides" })
+  );
+  for (const url of ["https://external.test/topics/guides/", "https://example.test/blog/guides/",
+    "https://example.test/tag/guides/", "https://example.test/author/guides/"]) {
+    const project = parseWxr(document, { liveUrlSource: { urls: [url], sitemapRefs: [] } });
+    const archive = project.archives.pages.find((entry) => entry.subject === "category:guides");
+    assert.equal(archive?.route, "/category/guides/", url);
+    assert.equal(archive?.routeSource, "wordpress-default", url);
+  }
+});

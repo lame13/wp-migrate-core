@@ -80,6 +80,11 @@ export async function generateAstroProject(
   const records = prepareRecords(project);
   const listings = prepareListings(project);
   const pages: readonly GeneratedPage[] = [...records, ...listings];
+  const routes = new Set<string>();
+  for (const page of pages) {
+    if (routes.has(page.route)) throw new Error(`Cannot generate duplicate route: ${page.route}`);
+    routes.add(page.route);
+  }
   const linkRewritesByRecord = createLinkRewriteMap(project, options.rewriteLinks !== false);
   const media = createMediaRenderer(project);
 
@@ -121,7 +126,9 @@ export async function generateAstroProject(
     if (origin === undefined) {
       continue;
     }
-    files.set(`public${feed.path}`, renderFeed(feed, project, origin));
+    const path = `public${feed.path}`;
+    if (files.has(path)) throw new Error(`Cannot overwrite generated file with a feed: ${feed.path}`);
+    files.set(path, renderFeed(feed, project, origin));
   }
 
   for (const ruleFile of redirectRuleFiles(project)) {
@@ -684,7 +691,7 @@ function renderMenuList(items: readonly MenuItem[]): string {
 }
 
 function renderMenuItem(item: MenuItem): string {
-  const href = item.targetRoute ?? item.url;
+  const href = item.href ?? item.targetRoute ?? item.url;
   const label = escapeHtml(item.label);
   const target = href === undefined ? `<span>${label}</span>` : `<a href="${escapeHtmlAttribute(href)}">${label}</a>`;
   const children = item.children.length === 0 ? "" : `\n${renderMenuList(item.children)}`;

@@ -187,13 +187,11 @@ export function deliveryCheckTargets(project: MigrationProject): readonly Delive
   const seenRoutes = new Set<string>();
   const targets: DeliveryTarget[] = [];
 
-  for (const record of project.records) {
-    const route = normalizeRoute(record.route ?? `/${record.slug}/`);
+  for (const { route, sourceId } of plannedRoutes(project)) {
     if (seenRoutes.has(route)) continue;
     seenRoutes.add(route);
 
-    const exported = project.routes.entries.find((entry) => entry.sourceId === record.sourceId)?.sourceUrl
-      ?? record.route;
+    const exported = project.routes.entries.find((entry) => entry.sourceId === sourceId)?.sourceUrl ?? route;
     const sourceUrl = sourceUrlFor(exported, origin, route);
     const previewUrl = absoluteOnOrigin(previewOrigin, route);
     if (takenUrls.has(sourceUrl) || takenUrls.has(previewUrl)) continue;
@@ -1273,6 +1271,13 @@ function plannedRoutes(project: MigrationProject): readonly PlannedDeliveryRoute
     if (seen.has(route)) continue;
     seen.add(route);
     planned.push({ route, sourceId: record.sourceId });
+  }
+
+  for (const archive of project.archives.pages) {
+    const route = normalizeRoute(archive.route);
+    if (seen.has(route)) continue;
+    seen.add(route);
+    planned.push({ route, sourceId: archive.id });
   }
 
   return planned;

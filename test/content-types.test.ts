@@ -281,3 +281,45 @@ test("reports menu entries nothing in the plan serves", () => {
   );
   assert.equal(project.menus.trees[0]?.items[0]?.targetRoute, undefined);
 });
+
+test("custom content cannot overwrite generated listing files", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "wp-migrate-core-listing-type-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const project = parseWxr(wxrDocument(
+    item({ id: 1, title: "Property", slug: "category-guides", type: "listing" }), categorisedPost()
+  ));
+  await generateAstroProject(project, root);
+  const collection = project.types.find((entry) => entry.name === "listing")?.collection;
+  assert.notEqual(collection, "listings");
+  assert.match(await readFile(join(root, `src/content/${collection}/category-guides.md`), "utf8"), /Property/);
+  assert.match(await readFile(join(root, "src/content/listings/category-guides.md"), "utf8"), /Guides/);
+});
+
+test("an explicit include can bring across an otherwise skipped content type", () => {
+  const project = parseWxr(wxrDocument(item({ id: 1, title: "Block", slug: "block", type: "wp_block" })), {
+    config: { postTypes: { include: ["wp_block"] } }
+  });
+  assert.equal(project.records.length, 1);
+});
+
+test("custom menu links preserve destinations without leaking queries into inventories", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "wp-migrate-core-menu-links-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const project = parseWxr(wxrDocument(
+    item({ id: 1, title: "Contact", slug: "contact", type: "page" }),
+    menuItem({ id: 50, title: "Contact", order: 1, type: "custom", url: "/contact/?via=menu-secret#form" }),
+    menuItem({ id: 51, title: "Outside", order: 2, type: "custom", url: "//outside.test/docs?via=menu-secret#start" }),
+    menuItem({ id: 52, title: "Unsafe", order: 3, type: "custom", url: "javascript:alert(1)" }),
+    menuItem({ id: 53, title: "Missing", order: 4, type: "custom", url: "/missing/" }),
+    menuItem({ id: 54, title: "", order: 5, type: "post_type", object: "page", objectId: 1 })
+  ));
+  await generateAstroProject(project, root);
+  const nav = await readFile(join(root, "src/components/Nav.astro"), "utf8");
+  const html = JSON.parse(nav.match(/const navigation = (.*);/)?.[1] ?? '""');
+  assert.match(html, /href="\/contact\/\?via=menu-secret#form"/);
+  assert.match(html, /href="https:\/\/outside.test\/docs\?via=menu-secret#start"/);
+  assert.doesNotMatch(html, /javascript:/);
+  assert.match(html, /href="\/contact\/">Contact<\/a>/);
+  assert.equal(project.menus.summary.unresolved, 2);
+  assert.doesNotMatch(await readFile(join(root, "migration/menus.json"), "utf8"), /menu-secret|javascript:/);
+});
