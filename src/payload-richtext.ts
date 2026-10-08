@@ -150,7 +150,11 @@ function appendBlock(
         return;
       }
       if (tag === "pre") {
-        children.push(element("code", { language: "text" }, [textNode(stripTags(token.inner))]));
+        const lines = stripTags(token.inner).split("\n");
+        children.push(element("paragraph", {}, lines.flatMap((line, index) => [
+          ...(index === 0 ? [] : [{ type: "linebreak", version: 1 }]),
+          textNode(line, FORMAT_BITS.code)
+        ])));
         return;
       }
       if (REVIEW_CONTAINERS.has(tag)) {
@@ -196,15 +200,28 @@ function appendBlock(
 }
 
 function convertList(
-  token: { readonly tag: string; readonly inner: string },
+  token: ElementToken,
   review: ContentReviewItem[],
   rewrites: ReadonlyMap<string, string>
 ): LexicalNode {
-  const items = [...token.inner.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)];
-  const children = items.map((match, index) =>
-    element("listitem", { value: index + 1, checked: false }, convertInline(match[1] ?? "", review, rewrites))
-  );
-  return element("list", { listType: token.tag === "ol" ? "number" : "bullet", tag: token.tag, start: 1 }, children);
+  const requestedStart = Number(readAttribute(token.attrs, "start") ?? 1);
+  const start = token.tag === "ol" && Number.isSafeInteger(requestedStart) ? requestedStart : 1;
+  const items = tokenizeBlocks(token.inner).filter((item): item is ElementToken => item.kind === "element" && item.tag === "li");
+  const children = items.map((item, index) => {
+    const nodes: LexicalNode[] = [];
+    let inline = "";
+    for (const child of tokenizeBlocks(item.inner)) {
+      if (child.kind === "element" && (child.tag === "ul" || child.tag === "ol")) {
+        nodes.push(...convertInline(inline, review, rewrites), convertList(child, review, rewrites));
+        inline = "";
+      } else {
+        inline += child.kind === "text" ? child.text : child.raw;
+      }
+    }
+    nodes.push(...convertInline(inline, review, rewrites));
+    return element("listitem", { value: start + index }, nodes);
+  });
+  return element("list", { listType: token.tag === "ol" ? "number" : "bullet", tag: token.tag, start }, children);
 }
 
 function convertInline(
@@ -289,7 +306,10 @@ function textNode(value: string, format = 0): LexicalNode {
 }
 
 function linkNode(url: string, children: readonly LexicalNode[]): LexicalNode {
-  return { type: "link", url, children: [...children], direction: "ltr", format: "", indent: 0, version: 3 };
+  return {
+    type: "link", fields: { linkType: "custom", url, newTab: false },
+    children: [...children], direction: "ltr", format: "", indent: 0, version: 3
+  };
 }
 
 function lastIndexWhere<T>(items: readonly T[], predicate: (item: T) => boolean): number {

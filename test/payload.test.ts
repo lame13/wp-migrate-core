@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { assertTargetEnabled, targetAdapters } from "../src/adapters.js";
 import { parseWxr } from "../src/core.js";
@@ -20,7 +21,7 @@ async function loadDemoProject() {
 }
 
 function extractFunction(source: string, name: string): string {
-  const match = new RegExp(`(?:^|\\n)function ${name}\\b[\\s\\S]*?\\n\\}`).exec(source);
+  const match = new RegExp(`(?:^|\\n)(?:async )?function ${name}\\b[\\s\\S]*?\\n\\}`).exec(source);
   assert.ok(match, `the generated importer must define ${name}`);
   return match[0];
 }
@@ -50,17 +51,158 @@ test("converts the documented HTML subset and marks everything else for review",
     ["heading", "paragraph", "list", "paragraph"]
   );
 
-  const paragraph = root.children[1]! as { children: { type: string; text?: string; format?: number; url?: string }[] };
+  const paragraph = root.children[1]! as { children: { type: string; text?: string; format?: number; fields?: object }[] };
   const bold = paragraph.children.find((node) => node.text === "bold");
   assert.equal(bold?.format, 1, "strong maps to the bold format bit");
   const link = paragraph.children.find((node) => node.type === "link");
-  assert.equal(link?.url, "/x");
+  assert.deepEqual(link?.fields, { url: "/x", linkType: "custom", newTab: false });
 
   assert.deepEqual(
     review.map((item) => item.kind).sort(),
     ["img", "shortcode"],
     "an image and a shortcode become review items rather than guesses"
   );
+});
+
+test("preformatted code uses nodes supported by Payload's default editor", () => {
+  const { body } = htmlToPayloadRichText("<pre><code>const x = 1;\nprint(x);</code></pre>");
+  const root = body.root as { children: { type: string; children: { type: string; text?: string; format?: number }[] }[] };
+  assert.equal(root.children[0]?.type, "paragraph");
+  assert.deepEqual(root.children[0]?.children.map(({ type, text, format }) => ({ type, text, format })), [
+    { type: "text", text: "const x = 1;", format: 16 },
+    { type: "linebreak", text: undefined, format: undefined },
+    { type: "text", text: "print(x);", format: 16 }
+  ]);
+});
+
+test("nested lists keep their hierarchy, following text and ordered start", () => {
+  const { body } = htmlToPayloadRichText('<ol start="3"><li>parent<ul><li>nested</li></ul>after</li><li>next</li></ol>');
+  const root = body.root as { children: { start: number; children: { value: number; children: { type: string; text?: string; children?: unknown[] }[] }[] }[] };
+  const list = root.children[0]!;
+  assert.equal(list.start, 3);
+  assert.deepEqual(list.children.map((item) => item.value), [3, 4]);
+  assert.deepEqual(list.children[0]?.children.map((node) => node.type), ["text", "list", "text"]);
+  assert.equal(list.children[0]?.children[2]?.text, "after");
+  assert.match(JSON.stringify(list.children[0]?.children[1]), /nested/);
+});
+
+test("Next redirects match literal paths without matching their destinations", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-payload-redirects-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const parsed = await loadDemoProject();
+  const project = { ...parsed, routes: { ...parsed.routes, redirects: [
+    { id: "slash", sourcePath: "/old", targetRoute: "/old/", reason: "normalization" },
+    { id: "literal", sourcePath: "/a(b):c+", targetRoute: "/new/", reason: "normalization" }
+  ] } };
+  const bundle = join(workspace, "bundle");
+  await generatePayloadBundle(project, bundle);
+  const { default: config } = await import(pathToFileURL(join(bundle, "next.config.mjs")).href);
+  assert.equal(config.skipTrailingSlashRedirect, true);
+  const rules = await config.redirects();
+  for (const [index, rule] of rules.entries()) {
+    const pattern = new RegExp("^/" + rule.source.slice(2, -1));
+    assert.ok(pattern.test(project.routes.redirects[index]!.sourcePath));
+    assert.ok(!pattern.test(rule.destination));
+  }
+  assert.deepEqual(JSON.parse(await readFile(join(bundle, "import/redirects.json"), "utf8")).redirects, rules);
+});
+
+function contentItem(id: number, type: string, status = "publish", extra = ""): string {
+  return `<item><title>Item ${id}</title><link>https://example.test/item-${id}/</link>
+    <wp:post_id>${id}</wp:post_id><wp:post_type>${type}</wp:post_type><wp:status>${status}</wp:status>
+    <wp:post_name>item-${id}</wp:post_name>${extra}</item>`;
+}
+
+test("Payload preserves custom terms without jobs for nonexistent collections and keeps unpublished records as drafts", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-payload-mapping-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const items = ["publish", "private", "future", "draft", "pending"].map((status, index) => contentItem(
+    index + 1, "post", status,
+    '<category domain="genre" nicename="fiction">Fiction</category><wp:post_date_gmt>2026-10-08 12:34:56</wp:post_date_gmt>'
+  ));
+  const project = parseWxr(`<rss><channel><title><![CDATA[Title */ test]]></title>${items.join("")}</channel></rss>`, { includeDrafts: true });
+  const xml = join(workspace, "export.xml");
+  await writeFile(xml, `<rss><channel>${items.join("")}</channel></rss>`);
+  const bundle = join(workspace, "bundle");
+  const converted = spawnSync(process.execPath, [cliPath, "convert", xml, "--include-drafts", "--target", "payload", "--out", bundle], {
+    encoding: "utf8", env: { ...process.env, TZ: "Asia/Bangkok" }
+  });
+  assert.equal(converted.status, 0, converted.stderr);
+  const jobs = JSON.parse(await readFile(join(bundle, "import/content/posts.json"), "utf8"));
+  assert.deepEqual(jobs.map((job: { data: { _status: string } }) => job.data._status), ["published", "draft", "draft", "draft", "draft"]);
+  assert.equal(jobs[0].data.publishedAt, "2026-10-08T12:34:56.000Z");
+  assert.deepEqual(jobs[0].data.wordpressTerms, [{ domain: "genre", name: "Fiction", slug: "fiction" }]);
+  const index = JSON.parse(await readFile(join(bundle, "import/content/index.json"), "utf8"));
+  assert.deepEqual(index.files.map((entry: { collection: string }) => entry.collection), ["posts"]);
+
+  const commentsBundle = join(workspace, "comments");
+  await generatePayloadBundle(project, commentsBundle);
+  for (const file of ["payload.config.mjs", "import/import.mjs"]) {
+    const checked = spawnSync(process.execPath, ["--check", join(commentsBundle, file)], { encoding: "utf8" });
+    assert.equal(checked.status, 0, checked.stderr);
+  }
+});
+
+test("Payload refuses collection collisions before writing output", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-payload-collision-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  for (const types of [["author"], ["categories"], ["user"], ["foo-1", "foo1"]]) {
+    const project = parseWxr(`<rss><channel>${types.map((type, index) => contentItem(index + 1, type)).join("")}</channel></rss>`);
+    const bundle = join(workspace, types.join("-"));
+    await assert.rejects(() => generatePayloadBundle(project, bundle), /collection name collision/);
+    await assert.rejects(() => stat(bundle), { code: "ENOENT" });
+  }
+  const numeric = parseWxr(`<rss><channel>${contentItem(1, "123")}</channel></rss>`);
+  await generatePayloadBundle(numeric, join(workspace, "numeric"));
+  const checked = spawnSync(process.execPath, ["--check", join(workspace, "numeric/payload.config.mjs")], { encoding: "utf8" });
+  assert.equal(checked.status, 0, checked.stderr);
+});
+
+test("the importer updates source changes, clears removed fields, and preserves CMS edits and drafts", async () => {
+  const source = renderPayloadImporter(await loadDemoProject());
+  const names = ["stableStringify", "managedFieldsHash", "resolveReferences", "projectFields", "upsert"];
+  const upsert = new Function("createHash", "resolve", "bundleRoot", names.map((name) => extractFunction(source, name)).join("\n") + "\nreturn upsert;")(
+    createHash, resolve, "/unused"
+  ) as (payload: object, entry: object, job: object, ids: object, counters: Record<string, number>, records: { action: string }[]) => Promise<void>;
+  let saved: Record<string, unknown> | undefined;
+  let draft: Record<string, unknown> | undefined;
+  const payload = {
+    async find(options: { draft: boolean }) {
+      assert.equal(options.draft, true);
+      const doc = draft ?? saved;
+      return { docs: doc === undefined ? [] : [doc] };
+    },
+    async create({ data }: { data: Record<string, unknown> }) {
+      saved = { ...structuredClone(data), id: 42, contentReview: [{ id: "payload-row-id", kind: "img" }] };
+      return saved;
+    },
+    async update({ data }: { data: Record<string, unknown> }) {
+      saved = { ...saved, ...structuredClone(data) };
+      return saved;
+    }
+  };
+  let data: Record<string, unknown> = { wordpressSourceId: "wp:post:1", title: "Original", author: 9, contentReview: [{ kind: "img" }] };
+  const run = async () => {
+    const counters = { created: 0, updated: 0, unchanged: 0, skipped: 0, unresolved: 0 };
+    const records: { action: string }[] = [];
+    await upsert(payload, { collection: "posts" }, { wordpressSourceId: "wp:post:1", data }, {}, counters, records);
+    return records[0]!.action;
+  };
+  assert.equal(await run(), "created");
+  assert.equal(await run(), "unchanged", "Payload array row IDs do not count as edits");
+  data = { ...data, title: "Changed source", tags: [4] };
+  delete data.author;
+  assert.equal(await run(), "updated", "adding and removing fields must not look like a CMS edit");
+  assert.equal(saved?.author, null);
+  assert.equal(saved?.title, "Changed source");
+  saved!.title = "CMS edit";
+  assert.equal(await run(), "skipped", "the same source hash must not hide CMS edits");
+  data = { ...data, title: "Another source edit" };
+  assert.equal(await run(), "skipped");
+  assert.equal(saved!.title, "CMS edit");
+  saved!.title = "Changed source";
+  draft = { ...saved, title: "Unpublished CMS edit" };
+  assert.equal(await run(), "skipped", "read the latest draft before updating a published record");
 });
 
 test("writes a Payload bundle with collections, a drop and an importer", async (context) => {
@@ -156,7 +298,7 @@ test("the generated importer's hash and reference logic behave as the drop expec
   assert.deepEqual(resolved.missing, []);
 
   const unresolved = resolveReferences({ featuredImage: { $ref: "media:99" } }, {});
-  assert.deepEqual(unresolved.data, {}, "an unresolved reference is dropped, not left as a fake id");
+  assert.deepEqual(unresolved.data, { featuredImage: null }, "an unresolved reference stays empty, not a fake id");
   assert.deepEqual(unresolved.missing, ["media:99"]);
 });
 
@@ -184,4 +326,10 @@ test("convert --target payload writes a bundle through the installed executable"
   );
   assert.notEqual(unavailable.status, 0);
   assert.match(unavailable.stderr, /planned but not available/);
+
+  const unavailableDemo = spawnSync(process.execPath, [cliPath, "demo", "--target", "svelte", "--out", "unavailable-demo"], {
+    cwd: workspace, encoding: "utf8"
+  });
+  assert.notEqual(unavailableDemo.status, 0);
+  await assert.rejects(() => stat(join(workspace, "unavailable-demo")), { code: "ENOENT" });
 });

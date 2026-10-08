@@ -75,9 +75,10 @@ Four things changed shape when a destination stopped being a renderer:
 - Import report and `verify --import-report`: findings for missing, failed,
   skipped and unexpected records. Verification artefact schema `0.9`.
 
-**Honest gap.** The generated config and importer are type-checked,
-unit-tested at the mapping and hash level, and exercised through the installed
-package's CLI, but they have not been run against a live Payload database here.
+**Validation so far.** 0.9.1 adds a local Payload 3.90.2 / SQLite round-trip
+with generated fixtures: three content types, media, rich text, repeated
+imports, source updates and CMS draft protection. The package checks cover
+generation and importer regressions. A real-site migration remains the gate below.
 
 ## Validation gate before 0.10.0
 

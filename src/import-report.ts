@@ -134,6 +134,18 @@ export function importLaunchFindings(project: MigrationProject, evidence: Import
   }
 
   for (const record of evidence.records) {
+    if (record.unresolved.length > 0) {
+      findings.push({
+        id: `import-unresolved:${record.sourceId}`,
+        severity: "warning",
+        code: "IMPORT_REFERENCE_UNRESOLVED",
+        ...(record.route === undefined ? {} : { route: record.route }),
+        source: "import-report",
+        title: "An imported record has unresolved relationships",
+        message: `${record.sourceId} has ${record.unresolved.length} relationship(s) that could not be imported.`,
+        requiredAction: "Import the missing media or supporting records, then run the importer again."
+      });
+    }
     if (record.action === "failed") {
       findings.push({
         id: `import-failed:${record.sourceId}`,

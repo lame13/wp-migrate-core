@@ -1033,6 +1033,7 @@ export type LaunchFindingCode =
   | "IMPORT_RECORD_MISSING"
   | "IMPORT_RECORD_FAILED"
   | "IMPORT_RECORD_SKIPPED"
+  | "IMPORT_REFERENCE_UNRESOLVED"
   | "IMPORT_RECORD_UNKNOWN";
 
 /** Every check the launch gate can take, and whether this run took it. */

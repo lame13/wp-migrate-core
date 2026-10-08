@@ -105,13 +105,15 @@ The bundle contains one collection module per content type plus `media`, `catego
 | `import/redirects.json`, `next.config.mjs` | Publish the redirect map on a Next front end. |
 | `migration/` | The same review artifacts the Astro handoff writes. |
 
-Posts and pages keep their title, slug, route, dates, author, taxonomy and the source publication status. WordPress `draft`/`pending` become a Payload draft; `future` and `private` keep their own `wordpressStatus`. Authors become an `authors` collection rather than Payload users, because `dc:creator` is a WordPress login. The body is native rich text for a documented subset — headings, paragraphs, lists, quotes, code, links and emphasis — and everything else (images, embeds, forms, tables, shortcodes and layout containers) becomes a `contentReview` entry rather than a guess, with `sourceHtml` keeping the original HTML alongside it.
+Posts and pages keep their title, slug, route, dates, author, taxonomy and the source publication status. Only WordPress `publish` becomes published in Payload; `draft`, `pending`, `future`, `private` and other unpublished statuses remain drafts, with the original status in `wordpressStatus`. Authors become an `authors` collection rather than Payload users, because `dc:creator` is a WordPress login. The body is native rich text for a documented subset — headings, paragraphs, lists, quotes, code, links and emphasis — and everything else (images, embeds, forms, tables, shortcodes and layout containers) becomes a `contentReview` entry rather than a guess, with `sourceHtml` keeping the original HTML alongside it. Preformatted code becomes code-formatted text with line breaks in the default editor.
 
 Re-imports are safe. The importer finds each record by its stable `wordpressSourceId` (`wp:post:20`), updates it when the source changed, and skips a record that was edited in the CMS, reporting it as `record-modified` instead of overwriting it. Point `verify` at the import report to check the outcome:
 
 ```bash
 npx wp-migrate-core verify export.xml --import-report migration-import.json --fail-on blocker
 ```
+
+The 0.9.1 release was checked against Payload 3.90.2 and SQLite with generated fixtures, including repeated imports and CMS draft edits. A migration of a real site remains the next validation gate. When updating a 0.9.0 bundle, copy the regenerated collection definitions as well as the importer so the new `importSnapshot` field is available; older records whose prior values cannot be established are skipped for review.
 
 ### Content types
 
@@ -320,7 +322,7 @@ For media verification, reuse the conversion's `--uploads`, `--media-base`, and 
 
 ### Check the CMS import
 
-A Payload bundle's importer writes `migration-import.json`. Pass it with `--import-report` and the launch gate gains an `import` check: a planned record the report never mentions is `IMPORT_RECORD_MISSING` (warning), a record the importer failed on is a blocker (`IMPORT_RECORD_FAILED`), a record it skipped because the CMS copy was edited is `IMPORT_RECORD_SKIPPED` (warning), and a content id the plan does not carry is `IMPORT_RECORD_UNKNOWN` (warning). Taxonomies, authors and media are expected in the report and are never reported as unknown.
+A Payload bundle's importer writes `migration-import.json`. Pass it with `--import-report` and the launch gate gains an `import` check: a planned record the report never mentions is `IMPORT_RECORD_MISSING` (warning), a record the importer failed on is a blocker (`IMPORT_RECORD_FAILED`), a record it skipped because the CMS copy was edited is `IMPORT_RECORD_SKIPPED` (warning), and a content id the plan does not carry is `IMPORT_RECORD_UNKNOWN` (warning). Missing relationships produce `IMPORT_REFERENCE_UNRESOLVED` warnings even when the record itself imported successfully. Taxonomies, authors and media are expected in the report and are never reported as unknown.
 
 The import report can be the whole check when you only care that the CMS import landed, or it can join `--html-dir`/`--routelint-report` and `--ssrwire-report` so one run answers every question at once:
 

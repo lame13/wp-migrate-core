@@ -148,6 +148,19 @@ test("verify answers the CMS question on its own, with no build or crawl report"
   assert.equal(verification.summary.launchBlockers, 1);
 });
 
+test("unresolved imported relationships fail the warning gate", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-import-unresolved-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const path = join(workspace, "migration-import.json");
+  await writeFile(path, report([
+    { id: "wp:page:1", sourceId: "wp:page:1", collection: "pages", action: "created", unresolved: ["media:99"] },
+    { id: "wp:post:20", sourceId: "wp:post:20", collection: "posts", action: "unchanged", unresolved: [] }
+  ]));
+  const verification = await verifySite(project(), { importReportPath: path });
+  assert.deepEqual(verification.launch.map((finding) => finding.code), ["IMPORT_REFERENCE_UNRESOLVED"]);
+  assert.equal(verification.summary.launchWarnings, 1);
+});
+
 test("the CLI accepts --import-report on its own and refuses it elsewhere", async (context) => {
   const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-import-cli-"));
   context.after(() => rm(workspace, { recursive: true, force: true }));

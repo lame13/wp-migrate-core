@@ -2,7 +2,16 @@
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-10-07
+## [0.9.1] - 2026-10-08
+
+- Fixes Payload rich-text links rejected by the Local API, preserves nested lists and ordered-list starts, and represents preformatted code using nodes supported by the default editor.
+- Keeps private, scheduled and other unpublished WordPress records as Payload drafts. Imports WordPress GMT dates consistently regardless of the machine's timezone.
+- Checks the latest CMS draft before re-importing, reports CMS edits even when the source is unchanged, and handles Payload array IDs and added or removed source fields. A saved import snapshot distinguishes source changes from CMS edits; database connections are closed after the import.
+- Keeps custom taxonomies in `wordpressTerms` without creating jobs for nonexistent collections. Refuses conflicting collection names before writing a bundle and handles numeric module names and comment delimiters in site titles.
+- Escapes literal Next redirect paths and prevents trailing-slash redirect loops. Unresolved imported relationships now produce `IMPORT_REFERENCE_UNRESOLVED` warnings, and unavailable demo targets fail before writing output.
+- Adds focused regression tests and validates a generated bundle against Payload 3.90.2 with SQLite: three content types, media, rich text, repeated imports, source updates and CMS draft protection. The real-site migration gate remains open.
+
+## [0.9.0] - 2026-10-08
 
 The tool stops being only an Astro renderer. Destinations now have a *kind* — a static site or a CMS — and the first CMS destination, **Payload**, turns the export into collections, a content and media drop, and a generated importer you run inside the destination project. `verify` can then answer a third question: not just "is the content in the front end?" but "is it in the CMS, and what still needs a human there?".
 
@@ -160,7 +169,8 @@ This release makes inspection safer when an export or output path is not quite w
 
 The first public demo: inspect a WordPress WXR export, surface unsupported migration work, and generate a deliberately private Astro handoff for human review.
 
-[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/lame13/wp-migrate-core/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/lame13/wp-migrate-core/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/lame13/wp-migrate-core/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/lame13/wp-migrate-core/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/lame13/wp-migrate-core/compare/v0.7.0...v0.8.0

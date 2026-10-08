@@ -39,7 +39,7 @@ export const targetDefinitions: Readonly<Record<OutputTarget, TargetDefinition>>
     enabled: false,
     label: "Next.js",
     description:
-      "No standalone Next.js output is included. Payload already delivers a Next front end."
+      "No standalone Next.js output is included. The Payload bundle integrates with a Next app; its front end is yours to build."
   },
   nuxt: {
     target: "nuxt",

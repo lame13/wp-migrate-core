@@ -120,7 +120,7 @@ Options:
 Targets:
   astro    implemented, static site
   payload  implemented, CMS bundle plus a generated importer
-  next     planned, not implemented (Payload already delivers a Next front end)
+  next     planned, not implemented (the Payload bundle integrates with Next)
   nuxt     planned, not implemented
   svelte   planned, not implemented (non-priority)
 
@@ -1223,6 +1223,7 @@ async function run(): Promise<void> {
   const config = loaded?.config;
 
   if (options.command === "demo") {
+    assertTargetEnabled(options.target);
     const fixture = inputPath as string;
     // The demo also shows the coverage check, unless the caller supplied their own URLs.
     const demoSitemap = fileURLToPath(new URL("../../fixtures/demo-sitemap.xml", import.meta.url));
@@ -1239,7 +1240,6 @@ async function run(): Promise<void> {
     const plan = await inspect(project, resolve(output, "migration-plan"));
     const site = resolve(output, targetDirectoryName(options.target));
     const ruleFiles = redirectRuleFiles(project);
-    assertTargetEnabled(options.target);
     await generateForTarget(options.target, project, site, generateOptions(options));
     await writeReport(project, resolve(site, "migration", "report.html"));
     finishCommand(project, options, {
