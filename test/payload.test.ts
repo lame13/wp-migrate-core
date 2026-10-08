@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -96,6 +96,15 @@ test("Next redirects match literal paths without matching their destinations", a
   ] } };
   const bundle = join(workspace, "bundle");
   await generatePayloadBundle(project, bundle);
+  // The generated config imports Payload's own Next wrapper. Stub it so this
+  // check stays about the redirect rules and does not install Payload.
+  const stub = join(workspace, "node_modules/@payloadcms/next");
+  await mkdir(stub, { recursive: true });
+  await writeFile(
+    join(stub, "package.json"),
+    JSON.stringify({ name: "@payloadcms/next", type: "module", exports: { "./withPayload": "./withPayload.js" } })
+  );
+  await writeFile(join(stub, "withPayload.js"), "export const withPayload = (config) => config;\nexport default withPayload;\n");
   const { default: config } = await import(pathToFileURL(join(bundle, "next.config.mjs")).href);
   assert.equal(config.skipTrailingSlashRedirect, true);
   const rules = await config.redirects();
@@ -137,7 +146,7 @@ test("Payload preserves custom terms without jobs for nonexistent collections an
 
   const commentsBundle = join(workspace, "comments");
   await generatePayloadBundle(project, commentsBundle);
-  for (const file of ["payload.config.mjs", "import/import.mjs"]) {
+  for (const file of ["payload.config.js", "import/import.mjs"]) {
     const checked = spawnSync(process.execPath, ["--check", join(commentsBundle, file)], { encoding: "utf8" });
     assert.equal(checked.status, 0, checked.stderr);
   }
@@ -154,7 +163,7 @@ test("Payload refuses collection collisions before writing output", async (conte
   }
   const numeric = parseWxr(`<rss><channel>${contentItem(1, "123")}</channel></rss>`);
   await generatePayloadBundle(numeric, join(workspace, "numeric"));
-  const checked = spawnSync(process.execPath, ["--check", join(workspace, "numeric/payload.config.mjs")], { encoding: "utf8" });
+  const checked = spawnSync(process.execPath, ["--check", join(workspace, "numeric/payload.config.js")], { encoding: "utf8" });
   assert.equal(checked.status, 0, checked.stderr);
 });
 
@@ -216,11 +225,13 @@ test("writes a Payload bundle with collections, a drop and an importer", async (
   await generatePayloadBundle(project, bundle);
 
   const manifest = JSON.parse(await readFile(join(bundle, "migration/manifest.json"), "utf8"));
-  assert.equal(manifest.schemaVersion, "0.9");
+  assert.equal(manifest.schemaVersion, "0.10");
   assert.equal(manifest.generator.target, "payload");
   assert.equal(manifest.destination.kind, "cms");
   assert.equal(manifest.destination.structure, "payload-next");
-  assert.equal(manifest.destination.payloadVersion, "^3.0.0");
+  assert.equal(manifest.destination.payloadVersion, "3.90.2");
+  assert.equal(manifest.destination.config, "payload.config.js");
+  assert.equal(manifest.destination.admin, "app/(payload)");
   assert.equal(manifest.destination.importer, "import/import.mjs");
   assert.equal(manifest.targets.payload.kind, "cms");
   assert.equal(manifest.targets.astro.kind, "static-site");
@@ -233,10 +244,35 @@ test("writes a Payload bundle with collections, a drop and an importer", async (
       stat(join(bundle, "collections", file))
     )
   );
-  const config = await readFile(join(bundle, "payload.config.mjs"), "utf8");
+  const config = await readFile(join(bundle, "payload.config.js"), "utf8");
   assert.match(config, /buildConfig/);
   assert.match(config, /lexicalEditor/);
   assert.match(config, /Pages/);
+
+  // The bundle is a runnable Payload + Next app, not only a config: the admin
+  // host, the scripts that start it and the env file are all written.
+  await Promise.all(
+    [
+      "app/(payload)/layout.jsx",
+      "app/(payload)/custom.css",
+      "app/(payload)/admin/importMap.js",
+      "app/(payload)/admin/[[...segments]]/page.jsx",
+      "app/(payload)/admin/[[...segments]]/not-found.jsx",
+      "app/(payload)/api/[...slug]/route.js",
+      "app/(payload)/api/graphql/route.js",
+      "app/(payload)/api/graphql-playground/route.js",
+      ".env.example",
+      ".gitignore",
+      "tsconfig.json"
+    ].map((file) => stat(join(bundle, file)))
+  );
+  const packageJson = JSON.parse(await readFile(join(bundle, "package.json"), "utf8"));
+  assert.equal(packageJson.dependencies.payload, "3.90.2");
+  assert.equal(packageJson.dependencies.next, "^16.3.3");
+  assert.equal(packageJson.devDependencies.typescript, "^7.0.0");
+  assert.match(packageJson.scripts.dev, /next dev/);
+  assert.match(packageJson.scripts.build, /next build/);
+  assert.equal(packageJson.scripts.import, "node import/import.mjs");
 
   // The drop resolves relationships through the same stable ids the manifest uses.
   const pages = JSON.parse(await readFile(join(bundle, "import/content/pages.json"), "utf8"));
@@ -245,6 +281,22 @@ test("writes a Payload bundle with collections, a drop and an importer", async (
   const serialized = JSON.stringify([...pages, ...posts]);
   assert.match(serialized, /"\$ref":\s*"wp:author:niko"/);
   assert.match(serialized, /"\$ref":\s*"wp:term:category:guides"/, "the post's category becomes a relationship");
+
+  // A body image the run delivered becomes a media node; one it did not stays
+  // a review row rather than pointing at a record that will never exist.
+  const tapPost = posts.find((job: { wordpressSourceId: string }) => job.wordpressSourceId === "wp:post:20");
+  assert.match(JSON.stringify(tapPost.data.body), /"type":"upload"/, "the delivered body image is a media node");
+  assert.match(JSON.stringify(tapPost.data.body), /"\$ref":"media:302"/);
+  assert.equal(tapPost.data.body.root.children.filter((node: { type: string }) => node.type === "upload").length, 1);
+  assert.ok(
+    !tapPost.data.contentReview.some((item: { kind: string }) => item.kind === "img"),
+    "a delivered image is not also left in the review queue"
+  );
+  const contactPage = pages.find((job: { wordpressSourceId: string }) => job.wordpressSourceId === "wp:page:12");
+  assert.ok(
+    contactPage.data.contentReview.some((item: { kind: string }) => item.kind === "img"),
+    "an image with no delivered upload stays a review row"
+  );
 
   const index = JSON.parse(await readFile(join(bundle, "import/content/index.json"), "utf8"));
   assert.equal(index.schemaVersion, "0.9");
@@ -266,9 +318,54 @@ test("writes a Payload bundle with collections, a drop and an importer", async (
   // where a Next front end and the common hosts can read it.
   await stat(join(bundle, "import/media/public/wp-content/uploads/2026/05/hero.jpg"));
   const nextConfig = await readFile(join(bundle, "next.config.mjs"), "utf8");
+  assert.match(nextConfig, /withPayload/, "a Next + Payload app needs the Payload wrapper, not only redirects");
   assert.match(nextConfig, /async redirects\(\)/);
   const redirects = JSON.parse(await readFile(join(bundle, "import/redirects.json"), "utf8"));
   assert.equal(redirects.redirects.length, project.routes.redirects.length);
+});
+
+test("an image the importer can link becomes a media node, and one it cannot stays review", () => {
+  const tap = "https://example.test/wp-content/uploads/2026/05/tap-768x512.jpg";
+  const { body, review } = htmlToPayloadRichText(
+    `<figure><img src="${tap}" alt="Tap handle removed"></figure>` +
+      '<p>before <img src="/other.jpg" alt=""> after</p>',
+    new Map(),
+    (image) => (image.src === tap ? { sourceId: "media:302", ...(image.alt === undefined ? {} : { alt: image.alt }) } : undefined)
+  );
+
+  const root = body.root as { children: { type: string; children?: { type: string; text?: string }[]; value?: unknown; fields?: unknown; relationTo?: string; id?: string }[] };
+  assert.deepEqual(root.children.map((child) => child.type), ["upload", "paragraph"]);
+  const upload = root.children[0]!;
+  assert.equal(upload.relationTo, "media");
+  assert.deepEqual(upload.value, { $ref: "media:302" });
+  assert.deepEqual(upload.fields, { alt: "Tap handle removed" });
+  assert.equal(upload.id, "upload-1");
+  assert.deepEqual(root.children[1]?.children?.map((node) => node.text), ["before ", " after"]);
+  assert.deepEqual(review.map((item) => item.kind), ["img"], "the image with no delivered upload is still a review row");
+});
+
+test("a paragraph's image splits the paragraph instead of nesting a block node", () => {
+  const { body } = htmlToPayloadRichText(
+    '<p>before <img src="/tap.jpg"> after</p>',
+    new Map(),
+    () => ({ sourceId: "media:302" })
+  );
+  const root = body.root as { children: { type: string; children?: { type: string; text?: string }[] }[] };
+  assert.deepEqual(root.children.map((child) => child.type), ["paragraph", "upload", "paragraph"]);
+  assert.equal(root.children[0]?.children?.[0]?.text, "before ");
+  assert.equal(root.children[2]?.children?.[0]?.text, " after");
+});
+
+test("Payload refuses duplicate routes before writing output", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-payload-route-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const item = (id: number) =>
+    `<item><title>Same route</title><wp:post_id>${id}</wp:post_id><wp:post_type>post</wp:post_type>` +
+    `<wp:status>publish</wp:status><wp:post_name>same</wp:post_name></item>`;
+  const project = parseWxr(`<rss><channel>${item(11)}${item(12)}</channel></rss>`);
+  const bundle = join(workspace, "bundle");
+  await assert.rejects(() => generatePayloadBundle(project, bundle), /duplicate route/);
+  await assert.rejects(() => stat(bundle), { code: "ENOENT" });
 });
 
 test("the generated importer's hash and reference logic behave as the drop expects", async () => {

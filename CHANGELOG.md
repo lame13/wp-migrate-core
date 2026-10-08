@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-08
+
+0.9.0 handed you a Payload bundle; this release hands you the app. The bundle now carries the Next + Payload admin host, so `npm install` and `npm run dev` open `/admin` instead of telling you to bring your own project. Images in the body become media nodes rather than notes, and the round trip that was run by hand for 0.9.1 is now a check anyone can re-run.
+
+- **The bundle boots an admin.** `convert --target payload` writes the `app/(payload)` route files, the `tsconfig.json` Payload's own CLI reads, `.env.example`, `.gitignore`, and a `next.config.mjs` that wraps the project in `withPayload`. The generated `package.json` gains `dev`, `build`, `start` and `generate:importmap` scripts. Payload adds its own `users` collection for admin accounts and the first one is created in the browser; WordPress authors are still an `authors` collection rather than logins.
+- **Images in the body come along.** When the export ties an image to an upload this run delivered, the converter emits a Payload Lexical upload node that references the media record, carrying the image's own alt text. An image with no delivered upload stays a `contentReview` entry instead of pointing at a record that will never exist. A delivered image is no longer also left in the review queue.
+- **The CMS path refuses duplicate routes.** Two records claiming one URL now fail the same way the static target fails, before any output is written.
+- **`npm run test:payload` is the round trip.** The check installs Payload 3.90.2 and Next into a temporary workspace, imports a generated bundle into SQLite, re-imports it, proves a source change updates while a CMS edit is protected, asserts the body image is a real populated media node, runs `verify --import-report`, and builds the generated admin app. It is opt-in because it installs packages; the default suite still never boots Payload.
+- **The bundle is pinned to a checked release.** Payload and the `@payloadcms/*` packages are written as `3.90.2`, the release the round trip runs against, because `@payloadcms/next` declares its `payload` peer as that exact version. The manifest, the bundle's `package.json` and the README all record it.
+- **The Payload config is `payload.config.js`.** Payload's CLI only discovers `payload.config.js` or `payload.config.ts`, so the `.mjs` name meant `payload generate:importmap` and friends could not find the config. A bundle written before this release needs the file renamed.
+- **The Payload manifest moves to schema `0.10`** for the `config` and `admin` entries in its destination block. The Astro manifest stays `0.9`, the import report stays `0.9` and the verification artefact stays `0.9`, because none of those changed shape.
+- **What this release still does not claim:** a migration of a real WordPress site. The generated app is built and exercised against Payload 3.90.2 and SQLite here, and that real-site round trip remains the gate before the next CMS destination.
+
 ## [0.9.1] - 2026-10-08
 
 - Fixes Payload rich-text links rejected by the Local API, preserves nested lists and ordered-list starts, and represents preformatted code using nodes supported by the default editor.

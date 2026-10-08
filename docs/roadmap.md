@@ -5,7 +5,9 @@
 0.7.0 brought media and a migration config. 0.8.x finished the static path
 for Astro: content types, navigation, archives, the launch gate. 0.9.0 opened
 the CMS path — destinations have a *kind*, and Payload is the first CMS
-destination behind that boundary.
+destination behind that boundary. 0.10.0 made that destination something a
+person can actually open: the bundle carries the admin host, images in the
+content are media nodes, and the Payload round trip is a check in the package.
 
 ## The CMS destination path
 
@@ -23,7 +25,7 @@ Priority:
 
 | Target | Why add it | Priority |
 | --- | --- | --- |
-| **Payload** | Next.js plus an integrated CMS. Its official WordPress migration guide already involves custom migration scripts, which this package can standardize. | Shipped in 0.9.0 |
+| **Payload** | Next.js plus an integrated CMS. Its official WordPress migration guide already involves custom migration scripts, which this package can standardize. | Shipped in 0.9.0; admin host, body images and a checked round trip in 0.10.0 |
 | **Pruvious** | A Nuxt destination with admin, media, collections and editable Vue blocks. | Next, if users want Nuxt |
 | **Ghost** | A straightforward destination for blogs and publications. | Later: Ghost already has a WordPress importer, so the advantage has to be better checking, preservation and repair reporting |
 
@@ -75,18 +77,35 @@ Four things changed shape when a destination stopped being a renderer:
 - Import report and `verify --import-report`: findings for missing, failed,
   skipped and unexpected records. Verification artefact schema `0.9`.
 
-**Validation so far.** 0.9.1 adds a local Payload 3.90.2 / SQLite round-trip
-with generated fixtures: three content types, media, rich text, repeated
-imports, source updates and CMS draft protection. The package checks cover
-generation and importer regressions. A real-site migration remains the gate below.
+**Validation so far.** 0.9.1 added a local Payload 3.90.2 / SQLite round-trip
+with generated fixtures; 0.10.0 committed it as `npm run test:payload` and
+extended it to the admin host: the generated app installs, imports, re-imports,
+protects a CMS edit, stores a body image as a media node, and builds with
+Next.js. A real-site migration remains the gate below.
 
-## Validation gate before 0.10.0
+## 0.10.0 — shipped
+
+- The bundle is a runnable Payload + Next app: `app/(payload)`, a
+  `tsconfig.json` Payload's CLI can read, `.env.example`, `.gitignore`, a
+  `withPayload` Next config, and `dev` / `build` / `import` /
+  `generate:importmap` scripts. `npm run dev` opens the admin.
+- Delivered body images become Payload Lexical upload nodes that reference the
+  media record, instead of stopping at a `contentReview` row.
+- The CMS path refuses duplicate routes the way the static target already did.
+- `npm run test:payload` installs Payload 3.90.2 and Next into a temporary
+  workspace, imports into SQLite, re-imports, proves a source change updates
+  while a CMS edit is protected, checks the media node, runs the import gate,
+  and builds the generated admin app. The bundle is pinned to that release.
+
+## Validation gate before 0.11.0
 
 Run one real WordPress → Payload migration end to end — a site with more than
 two content types, a menu, archives and media — and write down what broke.
-Pruvious does not start until that list is empty or explicitly deferred.
+Pruvious does not start until that list is empty or explicitly deferred. The
+package now proves the mechanics against a real Payload and SQLite; the gate is
+about a real site's content, not about whether the bundle runs.
 
-## 0.10.0 — Pruvious
+## 0.11.0 — Pruvious
 
 The same bundle and importer shape against a Nuxt destination, which is where
 the adapter boundary gets its second proof: if the second CMS needs changes in
@@ -98,11 +117,12 @@ Ghost's own importer means the pitch there is checking, preservation and
 repair reporting rather than movement, so it is a smaller release. Svelte stays
 a real but non-priority static target.
 
-## Decisions to review before 0.10.0
+## Decisions to review before 0.11.0
 
-1. **Payload version and database in CI.** 0.9.0 pins `^3.0.0` and records it in
-   the manifest and the bundle's `package.json`. Pick the database the adapter
-   is tested against.
+1. **Whether the Payload round trip runs in CI.** 0.10.0 pins Payload `3.90.2`
+   across the manifest and the bundle, and `npm run test:payload` runs against
+   SQLite on demand. Decide whether CI installs it (network, disk and minutes)
+   or whether it stays a release-time check.
 2. **Rich text depth.** 0.9.0 converts headings, paragraphs, lists, quotes,
    code, rules and the common inline formatting, and marks the rest. Revisit
    once a real migration shows what matters.

@@ -268,13 +268,15 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   const cmsManifest = JSON.parse(await readFile(join(consumer, "cms-bundle/migration/manifest.json"), "utf8"));
   assert.equal(cmsManifest.generator.target, "payload");
   assert.equal(cmsManifest.destination.kind, "cms");
-  assert.equal(cmsManifest.destination.payloadVersion, "^3.0.0");
+  assert.equal(cmsManifest.destination.payloadVersion, "3.90.2");
   assert.ok(
     cmsManifest.records.some((record) => record.sourceId === "wp:portfolio:20"),
     "a custom post type is dropped into its own Payload collection"
   );
   await readFile(join(consumer, "cms-bundle/collections/Portfolios.mjs"));
   await readFile(join(consumer, "cms-bundle/import/import.mjs"));
+  await readFile(join(consumer, "cms-bundle/payload.config.js"));
+  await readFile(join(consumer, "cms-bundle/app/(payload)/admin/[[...segments]]/page.jsx"));
 
   await writeFile(
     join(consumer, "cms-import.json"),

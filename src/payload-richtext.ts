@@ -23,6 +23,32 @@ export interface RichTextConversion {
   readonly review: readonly ContentReviewItem[];
 }
 
+/** An `<img>` the converter is asked about, reduced to what a media record needs. */
+export interface HtmlImage {
+  readonly src: string;
+  readonly alt?: string;
+}
+
+/**
+ * A media record the importer can link in the body. `sourceId` is the stable
+ * `wordpressSourceId` the drop already uses (`media:302`), which the importer
+ * resolves to the numeric id it created in the media pass.
+ */
+export interface ImageTarget {
+  readonly sourceId: string;
+  readonly alt?: string;
+}
+
+/** Resolve an image in the body to an uploaded media record, or give up. */
+export type ImageResolver = (image: HtmlImage) => ImageTarget | undefined;
+
+interface ConversionContext {
+  readonly rewrites: ReadonlyMap<string, string>;
+  readonly resolveImage?: ImageResolver;
+  /** Counts upload nodes so every node in one body has a stable, unique id. */
+  uploads: number;
+}
+
 const FORMAT_BITS: Readonly<Record<string, number>> = {
   strong: 1,
   b: 1,
@@ -93,14 +119,20 @@ const VOID_TAGS = new Set(["br", "hr", "img", "input", "source", "embed", "meta"
 
 export function htmlToPayloadRichText(
   html: string,
-  hrefRewrites: ReadonlyMap<string, string> = new Map()
+  hrefRewrites: ReadonlyMap<string, string> = new Map(),
+  resolveImage?: ImageResolver
 ): RichTextConversion {
   const review: ContentReviewItem[] = [];
+  const context: ConversionContext = {
+    rewrites: hrefRewrites,
+    ...(resolveImage === undefined ? {} : { resolveImage }),
+    uploads: 0
+  };
   const cleaned = html.replace(/<!--[\s\S]*?-->/g, "").replace(/\r\n?/g, "\n");
   const children: LexicalNode[] = [];
 
   for (const token of tokenizeBlocks(cleaned)) {
-    appendBlock(token, children, review, hrefRewrites);
+    appendBlock(token, children, review, context);
   }
 
   return {
@@ -127,26 +159,25 @@ function appendBlock(
   token: BlockToken,
   children: LexicalNode[],
   review: ContentReviewItem[],
-  rewrites: ReadonlyMap<string, string>
+  context: ConversionContext
 ): void {
   switch (token.kind) {
     case "element": {
       const tag = token.tag;
       if (/^h[1-6]$/.test(tag)) {
-        children.push(element("heading", { tag }, convertInline(token.inner, review, rewrites)));
+        children.push(element("heading", { tag }, convertInline(token.inner, review, context)));
         return;
       }
       if (tag === "p") {
-        const inline = convertInline(token.inner, review, rewrites);
-        if (inline.length > 0) children.push(element("paragraph", {}, inline));
+        pushParagraph(children, convertInline(token.inner, review, context, true));
         return;
       }
       if (tag === "ul" || tag === "ol") {
-        children.push(convertList(token, review, rewrites));
+        children.push(convertList(token, review, context));
         return;
       }
       if (tag === "blockquote") {
-        children.push(element("quote", {}, convertInline(token.inner, review, rewrites)));
+        children.push(element("quote", {}, convertInline(token.inner, review, context)));
         return;
       }
       if (tag === "pre") {
@@ -165,11 +196,11 @@ function appendBlock(
         if (hasLayoutHint(token.attrs)) {
           review.push(reviewItem(`${tag}-layout`, `A ${tag} container with layout styling needs rebuilding.`, token.raw));
         }
-        for (const child of tokenizeBlocks(token.inner)) appendBlock(child, children, review, rewrites);
+        for (const child of tokenizeBlocks(token.inner)) appendBlock(child, children, review, context);
         return;
       }
       // Any other element at the top level: keep its text rather than drop it.
-      const inline = convertInline(token.raw, review, rewrites);
+      const inline = convertInline(token.raw, review, context);
       if (inline.length > 0) children.push(element("paragraph", {}, inline));
       return;
     }
@@ -179,11 +210,20 @@ function appendBlock(
         children.push({ type: "horizontalrule", version: 1 });
         return;
       }
-      if (token.tag === "img" || UNSUPPORTED_INLINE.has(token.tag)) {
+      if (token.tag === "img") {
+        const upload = imageUpload(token.attrs, context);
+        if (upload !== undefined) {
+          children.push(upload);
+          return;
+        }
+        review.push(reviewItem("img", "<img> was not converted.", token.raw));
+        return;
+      }
+      if (UNSUPPORTED_INLINE.has(token.tag)) {
         review.push(reviewItem(token.tag, `<${token.tag}> was not converted.`, token.raw));
         return;
       }
-      const inline = convertInline(token.raw, review, rewrites);
+      const inline = convertInline(token.raw, review, context);
       if (inline.length > 0) children.push(element("paragraph", {}, inline));
       return;
     }
@@ -192,7 +232,7 @@ function appendBlock(
       return;
     case "text": {
       if (token.text.trim() === "") return;
-      const inline = convertInline(token.text, review, rewrites);
+      const inline = convertInline(token.text, review, context);
       if (inline.length > 0) children.push(element("paragraph", {}, inline));
       return;
     }
@@ -202,7 +242,7 @@ function appendBlock(
 function convertList(
   token: ElementToken,
   review: ContentReviewItem[],
-  rewrites: ReadonlyMap<string, string>
+  context: ConversionContext
 ): LexicalNode {
   const requestedStart = Number(readAttribute(token.attrs, "start") ?? 1);
   const start = token.tag === "ol" && Number.isSafeInteger(requestedStart) ? requestedStart : 1;
@@ -212,23 +252,71 @@ function convertList(
     let inline = "";
     for (const child of tokenizeBlocks(item.inner)) {
       if (child.kind === "element" && (child.tag === "ul" || child.tag === "ol")) {
-        nodes.push(...convertInline(inline, review, rewrites), convertList(child, review, rewrites));
+        nodes.push(...convertInline(inline, review, context), convertList(child, review, context));
         inline = "";
       } else {
         inline += child.kind === "text" ? child.text : child.raw;
       }
     }
-    nodes.push(...convertInline(inline, review, rewrites));
+    nodes.push(...convertInline(inline, review, context));
     return element("listitem", { value: start + index }, nodes);
   });
   return element("list", { listType: token.tag === "ol" ? "number" : "bullet", tag: token.tag, start }, children);
 }
 
+/**
+ * A paragraph keeps its inline content together, but an upload is a block
+ * node, so a resolvable image splits the paragraph around it.
+ */
+function pushParagraph(children: LexicalNode[], inline: readonly LexicalNode[]): void {
+  let buffer: LexicalNode[] = [];
+  const flush = (): void => {
+    if (buffer.length === 0) return;
+    children.push(element("paragraph", {}, buffer));
+    buffer = [];
+  };
+  for (const node of inline) {
+    if (node.type === "upload") {
+      flush();
+      children.push(node);
+    } else {
+      buffer.push(node);
+    }
+  }
+  flush();
+}
+
+/**
+ * The Payload Lexical upload node. `version: 3` is the version that carries
+ * its own node id, and the id is derived from the document order so the same
+ * export always converts to the same body.
+ */
+function imageUpload(attrs: string, context: ConversionContext): LexicalNode | undefined {
+  if (context.resolveImage === undefined) return undefined;
+  const src = readAttribute(attrs, "src");
+  if (src === undefined) return undefined;
+  const alt = readAttribute(attrs, "alt");
+  const target = context.resolveImage({ src, ...(alt === undefined ? {} : { alt }) });
+  if (target === undefined) return undefined;
+  context.uploads += 1;
+  const fields = target.alt === undefined || target.alt.trim() === "" ? {} : { alt: target.alt };
+  return {
+    type: "upload",
+    version: 3,
+    id: `upload-${context.uploads}`,
+    relationTo: "media",
+    fields,
+    value: { $ref: target.sourceId }
+  };
+}
+
 function convertInline(
   html: string,
   review: ContentReviewItem[],
-  rewrites: ReadonlyMap<string, string>
+  context: ConversionContext,
+  allowImages = false
 ): LexicalNode[] {
+  const rewrites = context.rewrites;
   const nodes: LexicalNode[] = [];
   const stack: { tag: string; format: number; link?: string }[] = [];
   let format = 0;
@@ -270,7 +358,17 @@ function convertInline(
       continue;
     }
 
-    if (UNSUPPORTED_INLINE.has(tag) || tag === "img") {
+    if (tag === "img") {
+      const upload = allowImages ? imageUpload(attrs, context) : undefined;
+      if (upload !== undefined) {
+        nodes.push(upload);
+        continue;
+      }
+      review.push(reviewItem("img", "<img> was not converted.", match[0]));
+      continue;
+    }
+
+    if (UNSUPPORTED_INLINE.has(tag)) {
       review.push(reviewItem(tag, `<${tag}> was not converted.`, match[0]));
       continue;
     }

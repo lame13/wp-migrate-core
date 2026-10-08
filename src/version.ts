@@ -17,6 +17,24 @@ export const ssrwireDependency = metadata.dependencies?.["ssrwire"] ?? "^0.5.0";
 /**
  * The Payload release the generated CMS bundle is written against. It is
  * recorded in the manifest the way `ssrwireDependency` is, so a bundle says
- * which version its collections and importer were built for.
+ * which version its collections, importer and admin host were built for.
+ *
+ * It is an exact version on purpose: `@payloadcms/next` declares its `payload`
+ * peer as that same exact version, so a bundle that floats the two apart
+ * installs with a peer conflict.
  */
-export const payloadDependency = "^3.0.0";
+export const payloadDependency = "3.90.2";
+
+/**
+ * The Next.js and React ranges the generated admin host is written against,
+ * from the peer ranges `@payloadcms/next` and `@payloadcms/ui` declare.
+ */
+export const payloadAdminDependencies: Readonly<Record<string, string>> = {
+  "@payloadcms/next": payloadDependency,
+  "@payloadcms/richtext-lexical": payloadDependency,
+  "@payloadcms/db-sqlite": payloadDependency,
+  graphql: "^16.8.1",
+  next: "^16.3.3",
+  react: "^19.2.1",
+  "react-dom": "^19.2.1"
+};

@@ -2,7 +2,7 @@
 
 Plan a WordPress migration, generate an Astro site or a Payload CMS bundle, and check the result before publishing.
 
-`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate a **static Astro project** with your content, images, navigation, the archive pages WordPress generated, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache — or a **Payload CMS bundle** with collections to edit in, a media library, and a generated importer.
+`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate a **static Astro project** with your content, images, navigation, the archive pages WordPress generated, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache — or a **Payload CMS app** with an admin to edit in, a media library, collections and a generated importer.
 
 To include images, supply a local copy of `wp-content/uploads` or the URL of a host that already serves them. A migration config lets you save route choices, excluded pages and findings you've reviewed, so you can repeat the migration without patching the output each time.
 
@@ -79,33 +79,35 @@ Conversion writes one content collection per post type in the export, such as `s
 | `migration/manifest.json` | Connect WordPress IDs to generated files and routes. |
 | `public/sitemap.xml` | List the generated routes, using the configured site URL or the URL from the export. |
 
-The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The archive and menu inventories use `"0.8"`. The manifest uses `"0.9"` (the destination block and the target list), and the verification artefact uses `"0.9"` (the import evidence). These describe each file's data format separately from the npm package version.
+The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The archive and menu inventories use `"0.8"`. The Astro manifest uses `"0.9"`, the Payload manifest uses `"0.10"` (its destination block names the config file and the admin host), and the verification artefact uses `"0.9"` (the import evidence). These describe each file's data format separately from the npm package version.
 
 ## The Payload CMS destination
 
-A static site gives you a foundation; a CMS destination also gives you an admin, media management and a publishing workflow. `--target payload` writes a reviewable bundle instead of pages:
+A static site gives you a foundation; a CMS destination also gives you an admin, media management and a publishing workflow. `--target payload` writes a reviewable Payload + Next app instead of pages:
 
 ```bash
 npx wp-migrate-core convert export.xml --out payload-bundle --target payload --uploads ../wordpress/wp-content/uploads
 cd payload-bundle
 npm install
-export PAYLOAD_SECRET="$(openssl rand -hex 16)"
-export DATABASE_URI="file:./payload.db"
-npm run import
+cp .env.example .env      # then set PAYLOAD_SECRET
+npm run import            # writes migration-import.json
+npm run dev               # the admin is at http://localhost:3000/admin
 ```
 
-The bundle contains one collection module per content type plus `media`, `categories`, `tags` and `authors`, a `payload.config.mjs`, a content and media drop under `import/`, and the generated importer. `wp-migrate-core` itself never talks to a database; the importer is the only thing that does.
+The bundle contains one collection module per content type plus `media`, `categories`, `tags` and `authors`, a `payload.config.js`, the `app/(payload)` admin host, a content and media drop under `import/`, and the generated importer. Payload adds its own `users` collection for admin accounts, and the first one is created in the browser. `wp-migrate-core` itself never talks to a database; the importer is the only thing that does.
 
 | File | Use it to |
 | --- | --- |
-| `payload.config.mjs` | Start or extend a Payload app; it is built for Payload `^3.0.0`. |
+| `payload.config.js` | Read the Payload config; it is built and checked against Payload `3.90.2`. |
+| `app/(payload)/` | Open the admin. `npm run dev` serves it at `/admin`; the route handlers expose Payload's REST and GraphQL APIs. |
 | `collections/` | Read the fields each collection carries before you run the import. |
 | `import/content/` | Review the drop: one file per collection, with `{ "$ref": ... }` markers the importer resolves. |
 | `import/import.mjs` | Run the import (`npm run import`); it writes `migration-import.json`. |
 | `import/redirects.json`, `next.config.mjs` | Publish the redirect map on a Next front end. |
 | `migration/` | The same review artifacts the Astro handoff writes. |
+| `.env.example`, `.gitignore` | Set the secret and the database, and keep the database, the uploaded media and the build out of git. |
 
-Posts and pages keep their title, slug, route, dates, author, taxonomy and the source publication status. Only WordPress `publish` becomes published in Payload; `draft`, `pending`, `future`, `private` and other unpublished statuses remain drafts, with the original status in `wordpressStatus`. Authors become an `authors` collection rather than Payload users, because `dc:creator` is a WordPress login. The body is native rich text for a documented subset — headings, paragraphs, lists, quotes, code, links and emphasis — and everything else (images, embeds, forms, tables, shortcodes and layout containers) becomes a `contentReview` entry rather than a guess, with `sourceHtml` keeping the original HTML alongside it. Preformatted code becomes code-formatted text with line breaks in the default editor.
+Posts and pages keep their title, slug, route, dates, author, taxonomy and the source publication status. Only WordPress `publish` becomes published in Payload; `draft`, `pending`, `future`, `private` and other unpublished statuses remain drafts, with the original status in `wordpressStatus`. Authors become an `authors` collection rather than Payload users, because `dc:creator` is a WordPress login. The body is native rich text for a documented subset — headings, paragraphs, lists, quotes, code, links, emphasis and delivered images — and everything else (images with no delivered upload, embeds, forms, tables, shortcodes and layout containers) becomes a `contentReview` entry rather than a guess, with `sourceHtml` keeping the original HTML alongside it. An image the export ties to an upload this run delivered becomes a media node in the body, so it lands in the page as well as in the library. Preformatted code becomes code-formatted text with line breaks in the default editor.
 
 Re-imports are safe. The importer finds each record by its stable `wordpressSourceId` (`wp:post:20`), updates it when the source changed, and skips a record that was edited in the CMS, reporting it as `record-modified` instead of overwriting it. Point `verify` at the import report to check the outcome:
 
@@ -113,7 +115,7 @@ Re-imports are safe. The importer finds each record by its stable `wordpressSour
 npx wp-migrate-core verify export.xml --import-report migration-import.json --fail-on blocker
 ```
 
-The 0.9.1 release was checked against Payload 3.90.2 and SQLite with generated fixtures, including repeated imports and CMS draft edits. A migration of a real site remains the next validation gate. When updating a 0.9.0 bundle, copy the regenerated collection definitions as well as the importer so the new `importSnapshot` field is available; older records whose prior values cannot be established are skipped for review.
+`npm run test:payload` in this repository is the round trip behind that claim: it installs Payload 3.90.2, imports a generated export into SQLite, re-imports it, edits a record in the CMS to prove the re-import leaves it alone, checks the media node in the body, and builds the generated admin app with Next.js. A migration of a real site remains the next validation gate. When updating a bundle written before 0.10.0, copy the regenerated collections, rename `payload.config.mjs` to `payload.config.js`, and add the `app/`, `tsconfig.json`, `.env.example` and `.gitignore` files so the admin host has what it needs.
 
 ### Content types
 
@@ -505,10 +507,12 @@ const project = applyMediaDelivery(parsed, mediaPlan);
 console.log(project.media.delivery.summary);
 await generateAstroProject(project, 'new-site');
 
-// Or write the Payload CMS bundle: collections, a drop, and an importer.
+// Or write the Payload CMS app: collections, an admin host, a drop, an importer.
 await generatePayloadBundle(project, 'payload-bundle');
 const richText = htmlToPayloadRichText('<h1>Title</h1><p>Body text.</p>');
 console.log(richText.body, richText.review);
+// Pass an ImageResolver to turn a delivered body image into a media node:
+console.log(htmlToPayloadRichText('<img src="/uploads/tap.jpg">', new Map(), () => ({ sourceId: 'media:302' })).body);
 
 // The same check the CLI runs: content evidence plus both audits.
 const verification = await verifySite(project, {
@@ -545,10 +549,11 @@ From a checkout:
 npm ci
 npm test
 npm run test:package
+npm run test:payload
 npm run demo
 ```
 
-The package check builds a tarball, installs it in a temporary project outside the checkout, and exercises the executable, demo, types, and ESM exports. It cleans up its temporary files afterward.
+The package check builds a tarball, installs it in a temporary project outside the checkout, and exercises the executable, demo, types, and ESM exports. It cleans up its temporary files afterward. `npm run test:payload` is the opt-in Payload round trip: it installs Payload and Next into a temporary workspace, imports a generated bundle into SQLite, re-imports it, checks the stored content and media nodes, runs the import gate, and builds the generated admin app. Skip it when you only changed something the text-level tests already cover.
 
 The bundled fixture contains fictional data only. See the [changelog](CHANGELOG.md) for release history and [GitHub issues](https://github.com/lame13/wp-migrate-core/issues) to report a bug.
 
