@@ -200,8 +200,7 @@ function appendBlock(
         return;
       }
       // Any other element at the top level: keep its text rather than drop it.
-      const inline = convertInline(token.raw, review, context);
-      if (inline.length > 0) children.push(element("paragraph", {}, inline));
+      pushParagraph(children, convertInline(token.raw, review, context, true));
       return;
     }
     case "void": {
@@ -418,11 +417,13 @@ function lastIndexWhere<T>(items: readonly T[], predicate: (item: T) => boolean)
 }
 
 function readAttribute(attrs: string, name: string): string | undefined {
-  const pattern = new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>]+))`, "i");
-  const match = pattern.exec(attrs);
-  if (match === null) return undefined;
-  const value = match[1] ?? match[2] ?? match[3];
-  return value === undefined ? undefined : decodeEntities(value);
+  const pattern = /(?:^|\s)([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+  for (const match of attrs.matchAll(pattern)) {
+    if (match[1]?.toLowerCase() === name.toLowerCase()) {
+      return decodeEntities(match[2] ?? match[3] ?? match[4] ?? "");
+    }
+  }
+  return undefined;
 }
 
 function decodeEntities(value: string): string {

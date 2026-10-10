@@ -468,44 +468,40 @@ function payloadImageResolver(
   record: ContentRecord,
   delivered: ReadonlySet<string>
 ): ImageResolver | undefined {
-  const byKey = new Map<string, string>();
+  const byKey = new Map<string, string | null>();
+  const byVariant = new Map<string, string | null>();
+  const add = (index: Map<string, string | null>, key: string, assetId: string): void => {
+    index.set(key, index.has(key) && index.get(key) !== assetId ? null : assetId);
+  };
   for (const reference of project.media.references) {
     if (reference.sourceId !== record.sourceId) continue;
     if (reference.kind === "featured-image") continue;
     if (reference.assetId === undefined || !delivered.has(reference.assetId)) continue;
-    for (const key of mediaKeys(reference.url, reference.path)) {
-      if (!byKey.has(key)) byKey.set(key, reference.assetId);
-    }
+    const key = payloadMediaKey(reference.url ?? reference.path, project.site.url);
+    if (key === undefined) continue;
+    add(byKey, key, reference.assetId);
+    add(byVariant, stripMediaVariants(key), reference.assetId);
   }
   if (byKey.size === 0) return undefined;
 
   return (image) => {
-    for (const key of mediaKeys(image.src)) {
-      const sourceId = byKey.get(key);
-      if (sourceId !== undefined) {
-        return image.alt === undefined || image.alt.trim() === ""
-          ? { sourceId }
-          : { sourceId, alt: image.alt };
-      }
-    }
-    return undefined;
+    const key = payloadMediaKey(image.src, project.site.url);
+    if (key === undefined) return undefined;
+    const sourceId = byKey.has(key) ? byKey.get(key) : byVariant.get(stripMediaVariants(key));
+    if (sourceId == null) return undefined;
+    return image.alt === undefined ? { sourceId } : { sourceId, alt: image.alt };
   };
 }
 
-/** Every way a body `src` might name the same upload, most exact first. */
-function mediaKeys(...values: readonly (string | undefined)[]): readonly string[] {
-  const keys = new Set<string>();
-  for (const value of values) {
-    if (value === undefined || value.trim() === "") continue;
-    const trimmed = value.trim();
-    keys.add(trimmed);
-    keys.add(stripMediaVariants(trimmed));
-    const path = mediaPath(trimmed);
-    if (path === undefined) continue;
-    keys.add(path);
-    keys.add(stripMediaVariants(path));
+/** Normalize paths without losing the host that identifies an attachment. */
+function payloadMediaKey(value: string | undefined, siteUrl: string | undefined): string | undefined {
+  const path = mediaPath(value);
+  if (path === undefined) return undefined;
+  try {
+    return `${new URL(sanitizeSourceUrl(value) ?? value!, siteUrl).host}${path}`;
+  } catch {
+    return path;
   }
-  return [...keys];
 }
 
 /** Only content published in WordPress may be published in Payload. */
@@ -814,7 +810,7 @@ function renderPayloadPackageJson(project: MigrationProject): string {
       build: "npm run generate:importmap && next build",
       start: "next start",
       "generate:importmap": "payload generate:importmap",
-      import: "node import/import.mjs"
+      import: "payload run import/import.mjs"
     },
     dependencies: {
       payload: payloadDependency,
@@ -1166,7 +1162,7 @@ export function renderPayloadImporter(project: MigrationProject): string {
  * whose source changed is updated, and a record somebody edited in the CMS is
  * skipped and reported rather than overwritten.
  *
- * Usage:  node import/import.mjs
+ * Usage:  npm run import
  * Result: ./migration-import.json
  */
 import { createHash } from "node:crypto";
@@ -1360,15 +1356,15 @@ async function main() {
         " updated, " + counters.unchanged + " unchanged, " + counters.skipped + " skipped, " + counters.failed + " failed."
     );
     console.log("Import report: " + reportPath);
-    if (counters.failed > 0) process.exitCode = 1;
+    if (counters.failed > 0) throw new Error(counters.failed + " record(s) failed to import.");
   } finally {
     await payload.destroy();
   }
 }
 
-main().catch((error) => {
+await main().catch((error) => {
   console.error("wp-migrate-core import: " + messageOf(error));
-  process.exitCode = 1;
+  process.exit(1);
 });
 `;
 }

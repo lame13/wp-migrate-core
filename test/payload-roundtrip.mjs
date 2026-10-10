@@ -11,29 +11,33 @@
  * that `next build` compiles the generated app.
  *
  * It installs packages, so it is not part of `npm test`. Set
- * `PAYLOAD_ROUNDTRIP_DIR` to reuse an existing workspace and its
- * `node_modules` while iterating.
+ * `PAYLOAD_ROUNDTRIP_DIR` to choose a workspace and keep the generated app for
+ * inspection. Its `bundle` subdirectory is replaced on each run.
  */
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const cliPath = join(repository, "dist/src/cli.js");
+const testEnv = { ...process.env };
+// Every subprocess uses this test's .env and temporary SQLite database.
+delete testEnv.DATABASE_URI;
+delete testEnv.PAYLOAD_SECRET;
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
     timeout: options.timeout ?? 900_000,
     cwd: options.cwd ?? repository,
-    env: { ...process.env, ...options.env },
+    env: { ...testEnv, ...options.env },
     stdio: options.capture === false ? "inherit" : "pipe"
   });
-  if (result.status !== 0) {
+  if (result.status !== (options.expectedStatus ?? 0)) {
     throw new Error(
       `${command} ${args.join(" ")} exited ${String(result.status)}\n--- stdout ---\n${result.stdout ?? ""}\n--- stderr ---\n${result.stderr ?? ""}`
     );
@@ -56,7 +60,7 @@ const extraItems = `
   <content:encoded><![CDATA[
 <!-- wp:heading --><h2>Contents</h2><!-- /wp:heading -->
 <p>A <strong>scheduled</strong> book.</p>
-<!-- wp:image {"id":304,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img src="https://brightpath.example/wp-content/uploads/2026/05/pipes.jpg" alt="Pipes" /></figure><!-- /wp:image -->
+<!-- wp:image {"id":304,"sizeSlug":"large"} --><figure class="wp-block-image size-large"><a href="/pipes/"><img data-src="/placeholder.jpg" src="https://brightpath.example/wp-content/uploads/2026/05/pipes.jpg" alt="Pipes" /></a></figure><!-- /wp:image -->
 <pre>one
 two</pre>
 <ol start="3"><li>parent<ul><li>nested</li></ul>after</li><li>next</li></ol>
@@ -149,9 +153,10 @@ try {
 
   console.log("Installing the bundle's dependencies ...");
   npm(["install", "--no-audit", "--no-fund", "--package-lock=false"], bundle);
+  await writeFile(join(bundle, ".env"), "PAYLOAD_SECRET=roundtrip-secret\nDATABASE_URI=file:./roundtrip.db\n");
 
   const importReport = async () => {
-    run(process.execPath, ["import/import.mjs"], { cwd: bundle });
+    npm(["run", "import"], bundle);
     return JSON.parse(await readFile(join(bundle, "migration-import.json"), "utf8"));
   };
 
@@ -159,6 +164,8 @@ try {
   const first = await importReport();
   assert.equal(first.summary.failed, 0, JSON.stringify(first.records.filter((record) => record.action === "failed"), null, 2));
   assert.equal(first.summary.created, first.summary.planned, "the first import creates every planned record");
+  await stat(join(bundle, "roundtrip.db"));
+  await assert.rejects(() => stat(join(bundle, "payload.db")), { code: "ENOENT" }, "the importer must use DATABASE_URI from .env");
 
   const second = await importReport();
   assert.equal(second.summary.unchanged, second.summary.planned, "a repeated import changes nothing");
@@ -166,7 +173,7 @@ try {
 
   console.log("Checking the stored content, the admin host and the media nodes ...");
   await writeFile(join(bundle, "roundtrip-check.mjs"), bundleCheck);
-  const checked = run(process.execPath, ["roundtrip-check.mjs"], { cwd: bundle });
+  const checked = npm(["exec", "--", "payload", "run", "roundtrip-check.mjs"], bundle);
   assert.match(checked, /CHECK OK/);
 
   console.log("Re-importing after a source change and a CMS edit ...");
@@ -188,7 +195,7 @@ try {
   console.log("Checking the import report against the plan ...");
   const verification = run(
     process.execPath,
-    [cliPath, "verify", exportPath, "--import-report", join(bundle, "migration-import.json"), "--fail-on", "blocker", "--json"],
+    [cliPath, "verify", exportPath, "--include-drafts", "--import-report", join(bundle, "migration-import.json"), "--fail-on", "blocker", "--json"],
     { cwd: workspace }
   );
   const verified = JSON.parse(verification);
@@ -198,8 +205,19 @@ try {
     "the import evidence is checked rather than skipped"
   );
 
+  console.log("Checking failed imports return a nonzero exit status ...");
+  const indexPath = join(bundle, "import/content/index.json");
+  const originalIndex = await readFile(indexPath, "utf8");
+  const invalidIndex = JSON.parse(originalIndex);
+  invalidIndex.files.push({ collection: "missing-collection", file: "content/books.json", count: 1 });
+  await writeFile(indexPath, JSON.stringify(invalidIndex));
+  run(process.execPath, [process.env.npm_execpath, "run", "import"], { cwd: bundle, expectedStatus: 1 });
+  const failed = JSON.parse(await readFile(join(bundle, "migration-import.json"), "utf8"));
+  assert.equal(failed.summary.failed, 1);
+  await writeFile(indexPath, originalIndex);
+
   console.log("Building the generated admin host with Next.js ...");
-  npm(["run", "build"], bundle, { PAYLOAD_SECRET: "roundtrip-secret", DATABASE_URI: "file:./payload.db" });
+  npm(["run", "build"], bundle);
 
   console.log("PASS: real Payload + SQLite create, repeat import, source update, CMS draft protection, a media node in the body, the import gate and a Next build.");
 } finally {

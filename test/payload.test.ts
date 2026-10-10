@@ -272,7 +272,7 @@ test("writes a Payload bundle with collections, a drop and an importer", async (
   assert.equal(packageJson.devDependencies.typescript, "^7.0.0");
   assert.match(packageJson.scripts.dev, /next dev/);
   assert.match(packageJson.scripts.build, /next build/);
-  assert.equal(packageJson.scripts.import, "node import/import.mjs");
+  assert.equal(packageJson.scripts.import, "payload run import/import.mjs");
 
   // The drop resolves relationships through the same stable ids the manifest uses.
   const pages = JSON.parse(await readFile(join(bundle, "import/content/pages.json"), "utf8"));
@@ -354,6 +354,52 @@ test("a paragraph's image splits the paragraph instead of nesting a block node",
   assert.deepEqual(root.children.map((child) => child.type), ["paragraph", "upload", "paragraph"]);
   assert.equal(root.children[0]?.children?.[0]?.text, "before ");
   assert.equal(root.children[2]?.children?.[0]?.text, " after");
+});
+
+test("linked images convert and use real src and alt attributes", () => {
+  const seen: unknown[] = [];
+  const { body, review } = htmlToPayloadRichText(
+    '<figure><a href="/full.jpg"><img data-src="/lazy.jpg" src="/real.jpg" data-alt="Wrong" alt="Right"></a></figure>',
+    new Map(),
+    (image) => {
+      seen.push(image);
+      return { sourceId: "media:302", ...(image.alt === undefined ? {} : { alt: image.alt }) };
+    }
+  );
+  assert.deepEqual(seen, [{ src: "/real.jpg", alt: "Right" }]);
+  assert.deepEqual((body.root as { children: { type: string }[] }).children.map((node) => node.type), ["upload"]);
+  assert.deepEqual(review, []);
+});
+
+test("body image matching keeps different hosts and exact attachment paths distinct", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-payload-images-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const base = await loadDemoProject();
+  const record = base.records.find((record) => record.sourceId === "wp:post:20")!;
+  const html = '<p><img src="https://brightpath.example/wp-content/uploads/2026/05/tap-768x512.jpg">' +
+    '<img src="https://other.example/wp-content/uploads/2026/05/tap.jpg">' +
+    '<img src="https://brightpath.example/wp-content/uploads/2026/05/tap.jpg">' +
+    '<img src="/wp-content/uploads/2026/05/tap.jpg?version=1">' +
+    '<img src="//brightpath.example/wp-content/uploads/2026/05/tap.jpg">' +
+    '<img src="//other.example/wp-content/uploads/2026/05/tap.jpg">' +
+    '<img src="https://brightpath.example/wp-content/uploads/2026/05/tap-640x480.jpg"></p>';
+  const project = applyMediaDelivery(base, await planMediaDelivery(base, { uploadsDirectory: join(fixturesRoot, "uploads") }));
+  const reference = project.media.references.find((ref) => ref.sourceId === record.sourceId && ref.assetId === "media:302")!;
+  const changed = {
+    ...project,
+    records: [{ ...record, rawContent: html, nodes: [] }],
+    media: { ...project.media, references: [
+      { ...reference, url: "https://brightpath.example/wp-content/uploads/2026/05/tap-768x512.jpg", path: "/wp-content/uploads/2026/05/tap-768x512.jpg" },
+      { ...reference, assetId: "media:304", url: "https://brightpath.example/wp-content/uploads/2026/05/tap.jpg", path: "/wp-content/uploads/2026/05/tap.jpg" }
+    ] }
+  };
+  await generatePayloadBundle(changed, join(workspace, "bundle"));
+  const [job] = JSON.parse(await readFile(join(workspace, "bundle/import/content/posts.json"), "utf8"));
+  const uploads = job.data.body.root.children.filter((node: { type: string }) => node.type === "upload");
+  assert.deepEqual(uploads.map((node: { value: unknown }) => node.value), [
+    { $ref: "media:302" }, { $ref: "media:304" }, { $ref: "media:304" }, { $ref: "media:304" }
+  ]);
+  assert.equal(job.data.contentReview.filter((row: { kind: string }) => row.kind === "img").length, 3);
 });
 
 test("Payload refuses duplicate routes before writing output", async (context) => {

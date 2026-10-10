@@ -94,7 +94,7 @@ npm run import            # writes migration-import.json
 npm run dev               # the admin is at http://localhost:3000/admin
 ```
 
-The bundle contains one collection module per content type plus `media`, `categories`, `tags` and `authors`, a `payload.config.js`, the `app/(payload)` admin host, a content and media drop under `import/`, and the generated importer. Payload adds its own `users` collection for admin accounts, and the first one is created in the browser. `wp-migrate-core` itself never talks to a database; the importer is the only thing that does.
+The bundle contains one collection module per content type plus `media`, `categories`, `tags` and `authors`, a `payload.config.js`, the `app/(payload)` admin host, a content and media drop under `import/`, and the generated importer. `npm run import` uses Payload's CLI to load the same `.env` settings as the admin app. Payload adds its own `users` collection for admin accounts, and the first one is created in the browser. `wp-migrate-core` itself never talks to a database.
 
 | File | Use it to |
 | --- | --- |
@@ -115,7 +115,7 @@ Re-imports are safe. The importer finds each record by its stable `wordpressSour
 npx wp-migrate-core verify export.xml --import-report migration-import.json --fail-on blocker
 ```
 
-`npm run test:payload` in this repository is the round trip behind that claim: it installs Payload 3.90.2, imports a generated export into SQLite, re-imports it, edits a record in the CMS to prove the re-import leaves it alone, checks the media node in the body, and builds the generated admin app with Next.js. A migration of a real site remains the next validation gate. When updating a bundle written before 0.10.0, copy the regenerated collections, rename `payload.config.mjs` to `payload.config.js`, and add the `app/`, `tsconfig.json`, `.env.example` and `.gitignore` files so the admin host has what it needs.
+`npm run test:payload` in this repository is the round trip behind that claim: it installs Payload 3.90.2, imports a generated export into SQLite, re-imports it, edits a record in the CMS to prove the re-import leaves it alone, checks the media node in the body, and builds the generated admin app with Next.js. A migration of a real site remains the next validation gate. When updating a bundle written before 0.10.0, copy the regenerated collections, importer, `package.json` and `next.config.mjs`, rename `payload.config.mjs` to `payload.config.js`, and add the `app/`, `tsconfig.json`, `.env.example` and `.gitignore` files so the admin host has what it needs. For a 0.10.0 bundle, copy the regenerated importer and change its `import` script to `payload run import/import.mjs` so it reads `.env` and waits for completion.
 
 ### Content types
 

@@ -2,7 +2,14 @@
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-10-08
+## [0.10.1] - 2026-10-10
+
+- Runs the generated importer through Payload's CLI so it reads `.env` consistently with the admin app, including the database URL and secret.
+- Converts linked body images and reads actual `src` and `alt` attributes instead of confusing them with `data-src` and `data-alt`.
+- Keeps image hosts distinct, prefers exact attachment matches over size variants, and leaves ambiguous variants for review instead of attaching the wrong media record.
+- Extends the Payload round trip to check the documented import command with a non-default database in `.env`, linked images, and draft-inclusive verification. Test subprocesses no longer inherit an external database URL or Payload secret.
+
+## [0.10.0] - 2026-10-10
 
 0.9.0 handed you a Payload bundle; this release hands you the app. The bundle now carries the Next + Payload admin host, so `npm install` and `npm run dev` open `/admin` instead of telling you to bring your own project. Images in the body become media nodes rather than notes, and the round trip that was run by hand for 0.9.1 is now a check anyone can re-run.
 
