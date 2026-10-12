@@ -1,4 +1,5 @@
 import { linkRewrites, sanitizeLinkHref } from "./core.js";
+import { artifactSchemaVersions } from "./contracts.js";
 import { coverageEntryRecords } from "./live-urls.js";
 import { mediaDeliveryRecord } from "./media.js";
 import { renderJson } from "./render.js";
@@ -51,7 +52,7 @@ export function renderIssuesArtifact(issues: readonly MigrationIssue[]): string 
  */
 export function renderMediaArtifact(project: MigrationProject, target: OutputTarget): string {
   return renderJson({
-    schemaVersion: "0.7",
+    schemaVersion: artifactSchemaVersions.media,
     generator: generator(target),
     summary: project.media.summary,
     ...(project.media.delivery === undefined
@@ -95,7 +96,7 @@ export function renderMediaArtifact(project: MigrationProject, target: OutputTar
  */
 export function renderRedirectsArtifact(project: MigrationProject, target: OutputTarget): string {
   return renderJson({
-    schemaVersion: "0.2",
+    schemaVersion: artifactSchemaVersions.redirects,
     generator: generator(target),
     summary: project.routes.summary,
     redirects: project.routes.redirects.map((redirect) => ({
@@ -124,7 +125,7 @@ export function renderRedirectsArtifact(project: MigrationProject, target: Outpu
  */
 export function renderLinksArtifact(project: MigrationProject, target: OutputTarget): string {
   return renderJson({
-    schemaVersion: "0.3",
+    schemaVersion: artifactSchemaVersions.links,
     generator: generator(target),
     summary: project.links.summary,
     rewrites: linkRewrites(project.links),
@@ -153,7 +154,7 @@ export function renderLinksArtifact(project: MigrationProject, target: OutputTar
  */
 export function renderCoverageArtifact(project: MigrationProject, target: OutputTarget): string {
   return renderJson({
-    schemaVersion: "0.4",
+    schemaVersion: artifactSchemaVersions.coverage,
     generator: generator(target),
     summary: project.coverage.summary,
     entries: coverageEntryRecords(project.coverage)
@@ -163,7 +164,7 @@ export function renderCoverageArtifact(project: MigrationProject, target: Output
 /** The archives this handoff generates, with the subject each one lists. */
 export function renderArchivesArtifact(project: MigrationProject, target: OutputTarget): string {
   return renderJson({
-    schemaVersion: "0.8",
+    schemaVersion: artifactSchemaVersions.archives,
     generator: generator(target),
     summary: project.archives.summary,
     pages: project.archives.pages.map((page) => ({
@@ -190,7 +191,7 @@ export function renderArchivesArtifact(project: MigrationProject, target: Output
 /** The menus WordPress served, so the new theme can rebuild them deliberately. */
 export function renderMenusArtifact(project: MigrationProject, target: OutputTarget): string {
   return renderJson({
-    schemaVersion: "0.8",
+    schemaVersion: artifactSchemaVersions.menus,
     generator: generator(target),
     summary: project.menus.summary,
     trees: project.menus.trees.map((menu) => ({

@@ -17,6 +17,7 @@ import {
   readHtmlAttribute,
   sanitizeSourceUrl
 } from "./core.js";
+import { artifactSchemaVersions } from "./contracts.js";
 import {
   absoluteOnOrigin,
   deliveryCheckFiles,
@@ -34,7 +35,7 @@ import {
   safeFileStem,
   writeNewFile
 } from "./render.js";
-import { targetRecords } from "./targets.js";
+import { targetDefinitions, targetRecords } from "./targets.js";
 import type {
   ArchivePage,
   ContentRecord,
@@ -51,7 +52,16 @@ import { packageVersion, ssrwireDependency } from "./version.js";
 const GENERATOR_NAME = "wp-migrate-core";
 const SAFE_ELEMENTOR_HREF_SCHEMES = new Set(["http", "https", "mailto", "tel"]);
 
-interface GeneratedRecord {
+/**
+ * The page model every static destination shares.
+ *
+ * `src/index.ts` is the public surface: only `generateAstroProject` and
+ * `GenerateOptions` are re-exported from this module. Everything else here is
+ * exported so the other static renderers (`src/next.ts`, and later Nuxt and
+ * Svelte) build their pages from one plan instead of a second parser. A
+ * destination decides what files to write, not what the export means.
+ */
+export interface GeneratedRecord {
   readonly kind: "content";
   readonly record: ContentRecord;
   readonly collection: string;
@@ -61,7 +71,7 @@ interface GeneratedRecord {
 }
 
 /** A listing page: an archive WordPress generated, written as a content entry. */
-interface GeneratedListing {
+export interface GeneratedListing {
   readonly kind: "listing";
   readonly archive: ArchivePage;
   readonly collection: "listings";
@@ -70,7 +80,7 @@ interface GeneratedListing {
   readonly sourceUrl: string;
 }
 
-type GeneratedPage = GeneratedRecord | GeneratedListing;
+export type GeneratedPage = GeneratedRecord | GeneratedListing;
 
 export interface GenerateOptions {
   /**
@@ -150,7 +160,10 @@ export async function generateAstroProject(
     files.set(ruleFile.path, ruleFile.contents);
   }
 
-  for (const checkFile of deliveryCheckFiles(project)) {
+  for (const checkFile of deliveryCheckFiles(project, {
+    previewOrigin: targetDefinitions.astro.previewOrigin,
+    previewCommand: targetDefinitions.astro.previewCommand
+  })) {
     files.set(checkFile.path, checkFile.contents);
   }
 
@@ -169,7 +182,7 @@ export async function generateAstroProject(
 }
 
 /** Raw href -> generated href, per content record. */
-function createLinkRewriteMap(
+export function createLinkRewriteMap(
   project: MigrationProject,
   enabled: boolean
 ): Map<string, Map<string, string>> {
@@ -192,7 +205,7 @@ function createLinkRewriteMap(
   return byRecord;
 }
 
-function prepareRecords(project: MigrationProject): GeneratedRecord[] {
+export function prepareRecords(project: MigrationProject): GeneratedRecord[] {
   const usedFileNames = new Set<string>();
   const usedRoutes = new Set<string>();
   const collections = collectionByType(project);
@@ -227,12 +240,12 @@ function prepareRecords(project: MigrationProject): GeneratedRecord[] {
 }
 
 /** The content collection each post type generates into, from the plan. */
-function collectionByType(project: MigrationProject): ReadonlyMap<string, string> {
+export function collectionByType(project: MigrationProject): ReadonlyMap<string, string> {
   return new Map(project.types.filter((entry) => entry.included).map((entry) => [entry.name, entry.collection]));
 }
 
 /** Every content collection the handoff writes, in a stable order. */
-function generatedCollections(project: MigrationProject): readonly string[] {
+export function generatedCollections(project: MigrationProject): readonly string[] {
   const names = project.types.filter((entry) => entry.included).map((entry) => entry.collection);
   const archives = project.archives.pages.length > 0 ? ["listings"] : [];
   return [...new Set([...names, ...archives])].sort();
@@ -243,7 +256,7 @@ function generatedCollections(project: MigrationProject): readonly string[] {
  * sitemap, the manifest and the delivery checks all treat them like any other
  * page instead of growing a second rendering path.
  */
-function prepareListings(project: MigrationProject): GeneratedListing[] {
+export function prepareListings(project: MigrationProject): GeneratedListing[] {
   const usedFileNames = new Set<string>();
 
   return project.archives.pages.map((archive) => {
@@ -273,13 +286,13 @@ function prepareListings(project: MigrationProject): GeneratedListing[] {
  * source wrote, which is what markup carries, and the attachment id, which is
  * what widget settings carry when they never spelled out a URL.
  */
-interface MediaRenderer {
+export interface MediaRenderer {
   readonly byPath: ReadonlyMap<string, MediaDeliveryEntry>;
   readonly byAssetId: ReadonlyMap<string, MediaDeliveryEntry>;
   readonly assets: ReadonlyMap<string, MediaAsset>;
 }
 
-function createMediaRenderer(project: MigrationProject): MediaRenderer | undefined {
+export function createMediaRenderer(project: MigrationProject): MediaRenderer | undefined {
   const plan = project.media.delivery;
   if (plan === undefined) {
     return undefined;
@@ -573,7 +586,7 @@ ${propsLine}${canonical}
 `;
 }
 
-function renderStyles(): string {
+export function renderStyles(): string {
   return `:root {
   color: #171717;
   background: #f5f5f3;
@@ -607,7 +620,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
  * file a launch needs instead: crawling allowed, and the sitemap named when
  * the site URL is known.
  */
-function renderRobotsTxt(project: MigrationProject, publishReady: boolean): string {
+export function renderRobotsTxt(project: MigrationProject, publishReady: boolean): string {
   if (!publishReady) {
     return "User-agent: *\nDisallow: /\n";
   }
@@ -621,7 +634,7 @@ function renderRobotsTxt(project: MigrationProject, publishReady: boolean): stri
  * plan rather than from a build, so it doubles as the target list another
  * checker can be pointed at while the site is still being rebuilt.
  */
-function renderSitemap(pages: readonly GeneratedPage[], origin: string): string {
+export function renderSitemap(pages: readonly GeneratedPage[], origin: string): string {
   const entries = pages.map((generated) => {
     const lastModified =
       generated.kind === "content" ? sitemapLastModified(generated.record.modifiedAt) : undefined;
@@ -669,11 +682,11 @@ const navigation = ${JSON.stringify(html)};
 `;
 }
 
-function renderMenuList(items: readonly MenuItem[]): string {
+export function renderMenuList(items: readonly MenuItem[]): string {
   return `<ul>\n${items.map((item) => renderMenuItem(item)).join("\n")}\n</ul>`;
 }
 
-function renderMenuItem(item: MenuItem): string {
+export function renderMenuItem(item: MenuItem): string {
   const href = item.href ?? item.targetRoute ?? item.url;
   const label = escapeHtml(item.label);
   const target = href === undefined ? `<span>${label}</span>` : `<a href="${escapeHtmlAttribute(href)}">${label}</a>`;
@@ -685,7 +698,24 @@ function renderMenuItem(item: MenuItem): string {
  * A listing page, written as a content entry: the title, a link to every
  * record it lists, and the page links when a listing is paginated.
  */
-function renderListingPage(listing: GeneratedListing, project: MigrationProject): string {
+export function renderListingPage(listing: GeneratedListing, project: MigrationProject): string {
+  const frontmatter = [
+    "---",
+    `title: ${yamlString(listing.archive.title)}`,
+    `route: ${yamlString(listing.route)}`,
+    "categories: []",
+    "---"
+  ].join("\n");
+
+  return `${frontmatter}\n\n${renderListingBody(listing, project)}\n`;
+}
+
+/**
+ * The listing body on its own — a title, a link to every record it lists and
+ * the page links when it is paginated — so a destination that is not Astro
+ * writes the same page from the same data.
+ */
+export function renderListingBody(listing: GeneratedListing, project: MigrationProject): string {
   const { archive } = listing;
   const recordsById = new Map(project.records.map((record) => [record.sourceId, record]));
   const items = archive.sourceIds.flatMap((sourceId) => {
@@ -709,23 +739,16 @@ function renderListingPage(listing: GeneratedListing, project: MigrationProject)
           )
           .join(" ")}</p>`;
 
-  const frontmatter = [
-    "---",
-    `title: ${yamlString(archive.title)}`,
-    `route: ${yamlString(listing.route)}`,
-    "categories: []",
-    "---"
-  ].join("\n");
   const body = `<h1>${escapeHtml(archive.title)}</h1>\n<ul>\n${items.join("\n")}\n</ul>${paging}`;
 
-  return `${frontmatter}\n\n${body}\n`;
+  return body;
 }
 
 /**
  * A static RSS 2.0 feed. Items carry a publication date only when the export
  * recorded one in GMT, so this never asserts a timezone WordPress did not.
  */
-function renderFeed(feed: FeedFile, project: MigrationProject, origin: string): string {
+export function renderFeed(feed: FeedFile, project: MigrationProject, origin: string): string {
   const recordsById = new Map(project.records.map((record) => [record.sourceId, record]));
   const items = feed.sourceIds.flatMap((sourceId) => {
     const record = recordsById.get(sourceId);
@@ -770,7 +793,7 @@ function renderManifest(project: MigrationProject, pages: readonly GeneratedPage
   const records = pages.filter((page): page is GeneratedRecord => page.kind === "content");
   const listings = pages.filter((page): page is GeneratedListing => page.kind === "listing");
   return renderJson({
-    schemaVersion: "0.9",
+    schemaVersion: artifactSchemaVersions.manifestAstro,
     generator: {
       name: GENERATOR_NAME,
       version: packageVersion,
@@ -932,7 +955,7 @@ function renderContentRecord(
  * published. Everything else, including external links and anchors, is left
  * exactly as the export wrote it.
  */
-function rewriteInternalLinks(html: string, rewrites: ReadonlyMap<string, string> | undefined): string {
+export function rewriteInternalLinks(html: string, rewrites: ReadonlyMap<string, string> | undefined): string {
   if (rewrites === undefined || rewrites.size === 0) {
     return html;
   }
@@ -961,7 +984,7 @@ function replaceHtmlAttribute(tag: string, name: string, value: string): string 
   });
 }
 
-function renderRecordBody(record: ContentRecord, media: MediaRenderer | undefined): string {
+export function renderRecordBody(record: ContentRecord, media: MediaRenderer | undefined): string {
   if (record.rawContent.trim().length > 0) {
     const content = renderSafeRawHtml(record.rawContent, media);
     if (content === undefined) {
@@ -1092,7 +1115,7 @@ function repairMessageForNode(node: MigrationNode): string {
   return "This part of the page needs review before publication.";
 }
 
-function ensureTitleH1(body: string, title: string): string {
+export function ensureTitleH1(body: string, title: string): string {
   if (hasH1(body)) {
     return body;
   }
@@ -1324,7 +1347,7 @@ function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
 }
 
-function sourceUrlFor(project: MigrationProject, record: ContentRecord, route: string): string {
+export function sourceUrlFor(project: MigrationProject, record: ContentRecord, route: string): string {
   const candidate = project.routes.entries.find((entry) => entry.sourceId === record.sourceId)?.sourceUrl
     ?? record.route ?? route;
   if (/^https?:\/\//i.test(candidate)) {

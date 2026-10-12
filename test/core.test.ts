@@ -74,8 +74,9 @@ test("inspects Gutenberg and Elementor without silently accepting unsupported be
 
 test("keeps future renderers visible but disabled", () => {
   assert.doesNotThrow(() => assertTargetEnabled("astro"));
-  assert.throws(() => assertTargetEnabled("next"), /planned but not available/);
+  assert.doesNotThrow(() => assertTargetEnabled("next"));
   assert.throws(() => assertTargetEnabled("nuxt"), /planned but not available/);
+  assert.throws(() => assertTargetEnabled("svelte"), /planned but not available/);
 });
 
 test("skips non-positive and non-integer WordPress post IDs", () => {

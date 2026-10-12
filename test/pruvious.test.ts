@@ -79,7 +79,7 @@ test("the Pruvious bundle is a Nuxt app with collections, a drop and an importer
   assert.equal(manifest.destination.structure, "pruvious-nuxt");
   assert.equal(manifest.destination.pruviousVersion, "~3.9.0");
   assert.equal(manifest.targets.pruvious.kind, "cms");
-  assert.equal(manifest.targets.next.enabled, false);
+  assert.equal(manifest.targets.svelte.enabled, false);
   assert.equal(manifest.records.length, project.records.length);
 
   const pageJobs = JSON.parse(await readFile(join(bundle, "import/content/pages.json"), "utf8"));

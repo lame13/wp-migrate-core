@@ -10,7 +10,11 @@ person can actually open: the bundle carries the admin host, images in the
 content are media nodes, and the Payload round trip is a check in the package.
 0.11.0 proved the boundary with a second CMS: Pruvious joined Payload, the
 menu became an editable collection, files that are not images travel too, and
-the importer's re-run promises became true for media as well as text.
+the importer's re-run promises became true for media as well as text. 0.12.0
+made the boundary public and proved it a third time with a static renderer:
+Next.js arrived, the exported surface and every artifact version became a
+frozen, test-enforced contract, the corpus arrived, and the last repeatable
+integration check — Pruvious against a real Nuxt app — closed.
 
 ## The CMS destination path
 
@@ -28,13 +32,17 @@ Priority:
 
 | Target | Why add it | Priority |
 | --- | --- | --- |
+| **Next.js** | The framework people leaving WordPress most often already have a project in — and the destination that proved the boundary for a static renderer, not just a CMS. | Shipped in 0.12.0 |
 | **Payload** | Next.js plus an integrated CMS. Its official WordPress migration guide already involves custom migration scripts, which this package can standardize. | Shipped in 0.9.0; admin host, body images and a checked round trip in 0.10.0 |
 | **Pruvious** | A Nuxt destination with admin, media, collections and editable Vue blocks. | Shipped in 0.11.0 as the second destination — the boundary's second proof |
 | **Ghost** | A straightforward destination for blogs and publications. | Later: Ghost already has a WordPress importer, so the advantage has to be better checking, preservation and repair reporting |
 
-Svelte stays a real but non-priority static target. A bare Next.js or Nuxt
-renderer stays parked behind the CMS work, because Payload and Pruvious
-already deliver a Next and a Nuxt site.
+Nuxt in 0.13.0 and Svelte in 0.14.0 are the parked static targets; they stay
+declared in the registry so a caller can see them and get a reason. A bare
+Next.js renderer was parked behind the CMS work for two releases because
+Payload and Pruvious already deliver a Next and a Nuxt site — 0.12.0 settled
+that the shorthand was wrong: a CMS bundle is not a static site, and someone
+who wants `out/` to deploy does not want a database.
 
 ## The destination boundary
 
@@ -43,11 +51,13 @@ Five places know about targets, and they are generated from one registry now
 
 - `OutputTarget` in `src/types.ts`, and `DestinationKind = "static-site" | "cms"`.
 - `targetDefinitions` — target, kind, enabled, label, description.
+- The preview origin and the command that serves it, so the paired SSRWire
+  checks are written for the port the destination actually uses.
 - `src/adapters.ts` — `TargetAdapter`, which adds a `generate` function, plus
   `assertTargetEnabled` and `generateForTarget`.
 - `src/cli.ts` — the `--target` validator and the command dispatch.
-- `src/generate.ts` / `src/payload.ts` — the manifest's `targets` block and the
-  report's target cards.
+- `src/generate.ts` / `src/next.ts` / `src/payload.ts` / `src/pruvious.ts` —
+  the manifest's `targets` block and the report's target cards.
 
 Four things changed shape when a destination stopped being a renderer:
 
@@ -100,17 +110,6 @@ Next.js. A real-site migration remains the gate below.
   while a CMS edit is protected, checks the media node, runs the import gate,
   and builds the generated admin app. The bundle is pinned to that release.
 
-## Validation gate before 0.12.0
-
-Two things are unproven, and both are the same kind of gate. One real
-WordPress → Payload migration end to end — a site with more than two content
-types, a menu, archives and media — and one real WordPress → Pruvious round
-trip using real-site content. The package proves the Payload mechanics against
-real Payload and SQLite in `npm run test:payload`. The 0.11.1 review manually
-checked Pruvious 3.9.10 with Nuxt 3.9.3 and SQLite, including repeat imports,
-source updates, dashboard edit protection, navigation and local media paths.
-A repeatable Pruvious integration check remains to be added.
-
 ## 0.11.0 — shipped
 
 The second CMS destination, and the release that made the first one honest.
@@ -132,27 +131,98 @@ The second CMS destination, and the release that made the first one honest.
   carries is delivered like an image and, on the CMS path, imported as a media
   record.
 
-## Later — Ghost, then the parked static targets
+## Validation gates
 
-Ghost's own importer means the pitch there is checking, preservation and
-repair reporting rather than movement, so it is a smaller release. Svelte stays
-a real but non-priority static target.
+Three of the four are closed, and each one is closed by a command anyone can
+re-run:
 
-## Decisions to review before 0.12.0
+| Gate | Closed by |
+| --- | --- |
+| Payload mechanics against real Payload and SQLite | `npm run test:payload` |
+| Pruvious against a real Nuxt app: boot, import, repeat import, import gate | `npm run test:pruvious` |
+| Next.js: type-check, static build, every route prerendered, media served, launch gate | `npm run test:next` |
+| **One real WordPress → CMS migration** — a site with more than two content types, a menu, archives and media | **Open.** No fixture can stand in for it, because its value is the content nobody wrote for this repository. |
 
-1. **Whether the CMS round trips run in CI.** 0.10.0 pins Payload `3.90.2`
-   across the manifest and the bundle, and `npm run test:payload` runs against
-   SQLite on demand. Pruvious has a manual round trip and needs the same kind
-   of repeatable check. Decide whether CI installs these (network, disk and
-   minutes) or whether they stay release-time checks.
-2. **Rich text depth.** 0.9.0 converts headings, paragraphs, lists, quotes,
+## 0.12.0 — shipped
+
+The release that made the promises executable, and added the destination that
+proves they are worth making.
+
+- **Next.js is the third destination**, written against the boundary instead of
+  inside it. It shares Astro's page model — the same record preparation, body
+  renderer, media renderer, menu, sitemap, feed writer and artifacts — and
+  `test/next.test.ts` asserts the two handoffs render byte-identical HTML for
+  the same record. It added no rule to `core.ts`.
+- **The `out/` directory is the gate.** A static export writes one HTML file per
+  prerendered route, which is exactly what `verify --html-dir` reads. A static
+  export cannot serve a redirect, and the handoff says so rather than shipping
+  one that does nothing.
+- **The contract is a file, not a paragraph.** `src/contracts.ts` holds every
+  artifact and its schema version, and the generators read them from there.
+  `test/api-surface.json` freezes 198 exported names, and
+  `test/api-surface.test.ts` fails if the built declarations disagree with it or
+  if a name is missing from `docs/api.md`.
+- **The corpus is the parser's regression net.**
+  `test/corpus.test.ts` runs every fixture through parse, plan, all four
+  destinations and a verification, and each fixture names the findings it
+  exists to produce.
+- **Findings stopped naming a renderer**: "cannot be executed by Astro" became
+  "cannot be executed by the generated site".
+
+## The CI decision
+
+**The round trips do not run on every pull request.** They run on a weekly
+schedule, on demand, and as the gate a release is cut against
+(`.github/workflows/round-trips.yml`). The reasoning:
+
+- Between them they install a few hundred megabytes (Nuxt and Pruvious are the
+  heaviest) and take minutes per destination, four ways across a matrix.
+- What they catch that `npm test` cannot is *integration* drift — a toolchain
+  release changing behaviour under a generated project. That drift appears on
+  the scale of weeks, not commits, which is the schedule.
+- A pull request still gets the text-level suite, the contract checks, the
+  destination tests and the corpus matrix. Nothing about a normal change is
+  unverified; the round trips are the second opinion, not the first.
+
+If a change touches a destination's generated project — `src/next.ts`,
+`src/payload.ts`, `src/pruvious.ts`, the shared renderer or a pinned version —
+run the round trip for that destination before merging. A release runs all
+three.
+
+## Next — Nuxt in 0.13.0, Svelte in 0.14.0
+
+The two declared-but-disabled targets are planned, in this order:
+
+- **0.13.0, Nuxt.** The Pruvious bundle already integrates with a Nuxt app, so
+  the renderer has a reference implementation to borrow a shape from: content
+  as JSON, a route index, and the same `verify --html-dir` story as Next.
+- **0.14.0, Svelte.** A SvelteKit target, last because it is the least likely to
+  be someone's destination and, of the four static options, the one whose
+  project structure moves most between releases.
+
+Both stay in the registry while they are unwritten, and `assertTargetEnabled`
+keeps refusing them with a reason. A target that disappears from the list is a
+target a script cannot discover.
+
+**Ghost** comes after that, and it is a different kind of destination: it has
+its own importer, so the pitch there is checking, preservation and repair
+reporting rather than movement.
+
+## Decisions to review before 0.13.0
+
+1. **Rich text depth.** 0.9.0 converts headings, paragraphs, lists, quotes,
    code, rules and the common inline formatting, and marks the rest. Revisit
    once a real migration shows what matters.
-3. **Where redirects live for a Next front end.** 0.9.0 writes both
-   `next.config.mjs` and the host rule files. Confirm the split in practice.
-4. **Does a CMS target generate a front end?** 0.9.0 targets Payload plus a
+2. **Where redirects live.** Payload writes `next.config.mjs` and the host rule
+   files, Pruvious writes Nitro middleware and the host rules, and the static
+   destinations write only the host rules because their builds cannot redirect.
+   Confirm the split in practice on a real deployment.
+3. **Does a CMS target generate a front end?** 0.9.0 targets Payload plus a
    documented Next structure; the front end stays a rendering concern the user
    owns.
+4. **The Next handoff's content format.** JSON keeps the generated project free
+   of a Markdown pipeline and makes the shared renderer the single source of
+   HTML. Revisit if real users want MDX for hand edits.
 
 ## What stays true
 

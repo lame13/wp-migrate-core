@@ -7,6 +7,7 @@ import { assertTargetEnabled, generateForTarget, targetAvailability } from "./ad
 import type { DestinationGenerateOptions } from "./adapters.js";
 import { defaultMigrationConfigFileName, loadMigrationConfig } from "./config.js";
 import type { LoadedMigrationConfig } from "./config.js";
+import { artifactSchemaVersions, migrationConfigJsonSchema } from "./contracts.js";
 import { linkRewrites, parseWxr, sanitizeLinkHref, sanitizeSourceUrl } from "./core.js";
 import { coverageEntryRecords, mergeLiveUrlSources, parseLiveUrlSource } from "./live-urls.js";
 import { applyMediaDelivery, mediaDeliveryRecord, planMediaDelivery } from "./media.js";
@@ -69,7 +70,7 @@ function usage(): string {
 
 Usage:
   wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro]
-  wp-migrate-core convert <export.xml> --out <new-site> [--target astro|payload|pruvious]
+  wp-migrate-core convert <export.xml> --out <new-site> [--target astro|next|payload|pruvious]
   wp-migrate-core convert <export.xml> --out <new-site> --uploads <uploads-dir>
   wp-migrate-core convert <export.xml> --out <new-site> --media-base <https://cdn.example.com/uploads>
   wp-migrate-core report <export.xml> [--out migration-report.html]
@@ -79,6 +80,7 @@ Usage:
   wp-migrate-core verify <export.xml> --html-dir <built-site> --ssrwire-report <audit.json>
   wp-migrate-core verify <export.xml> --html-dir <built-site> --ssrwire-report <audit.json> --ssrwire-baseline <audit.json>
   wp-migrate-core demo [--out wp-migrate-core-demo]
+  wp-migrate-core schema [--out wp-migrate-core.config.schema.json]
 
 Options:
   --help, -h            show help, including after a command
@@ -119,13 +121,20 @@ Options:
 
 Targets:
   astro    implemented, static site
+  next     implemented, static-site export for Next.js
   payload  implemented, CMS bundle plus a generated importer
   pruvious implemented, a Pruvious bundle for Nuxt plus a generated importer
-  next     planned, not implemented (the Payload bundle integrates with Next)
   nuxt     planned, not implemented (the Pruvious bundle integrates with Nuxt)
-  svelte   planned, not implemented (non-priority)
+  svelte   planned, not implemented (planned after Nuxt)
 
-This is a deliberately incomplete demonstration. It does not modify WordPress.
+--help and --version work on their own. Every other command reads local files
+only: this tool never modifies WordPress, never fetches a URL, and never talks
+to a database. Anything it cannot map cleanly stays a finding with a severity
+and a required action rather than an invented page.
+
+schema prints the JSON Schema for ${defaultMigrationConfigFileName}, generated
+from the settings this release accepts. Editors can use it for completion and
+CI can use it to check a config before a run.
 
 --live-urls reads a local file. Save the sitemap yourself; this tool makes no
 network requests.
@@ -145,7 +154,11 @@ badly, and any delivery or metadata regression against a baseline audit.`;
 
 function parseArguments(argv: readonly string[]): ParsedOptions {
   const command = argv[0] ?? "help";
-  if (!["inspect", "convert", "report", "verify", "demo", "help", "--help", "-h", "--version", "-v"].includes(command)) {
+  if (
+    !["inspect", "convert", "report", "verify", "demo", "schema", "help", "--help", "-h", "--version", "-v"].includes(
+      command
+    )
+  ) {
     throw new Error(`Unknown command: ${command}.\n\n${usage()}`);
   }
 
@@ -874,7 +887,7 @@ function verificationRouteRecords(verification: SiteVerification): readonly Veri
  */
 function createVerificationDocument(verification: SiteVerification): object {
   return {
-    schemaVersion: "0.9",
+    schemaVersion: artifactSchemaVersions.verification,
     generator: { name: "wp-migrate-core", version: packageVersion },
     observed: { kind: verification.observed, source: verification.source },
     routes: verificationRouteRecords(verification),
@@ -1213,6 +1226,22 @@ async function run(): Promise<void> {
 
   if (parsed.version) {
     console.log(packageVersion);
+    return;
+  }
+
+  if (parsed.command === "schema") {
+    // The schema is generated from the parser's own key lists, so it describes
+    // exactly the settings this release accepts. Printing it writes nothing;
+    // --out writes the file and refuses to replace one that exists.
+    const schema = `${JSON.stringify(migrationConfigJsonSchema, null, 2)}\n`;
+    if (parsed.output === undefined) {
+      process.stdout.write(schema);
+      return;
+    }
+
+    const schemaPath = resolve(parsed.output);
+    await writeNewFile(schemaPath, schema);
+    console.log(`Schema: ${schemaPath}`);
     return;
   }
 

@@ -54,15 +54,6 @@ function humanize(value: string): string {
   return words ? words[0]!.toUpperCase() + words.slice(1) : "Site-wide";
 }
 
-function frameworkNeutralCopy(value: string): string {
-  return value
-    .replace(/an Astro content collection/gi, "a target content source")
-    .replace(/an Astro data source/gi, "a target data source")
-    .replace(/an Astro component/gi, "a target component")
-    .replace(/by Astro\b/gi, "in the generated site")
-    .replace(/\bAstro runtime\b/gi, "generated-site runtime");
-}
-
 function safeSourceUrl(value: string): string | undefined {
   const sanitized = sanitizeSourceUrl(value);
   return sanitized?.startsWith("/") ? undefined : sanitized;
@@ -146,9 +137,12 @@ function renderIssue(
   const route = safeRoute(issue.route ?? record?.route);
   const source = record ? sourceKindLabels[record.editor] : "Site-wide";
   const affectedItem = record?.title || route || "Site-wide setting";
-  const title = frameworkNeutralCopy(issue.title);
-  const message = frameworkNeutralCopy(issue.message);
-  const requiredAction = frameworkNeutralCopy(issue.requiredAction);
+  // The parser speaks about "the generated site" rather than naming a
+  // renderer, so the report can print the finding as it stands. The target
+  // each handoff was written for is named in the manifest instead.
+  const title = issue.title;
+  const message = issue.message;
+  const requiredAction = issue.requiredAction;
   const searchText = [title, message, requiredAction, issue.code, affectedItem, route, source]
     .filter((value): value is string => Boolean(value))
     .join(" ")

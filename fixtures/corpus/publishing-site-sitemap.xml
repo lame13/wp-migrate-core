@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fictional sitemap for the corpus fixture. It lists the routes the live
+     site answers on, including two the export cannot account for: a page that
+     was deleted after export, and a media file nobody references any more. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://longread.example/</loc></url>
+  <url><loc>https://longread.example/about/</loc></url>
+  <url><loc>https://longread.example/2026/02/10/the-harbour-at-low-tide/</loc></url>
+  <url><loc>https://longread.example/2026/03/05/what-the-ferry-costs-now/</loc></url>
+  <url><loc>https://longread.example/2026/03/18/letters-mostly-about-gulls/</loc></url>
+  <url><loc>https://longread.example/review/low-tide-at-the-old-pier/</loc></url>
+  <url><loc>https://longread.example/review/the-ferry-timetable-reviewed/</loc></url>
+  <url><loc>https://longread.example/category/reporting/</loc></url>
+  <url><loc>https://longread.example/category/letters/</loc></url>
+  <url><loc>https://longread.example/author/ada/</loc></url>
+  <url><loc>https://longread.example/author/bo/</loc></url>
+  <url><loc>https://longread.example/feed/</loc></url>
+  <url><loc>https://longread.example/wp-content/uploads/2026/01/newsroom.jpg</loc></url>
+  <url><loc>https://longread.example/legal/</loc></url>
+</urlset>

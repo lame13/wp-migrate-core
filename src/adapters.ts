@@ -1,4 +1,5 @@
 import { generateAstroProject } from "./generate.js";
+import { generateNextProject } from "./next.js";
 import { generatePayloadBundle } from "./payload.js";
 import { generatePruviousBundle } from "./pruvious.js";
 import { SUPPORTED_TARGETS, isOutputTarget, targetDefinitions } from "./targets.js";
@@ -23,6 +24,18 @@ export interface TargetAdapter extends TargetDefinition {
 }
 
 /**
+ * The enabled targets, as a sentence a refusal can carry. It is derived from
+ * the registry so a target that is implemented in a later release joins the
+ * hint without anyone remembering to edit the message.
+ */
+function enabledTargetsHint(): string {
+  const names = SUPPORTED_TARGETS.filter((target) => targetDefinitions[target].enabled);
+  const flags = names.map((target) => `--target ${target}`);
+  if (flags.length === 1) return flags[0] as string;
+  return `${flags.slice(0, -1).join(", ")} or ${flags[flags.length - 1]}`;
+}
+
+/**
  * A target this release cannot write yet. It is registered rather than left
  * out so the CLI, the manifest and the report can say it is planned, and so
  * `assertTargetEnabled` refuses it with a reason instead of an unknown name.
@@ -32,16 +45,16 @@ function plannedOnly(
 ): (project: MigrationProject, outputDirectory: string, options?: DestinationGenerateOptions) => Promise<void> {
   return async () => {
     throw new Error(
-      `${targetDefinitions[target].label} is planned but not available in this release. Use --target astro, --target payload or --target pruvious.`
+      `${targetDefinitions[target].label} is planned but not available in this release. Use ${enabledTargetsHint()}.`
     );
   };
 }
 
 export const targetAdapters: Readonly<Record<OutputTarget, TargetAdapter>> = {
   astro: { ...targetDefinitions.astro, generate: generateAstroProject },
+  next: { ...targetDefinitions.next, generate: generateNextProject },
   payload: { ...targetDefinitions.payload, generate: generatePayloadBundle },
   pruvious: { ...targetDefinitions.pruvious, generate: generatePruviousBundle },
-  next: { ...targetDefinitions.next, generate: plannedOnly("next") },
   nuxt: { ...targetDefinitions.nuxt, generate: plannedOnly("nuxt") },
   svelte: { ...targetDefinitions.svelte, generate: plannedOnly("svelte") }
 };
@@ -62,9 +75,7 @@ export const targetAvailability = Object.fromEntries(
 export function assertTargetEnabled(target: OutputTarget): void {
   const availability = targetAdapters[target];
   if (!availability.enabled) {
-    throw new Error(
-      `${availability.label} is planned but not available in this release. Use --target astro, --target payload or --target pruvious.`
-    );
+    throw new Error(`${availability.label} is planned but not available in this release. Use ${enabledTargetsHint()}.`);
   }
 }
 

@@ -1039,7 +1039,7 @@ function convertElementorElement(
       "warning",
       "ELEMENTOR_WIDGET_UNKNOWN",
       `Unknown Elementor element type ${elementType}.`,
-      "Replace it with an Astro component or preserve its rendered HTML.",
+      "Replace it with a component in the destination, or preserve its rendered HTML.",
       { nodeId, evidence: elementType }
     );
     return [node];
@@ -1063,7 +1063,7 @@ function convertElementorElement(
       "blocker",
       "ELEMENTOR_QUERY_UNSUPPORTED",
       `Elementor widget ${widgetType} depends on a WordPress query.`,
-      "Map the query to an Astro content collection and verify its filtering and ordering.",
+      "Map the query to the destination's own data source and verify its filtering and ordering.",
       { nodeId, evidence: widgetType }
     );
     return [node];
@@ -1111,7 +1111,7 @@ function convertElementorElement(
     "warning",
     "ELEMENTOR_WIDGET_UNKNOWN",
     `Elementor widget ${widgetType} has no supported adapter in this release.`,
-    "Replace it with an Astro component or preserve its rendered HTML.",
+    "Replace it with a component in the destination, or preserve its rendered HTML.",
     { nodeId, evidence: widgetType }
   );
   return [node];
@@ -1131,7 +1131,7 @@ function scanShortcodes(content: string, sourceId: string, collector: IssueColle
     collector.add(
       blocked ? "blocker" : "warning",
       "SHORTCODE_UNSUPPORTED",
-      `Shortcode [${shortcode}] cannot be executed by Astro.`,
+      `Shortcode [${shortcode}] cannot be executed by the generated site.`,
       blocked
         ? "Choose a replacement integration and rebuild this behavior."
         : "Replace the shortcode or accept a static HTML fallback.",
@@ -1174,7 +1174,7 @@ function reportGutenbergCompatibility(node: MutableNode, collector: IssueCollect
       "blocker",
       "GUTENBERG_DYNAMIC_BLOCK",
       `Dynamic Gutenberg block ${node.sourceType} depends on WordPress runtime behavior.`,
-      "Map the block to an Astro data source and verify the generated behavior.",
+      "Map the block to the destination's own data source and verify the generated behavior.",
       { nodeId: node.id, evidence: node.sourceType }
     );
     return;
@@ -1184,8 +1184,8 @@ function reportGutenbergCompatibility(node: MutableNode, collector: IssueCollect
     collector.add(
       "warning",
       "SHORTCODE_UNSUPPORTED",
-      "The Gutenberg Shortcode block cannot execute inside Astro.",
-      "Replace the shortcode with static content or an explicit Astro integration.",
+      "The Gutenberg Shortcode block cannot execute in the generated site.",
+      "Replace the shortcode with static content or an explicit integration in the destination.",
       { nodeId: node.id, evidence: node.sourceType }
     );
     return;

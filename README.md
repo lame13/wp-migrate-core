@@ -2,13 +2,15 @@
 
 Plan a WordPress migration, generate an Astro site or a Payload or Pruvious CMS bundle, and check the result before publishing.
 
-`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate a **static Astro project** with your content, images, navigation, the archive pages WordPress generated, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache — or a **CMS app** with an admin to edit in, a media library, collections and a generated importer: **Payload** for Next.js, or **Pruvious** for Nuxt.
+`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate a **static site** — **Astro**, or a static-export **Next.js** app — with your content, images, navigation, the archive pages WordPress generated, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache — or a **CMS app** with an admin to edit in, a media library, collections and a generated importer: **Payload** for Next.js, or **Pruvious** for Nuxt.
 
 To include images, supply a local copy of `wp-content/uploads` or the URL of a host that already serves them. A migration config lets you save route choices, excluded pages and findings you've reviewed, so you can repeat the migration without patching the output each time.
 
 After a build, `verify` checks for missing or substantially changed content, and then for launch readiness: media that never reached the build, links that lead nowhere, canonical URLs, `robots.txt` and the sitemap. Add a saved SSRWire audit to check responses, metadata and indexing too.
 
-Astro, Payload and Pruvious are the supported destinations. You'll still need to rebuild your theme, forms and plugin behavior, bring over your media, and review the generated output. Where WordPress served a page but this tool cannot, the repair queue says so rather than dropping it.
+Astro, Next.js, Payload and Pruvious are the supported destinations; Nuxt and Svelte are declared and refused with a reason. You'll still need to rebuild your theme, forms and plugin behavior, bring over your media, and review the generated output. Where WordPress served a page but this tool cannot, the repair queue says so rather than dropping it.
+
+The reference documentation is in [`docs/`](docs/): the [API reference](docs/api.md), the [artifact catalog](docs/artifacts.md) with every file's own schema version, the [compatibility contract](docs/compatibility.md) that says what is stable, the [destination guide](docs/destinations.md) and the [fixture corpus](docs/corpus.md).
 
 ## Try it with the demo
 
@@ -79,7 +81,38 @@ Conversion writes one content collection per post type in the export, such as `s
 | `migration/manifest.json` | Connect WordPress IDs to generated files and routes. |
 | `public/sitemap.xml` | List the generated routes, using the configured site URL or the URL from the export. |
 
-The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The archive and menu inventories use `"0.8"`. The Astro manifest uses `"0.9"`, the Payload and Pruvious manifests use `"0.11"` (their destination block names the config file, the admin host and the collections), and the verification artefact uses `"0.9"` (the import evidence). These describe each file's data format separately from the npm package version.
+The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The archive and menu inventories use `"0.8"`. The Astro manifest uses `"0.9"`, the Next.js manifest and its `content/routes.json` use `"0.12"`, the Payload and Pruvious manifests use `"0.11"` (their destination block names the config file, the admin host and the collections), and the verification artefact uses `"0.9"` (the import evidence). These describe each file's data format separately from the npm package version, and [docs/artifacts.md](docs/artifacts.md) is the full catalog.
+
+## The Next.js destination
+
+`--target next` writes a static-export Next.js app from the same plan as the Astro handoff. Content is JSON — the exported HTML, already cleaned, escaped and rewritten — so the project needs no Markdown or MDX pipeline to boot:
+
+```bash
+npx wp-migrate-core convert export.xml --out next-site --target next --uploads ../wordpress/wp-content/uploads --publish-ready
+cd next-site
+npm install
+npm run dev        # http://localhost:3000
+npm run build      # a static export, written to out/
+```
+
+| File | Use it to |
+| --- | --- |
+| `app/` | Read the App Router shell: the layout, the home page, and one catch-all that renders every planned route. |
+| `content/` | Review the content: one JSON file per page, plus `routes.json`, the index the app reads. |
+| `lib/content.ts` | See the loader. It reads `content/` at build time; there is no database and no network. |
+| `components/Nav.tsx` | Read the menu WordPress served, with the rewrites the plan applied. |
+| `out/` | Deploy. `npm run build` writes one HTML file per route here. |
+| `migration/` | The same repair queue, inventories, redirect rules and SSRWire checks the other destinations write. |
+
+`next build` with `output: "export"` writes `out/`, and `wp-migrate-core verify --html-dir out` reads exactly that, so the Next handoff is checked by the same launch gate as the Astro one:
+
+```bash
+npx wp-migrate-core verify export.xml --html-dir out --fail-on blocker
+```
+
+One thing the destination cannot do on its own: a static export has no server, so `redirects()` is not allowed and the app serves no redirect. The plan's redirect map is published in `migration/redirect-rules/` for Netlify, Vercel, nginx or Apache instead, and the handoff's README says so.
+
+`npm run test:next` in this repository is the round trip behind those claims: it installs Next 16 and React 19 into a temporary workspace, type-checks the generated app, runs a real `next build`, and points the launch gate at `out/`.
 
 ## The Payload CMS destination
 
@@ -141,7 +174,7 @@ The importer runs inside the Nuxt app, because Pruvious's collection API is a se
 npx wp-migrate-core verify export.xml --import-report migration-import.json --fail-on blocker
 ```
 
-The 0.11.1 review manually checked the generated bundle with Pruvious 3.9.10, Nuxt 3.9.3 and SQLite: imports, repeat runs, source updates, dashboard edit protection, navigation and local media paths. Automated tests execute the generated importer with a collection API stub. A real-site migration and a repeatable Pruvious integration check remain validation gates. The front end is yours to build; delivered files are served from `public/`, and nested navigation entries are stored as JSON in a text field.
+`npm run test:pruvious` in this repository is the repeatable check behind that claim: it installs Nuxt and Pruvious, boots the generated app, imports through the app's own protected route, imports a second time and requires every record to come back `unchanged`, then reads the report with the import gate. A stub-based suite covers the mapping and hash logic without an install. A migration of a real WordPress site remains the one validation gate for both CMS destinations. The front end is yours to build; delivered files are served from `public/`, and nested navigation entries are stored as JSON in a text field.
 
 ### Content types
 
@@ -414,6 +447,7 @@ The generated site starts with `noindex, nofollow` in its layout and `Disallow: 
 ```text
 wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro] [--live-urls sitemap.xml]
 wp-migrate-core convert <export.xml> --out <new-site> [--target astro] [--live-urls sitemap.xml]
+wp-migrate-core convert <export.xml> --out <next-site> --target next --publish-ready
 wp-migrate-core convert <export.xml> --out <payload-bundle> --target payload --uploads ../uploads
 wp-migrate-core convert <export.xml> --out <pruvious-bundle> --target pruvious --uploads ../uploads
 wp-migrate-core convert <export.xml> --out <new-site> --uploads ../wordpress/wp-content/uploads
@@ -426,11 +460,12 @@ wp-migrate-core verify <export.xml> --html-dir dist --ssrwire-report ssrwire-pre
 wp-migrate-core verify <export.xml> --html-dir dist --ssrwire-report ssrwire-preview.json --ssrwire-baseline ssrwire-source.json
 wp-migrate-core verify <export.xml> --import-report migration-import.json
 wp-migrate-core demo [--out wp-migrate-core-demo] [--live-urls sitemap.xml]
+wp-migrate-core schema [--out wp-migrate-core.config.schema.json]
 wp-migrate-core --version
 wp-migrate-core inspect --help
 ```
 
-`report` writes just the HTML report. `verify` compares a built site, a saved RouteLint report, or a CMS import report with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `--config` applies a migration config to any command. `--uploads`, `--media-base` and `--copy-unused-media` apply to `convert`, `demo` and `verify`; verification only reads the files. `--publish-ready` belongs to `convert` and `demo`. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `--target` takes `astro`, `payload` or `pruvious`; `next`, `nuxt` and `svelte` are declared, planned targets and currently return an error.
+`report` writes just the HTML report. `verify` compares a built site, a saved RouteLint report, or a CMS import report with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `schema` prints the JSON Schema for the migration config, which editors can use for completion and CI can use to check a config before a run. `--config` applies a migration config to any command. `--uploads`, `--media-base` and `--copy-unused-media` apply to `convert`, `demo` and `verify`; verification only reads the files. `--publish-ready` belongs to `convert` and `demo`. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `--target` takes `astro`, `next`, `payload` or `pruvious`; `nuxt` and `svelte` are declared, planned targets and currently return an error that names the reasons.
 
 | Option | What it does |
 | --- | --- |
@@ -498,6 +533,7 @@ import {
   deliveryCheckFiles,
   deliveryLaunchFindings,
   generateAstroProject,
+  generateNextProject,
   generatePayloadBundle,
   htmlToPayloadRichText,
   importLaunchFindings,
@@ -536,6 +572,8 @@ await generateAstroProject(project, 'new-site');
 
 // Or write the Payload CMS app: collections, an admin host, a drop, an importer.
 await generatePayloadBundle(project, 'payload-bundle');
+// Or a static-export Next.js app: JSON content, one catch-all route, out/ to deploy.
+await generateNextProject(project, 'next-site', { publishReady: true });
 const richText = htmlToPayloadRichText('<h1>Title</h1><p>Body text.</p>');
 console.log(richText.body, richText.review);
 // Pass an ImageResolver to turn a delivered body image into a media node:
@@ -576,13 +614,17 @@ From a checkout:
 npm ci
 npm test
 npm run test:package
-npm run test:payload
+npm run test:next        # installs Next and React, builds the generated app
+npm run test:payload     # installs Payload, imports into SQLite
+npm run test:pruvious    # installs Nuxt and Pruvious, boots the app, imports
 npm run demo
 ```
 
-The package check builds a tarball, installs it in a temporary project outside the checkout, and exercises the executable, demo, types, and ESM exports. It cleans up its temporary files afterward. `npm run test:payload` is the opt-in Payload round trip: it installs Payload and Next into a temporary workspace, imports a generated bundle into SQLite, re-imports it, checks the stored content and media nodes, runs the import gate, and builds the generated admin app. Skip it when you only changed something the text-level tests already cover.
+The package check builds a tarball, installs it in a temporary project outside the checkout, and exercises the executable, demo, types, and ESM exports. It cleans up its temporary files afterward. The three `test:<target>` scripts are the round trips: they install the real toolchain into a temporary workspace, build or boot the generated project, and point the launch gate at the result. `npm run test:round-trips` runs all three. Skip them when you only changed something the text-level tests already cover — `npm test` includes the corpus matrix, which runs every fixture through parse, plan, all four destinations and a verification against a build that does not exist yet.
 
-The bundled fixture contains fictional data only. See the [changelog](CHANGELOG.md) for release history and [GitHub issues](https://github.com/lame13/wp-migrate-core/issues) to report a bug.
+The round trips run in CI on a weekly schedule, on demand, and as the gate a release is cut against, rather than on every pull request: between them they install a few hundred megabytes and take minutes, and the default suite covers the same code at the text level. See [.github/workflows/round-trips.yml](.github/workflows/round-trips.yml) and the note in [docs/roadmap.md](docs/roadmap.md).
+
+Every fixture in this repository is fictional, and [docs/corpus.md](docs/corpus.md) says what each one is for. See the [changelog](CHANGELOG.md) for release history and [GitHub issues](https://github.com/lame13/wp-migrate-core/issues) to report a bug.
 
 ## License
 

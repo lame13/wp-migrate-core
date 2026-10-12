@@ -2,11 +2,23 @@ import { createRequire } from "node:module";
 
 // Resolve from dist/src in both the checkout and the installed npm package.
 const metadata: {
+  readonly name: string;
   readonly version: string;
+  readonly engines?: Readonly<Record<string, string>>;
   readonly dependencies?: Readonly<Record<string, string>>;
 } = createRequire(import.meta.url)("../../package.json");
 
+/** The package name, so a caller can report which tool produced an artifact. */
+export const packageName = metadata.name;
+
 export const packageVersion = metadata.version;
+
+/**
+ * The Node.js range this release supports, read from the same `engines` field
+ * npm reads. It is part of the 1.0 contract: a Node release outside this range
+ * is unsupported rather than untested.
+ */
+export const supportedNodeRange = metadata.engines?.node ?? ">=22.12.0";
 
 /**
  * The SSRWire range this release is written against, so the check files a
@@ -26,6 +38,16 @@ export const ssrwireDependency = metadata.dependencies?.["ssrwire"] ?? "^0.5.0";
 export const payloadDependency = "3.90.2";
 
 /**
+ * The Next.js and React line every generated front end is written against.
+ * The Payload admin host takes its peer ranges from `@payloadcms/next` and
+ * `@payloadcms/ui`, and the Next destination takes the same line, so a handoff
+ * cannot install two incompatible Next majors side by side.
+ */
+export const nextDependency = "^16.3.3";
+export const reactDependency = "^19.2.1";
+export const reactDomDependency = "^19.2.1";
+
+/**
  * The Next.js and React ranges the generated admin host is written against,
  * from the peer ranges `@payloadcms/next` and `@payloadcms/ui` declare.
  */
@@ -34,9 +56,9 @@ export const payloadAdminDependencies: Readonly<Record<string, string>> = {
   "@payloadcms/richtext-lexical": payloadDependency,
   "@payloadcms/db-sqlite": payloadDependency,
   graphql: "^16.8.1",
-  next: "^16.3.3",
-  react: "^19.2.1",
-  "react-dom": "^19.2.1"
+  next: nextDependency,
+  react: reactDependency,
+  "react-dom": reactDomDependency
 };
 
 /**

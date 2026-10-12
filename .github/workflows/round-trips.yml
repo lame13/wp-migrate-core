@@ -1,0 +1,96 @@
+name: Round trips
+
+# The three round trips that need a real toolchain: the Next static export, the
+# Payload + SQLite import, and the Pruvious + Nuxt boot. Between them they
+# install a few hundred megabytes and take minutes, so they do not run on every
+# pull request — `npm test` covers those changes at the text level, and it runs
+# in the `Verify package` workflow.
+#
+# They run here instead: on a schedule, on demand, and as the gate a release is
+# cut against. That decision, and the argument for it, is written down in
+# docs/roadmap.md.
+
+on:
+  schedule:
+    # Mondays, 03:17 UTC. Off the hour on purpose: the top of the hour is the
+    # busiest slot on a shared runner pool.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which destination to exercise
+        type: choice
+        default: all
+        options:
+          - all
+          - next
+          - payload
+          - pruvious
+
+permissions:
+  contents: read
+
+concurrency:
+  group: round-trips-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Choose the destinations
+    runs-on: ubuntu-24.04
+    outputs:
+      targets: ${{ steps.choose.outputs.targets }}
+    steps:
+      - name: Choose the destinations
+        id: choose
+        run: |
+          target="${{ inputs.target }}"
+          if [ -z "$target" ] || [ "$target" = "all" ]; then
+            echo 'targets=["next","payload","pruvious"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "targets=[\"$target\"]" >> "$GITHUB_OUTPUT"
+          fi
+
+  round-trip:
+    name: ${{ matrix.target }} round trip
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.targets) }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the package and run the text-level suite
+        run: npm test
+
+      - name: Run the round trip
+        env:
+          # Keep the generated project and the working database, so a failure
+          # can be inspected instead of guessed at.
+          NEXT_ROUNDTRIP_DIR: ${{ runner.temp }}/next-roundtrip
+          PAYLOAD_ROUNDTRIP_DIR: ${{ runner.temp }}/payload-roundtrip
+          ROUNDTRIP_DIR: ${{ runner.temp }}/pruvious-roundtrip
+        run: npm run test:${{ matrix.target }}
+
+      - name: Upload the generated project
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.target }}-round-trip
+          path: ${{ runner.temp }}/**-roundtrip
+          if-no-files-found: ignore
+          retention-days: 7

@@ -11,6 +11,14 @@ export interface TargetDefinition {
   readonly enabled: boolean;
   readonly label: string;
   readonly description: string;
+  /**
+   * Where the destination's own dev server answers. The paired SSRWire check
+   * files list the generated routes at this origin, so a handoff ships a
+   * preview check that runs as written instead of one a reader has to edit.
+   */
+  readonly previewOrigin: string;
+  /** The command that serves `previewOrigin`, named in the generated check file. */
+  readonly previewCommand: string;
 }
 
 /** Every target, in the order reports and the CLI list them. */
@@ -22,6 +30,8 @@ export const targetDefinitions: Readonly<Record<OutputTarget, TargetDefinition>>
     kind: "static-site",
     enabled: true,
     label: "Astro",
+    previewOrigin: "http://localhost:4321",
+    previewCommand: "npm run preview",
     description:
       "A static Astro project with content, navigation and the archive pages WordPress served. Implemented."
   },
@@ -30,6 +40,8 @@ export const targetDefinitions: Readonly<Record<OutputTarget, TargetDefinition>>
     kind: "cms",
     enabled: true,
     label: "Payload",
+    previewOrigin: "http://localhost:3000",
+    previewCommand: "npm run dev",
     description:
       "A Payload CMS bundle: collections, a content and media drop, and a generated importer you run inside the destination project. Implemented."
   },
@@ -38,22 +50,28 @@ export const targetDefinitions: Readonly<Record<OutputTarget, TargetDefinition>>
     kind: "cms",
     enabled: true,
     label: "Pruvious",
+    previewOrigin: "http://localhost:3000",
+    previewCommand: "npm run dev",
     description:
       "A Pruvious CMS bundle for Nuxt: collections, a content and media drop, and a generated importer you run inside the Nuxt app. Implemented."
   },
   next: {
     target: "next",
     kind: "static-site",
-    enabled: false,
+    enabled: true,
     label: "Next.js",
+    previewOrigin: "http://localhost:3000",
+    previewCommand: "npm run dev",
     description:
-      "No standalone Next.js output is included. The Payload bundle integrates with a Next app; its front end is yours to build."
+      "A static-export Next.js app: content in JSON, routes prerendered at build time, and an out/ directory the launch gate reads. Implemented."
   },
   nuxt: {
     target: "nuxt",
     kind: "static-site",
     enabled: false,
     label: "Nuxt",
+    previewOrigin: "http://localhost:3000",
+    previewCommand: "npm run dev",
     description: "No standalone Nuxt output is included. The Pruvious bundle integrates with a Nuxt app; its front end is yours to build."
   },
   svelte: {
@@ -61,6 +79,8 @@ export const targetDefinitions: Readonly<Record<OutputTarget, TargetDefinition>>
     kind: "static-site",
     enabled: false,
     label: "Svelte",
+    previewOrigin: "http://localhost:5173",
+    previewCommand: "npm run dev",
     description: "A real but non-priority static target, planned after the CMS destinations."
   }
 };

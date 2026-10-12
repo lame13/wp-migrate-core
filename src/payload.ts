@@ -15,6 +15,7 @@ import {
   sanitizeSourceUrl,
   stripMediaVariants
 } from "./core.js";
+import { artifactSchemaVersions } from "./contracts.js";
 import { htmlToPayloadRichText } from "./payload-richtext.js";
 import type { ContentReviewItem, ImageResolver } from "./payload-richtext.js";
 export { htmlToPayloadRichText } from "./payload-richtext.js";
@@ -786,7 +787,7 @@ function renderContentIndex(
     if (count > 0) files.push({ collection: collection.slug, file: `content/${collection.slug}.json`, count });
   }
 
-  return renderJson({ schemaVersion: "0.9", files });
+  return renderJson({ schemaVersion: artifactSchemaVersions.payloadDrop, files });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -856,7 +857,7 @@ function nestedStringAttribute(node: MigrationNode, key: string, nested: string)
 
 function renderNextRedirects(project: MigrationProject): string {
   return renderJson({
-    schemaVersion: "0.9",
+    schemaVersion: artifactSchemaVersions.payloadRedirects,
     generator: { name: GENERATOR_NAME, version: packageVersion, target: "payload" },
     redirects: nextRedirects(project)
   });
@@ -1093,7 +1094,7 @@ function renderPayloadManifest(
 ): string {
   const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   return renderJson({
-    schemaVersion: "0.11",
+    schemaVersion: artifactSchemaVersions.manifestPayload,
     generator: { name: GENERATOR_NAME, version: packageVersion, target: "payload" },
     sourceSite: { title: project.site.title, ...(siteUrl === undefined ? {} : { url: siteUrl }) },
     destination: {
@@ -1497,7 +1498,7 @@ async function main() {
     }
 
     const report = {
-      schemaVersion: "0.9",
+      schemaVersion: "${artifactSchemaVersions.importReport}",
       generator: { name: "${GENERATOR_NAME}", version: "${packageVersion}", target: "payload" },
       generatedAt: new Date().toISOString(),
       destination: { target: "payload", kind: "cms", structure: "payload-next" },

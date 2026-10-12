@@ -169,10 +169,19 @@ export async function verifySite(
     kind = "import-report";
   }
 
-  // Do not silently choose between conflicting local build outputs.
+  // Do not silently choose between conflicting local build outputs *for a
+  // planned route*. A framework writes files the plan never mentions — Next's
+  // static export writes both `404.html` and `404/index.html`, which are the
+  // same route by the mapping below and neither of them is content — and those
+  // must not stop the gate. A planned route built twice still refuses to pick.
+  const plannedHrefs = new Set(
+    planned
+      .map((entry) => normalizeUrl(entry.route, base))
+      .filter((href): href is string => href !== undefined)
+  );
   const byHref = new Map<string, ObservedPage>();
   for (const page of observed) {
-    if (byHref.has(page.href) && kind === "html-directory") {
+    if (byHref.has(page.href) && kind === "html-directory" && plannedHrefs.has(page.href)) {
       throw new Error(`Multiple built HTML files map to the same route: ${new URL(page.href).pathname}`);
     }
     if (!byHref.has(page.href)) byHref.set(page.href, page);
@@ -202,7 +211,7 @@ export async function verifySite(
 
   const gate =
     kind === "html-directory" && options.htmlDirectory !== undefined
-      ? await readBuildGate(project, resolve(options.htmlDirectory), observed)
+      ? await readBuildGate(project, resolve(options.htmlDirectory), observed, plannedHrefs)
       : undefined;
 
   const launch = sortLaunchFindings([
@@ -534,10 +543,15 @@ interface BuiltPage {
 async function readBuildGate(
   project: MigrationProject,
   directory: string,
-  pages: readonly ObservedPage[]
+  pages: readonly ObservedPage[],
+  plannedHrefs: ReadonlySet<string>
 ): Promise<BuildGate> {
+  // The gate speaks about the pages this migration planned. A framework also
+  // writes documents of its own — Next's static export writes 404.html,
+  // 404/index.html and _not-found/index.html — and calling those pages that
+  // "carry no canonical URL" is noise rather than evidence.
   const buildPages: BuiltPage[] = pages.flatMap((page) =>
-    page.route === undefined || page.html === undefined
+    page.route === undefined || page.html === undefined || !plannedHrefs.has(page.href)
       ? []
       : [{ route: page.route, href: page.href, html: page.html }]
   );

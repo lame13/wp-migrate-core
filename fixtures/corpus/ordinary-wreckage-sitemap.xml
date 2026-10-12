@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fictional sitemap for the wreckage fixture. It carries the two shapes the
+     export alone cannot settle: the legacy query spelling of a post permalink,
+     and a page the live site serves that the export no longer contains. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://wreckage.example/</loc></url>
+  <url><loc>https://wreckage.example/legacy-post/</loc></url>
+  <url><loc>https://wreckage.example/?p=77</loc></url>
+  <url><loc>https://wreckage.example/untitled/</loc></url>
+  <url><loc>https://wreckage.example/empty/</loc></url>
+  <url><loc>https://wreckage.example/2026/03/12/nihongo-no-kiji/</loc></url>
+  <url><loc>https://wreckage.example/contact/</loc></url>
+  <url><loc>https://wreckage.example/wp-content/uploads/2026/02/hero.jpg</loc></url>
+  <url><loc>https://wreckage.example/tag/unicode/</loc></url>
+  <url><loc>https://wreckage.example/author/editor/</loc></url>
+</urlset>

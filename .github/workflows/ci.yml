@@ -1,5 +1,10 @@
 name: Verify package
 
+# The text-level suite: it builds the package and runs every test that reads and
+# writes files, which is the check a pull request needs. The three round trips
+# that install Next, Payload and Pruvious live in the `Round trips` workflow,
+# because they take minutes and a few hundred megabytes.
+
 on:
   push:
     branches:

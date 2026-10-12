@@ -29,12 +29,14 @@ function extractFunction(source: string, name: string): string {
 
 test("the destination boundary names each target's kind and refuses the planned ones", () => {
   assert.equal(targetAdapters.astro.kind, "static-site");
+  assert.equal(targetAdapters.next.kind, "static-site");
   assert.equal(targetAdapters.payload.kind, "cms");
   assert.equal(targetAdapters.pruvious.kind, "cms");
   assert.doesNotThrow(() => assertTargetEnabled("astro"));
+  assert.doesNotThrow(() => assertTargetEnabled("next"));
   assert.doesNotThrow(() => assertTargetEnabled("payload"));
   assert.doesNotThrow(() => assertTargetEnabled("pruvious"));
-  for (const target of ["next", "nuxt", "svelte"] as const) {
+  for (const target of ["nuxt", "svelte"] as const) {
     assert.throws(() => assertTargetEnabled(target), /planned but not available/);
   }
 });

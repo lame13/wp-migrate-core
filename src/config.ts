@@ -9,7 +9,13 @@ export const migrationConfigSchemaVersion = "0.7";
 
 export const defaultMigrationConfigFileName = "wp-migrate-core.config.json";
 
-const CONFIG_KEYS = [
+/**
+ * The settings this release reads, one list per object in the file. The parser
+ * validates against these, and `src/contracts.ts` builds the published JSON
+ * Schema from them, so editor help cannot offer a setting the parser refuses
+ * or miss one it accepts.
+ */
+export const MIGRATION_CONFIG_KEYS = [
   "schemaVersion",
   "site",
   "includeDrafts",
@@ -23,10 +29,10 @@ const CONFIG_KEYS = [
   "media"
 ] as const;
 
-const SITE_KEYS = ["title", "url"] as const;
-const MEDIA_KEYS = ["uploadsDir", "baseUrl", "copyUnused"] as const;
-const POST_TYPE_KEYS = ["include", "exclude"] as const;
-const ARCHIVE_KEYS = [
+export const MIGRATION_CONFIG_SITE_KEYS = ["title", "url"] as const;
+export const MIGRATION_CONFIG_MEDIA_KEYS = ["uploadsDir", "baseUrl", "copyUnused"] as const;
+export const MIGRATION_CONFIG_POST_TYPE_KEYS = ["include", "exclude"] as const;
+export const MIGRATION_CONFIG_ARCHIVE_KEYS = [
   "taxonomies",
   "authors",
   "dates",
@@ -35,8 +41,8 @@ const ARCHIVE_KEYS = [
   "feeds",
   "attachmentPages"
 ] as const;
-const FAILURE_THRESHOLDS = ["none", "warning", "blocker"] as const;
-const ATTACHMENT_PAGE_MODES = ["redirect", "ignore"] as const;
+export const MIGRATION_CONFIG_FAILURE_THRESHOLDS = ["none", "warning", "blocker"] as const;
+export const MIGRATION_CONFIG_ATTACHMENT_PAGE_MODES = ["redirect", "ignore"] as const;
 
 export interface LoadedMigrationConfig {
   /** Absolute path of the config file the caller asked for. */
@@ -85,7 +91,7 @@ export function parseMigrationConfig(
     throw new Error(`${label} must contain a JSON object.`);
   }
 
-  expectKnownKeys(parsed, CONFIG_KEYS, label);
+  expectKnownKeys(parsed, MIGRATION_CONFIG_KEYS, label);
 
   const schemaVersion = parsed.schemaVersion;
   if (schemaVersion !== undefined && schemaVersion !== migrationConfigSchemaVersion) {
@@ -124,7 +130,7 @@ export function parseMigrationConfig(
   if (site !== undefined) {
     const siteLabel = `${label} site`;
     const record = expectRecord(site, siteLabel);
-    expectKnownKeys(record, SITE_KEYS, siteLabel);
+    expectKnownKeys(record, MIGRATION_CONFIG_SITE_KEYS, siteLabel);
     config.site = {
       ...(record.title === undefined ? {} : { title: expectNonEmptyString(record.title, `${siteLabel} title`) }),
       ...(record.url === undefined ? {} : { url: expectHttpUrl(record.url, `${siteLabel} url`) })
@@ -178,7 +184,7 @@ export function parseMigrationConfig(
   if (parsed.postTypes !== undefined) {
     const typesLabel = `${label} postTypes`;
     const record = expectRecord(parsed.postTypes, typesLabel);
-    expectKnownKeys(record, POST_TYPE_KEYS, typesLabel);
+    expectKnownKeys(record, MIGRATION_CONFIG_POST_TYPE_KEYS, typesLabel);
     config.postTypes = {
       ...(record.include === undefined
         ? {}
@@ -192,7 +198,7 @@ export function parseMigrationConfig(
   if (parsed.archives !== undefined) {
     const archivesLabel = `${label} archives`;
     const record = expectRecord(parsed.archives, archivesLabel);
-    expectKnownKeys(record, ARCHIVE_KEYS, archivesLabel);
+    expectKnownKeys(record, MIGRATION_CONFIG_ARCHIVE_KEYS, archivesLabel);
     config.archives = {
       ...(record.taxonomies === undefined
         ? {}
@@ -221,7 +227,7 @@ export function parseMigrationConfig(
         : {
             attachmentPages: expectMode(
               record.attachmentPages,
-              ATTACHMENT_PAGE_MODES,
+              MIGRATION_CONFIG_ATTACHMENT_PAGE_MODES,
               `${archivesLabel} attachmentPages`
             )
           })
@@ -231,7 +237,7 @@ export function parseMigrationConfig(
   if (parsed.media !== undefined) {
     const mediaLabel = `${label} media`;
     const record = expectRecord(parsed.media, mediaLabel);
-    expectKnownKeys(record, MEDIA_KEYS, mediaLabel);
+    expectKnownKeys(record, MIGRATION_CONFIG_MEDIA_KEYS, mediaLabel);
     config.media = {
       ...(record.uploadsDir === undefined
         ? {}
@@ -308,8 +314,8 @@ function expectBoolean(value: unknown, label: string): boolean {
 }
 
 function expectThreshold(value: unknown, label: string): FailureThreshold {
-  if (typeof value !== "string" || !FAILURE_THRESHOLDS.includes(value as FailureThreshold)) {
-    throw new Error(`${label} must be one of ${FAILURE_THRESHOLDS.join(", ")}.`);
+  if (typeof value !== "string" || !MIGRATION_CONFIG_FAILURE_THRESHOLDS.includes(value as FailureThreshold)) {
+    throw new Error(`${label} must be one of ${MIGRATION_CONFIG_FAILURE_THRESHOLDS.join(", ")}.`);
   }
 
   return value as FailureThreshold;

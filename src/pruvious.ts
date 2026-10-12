@@ -8,6 +8,7 @@ import {
   renderRedirectsArtifact
 } from "./artifacts.js";
 import { contentCollectionName, linkRewrites, mediaPath, normalizeRoute, readHtmlAttribute, sanitizeSourceUrl } from "./core.js";
+import { artifactSchemaVersions } from "./contracts.js";
 import { deliverMedia, rewriteDeliveredMedia } from "./media.js";
 import { recordBodyHtml } from "./payload.js";
 import { redirectRuleFiles } from "./redirect-rules.js";
@@ -444,7 +445,10 @@ function pruviousDropFiles(
     index.push({ collection: collection.slug, file: `content/${collection.slug}.json`, count: jobs.length });
   }
 
-  files.push({ path: "import/content/index.json", contents: renderJson({ schemaVersion: "0.11", files: index }) });
+  files.push({
+    path: "import/content/index.json",
+    contents: renderJson({ schemaVersion: artifactSchemaVersions.pruviousDrop, files: index })
+  });
   return files;
 }
 
@@ -597,7 +601,7 @@ function renderPruviousManifest(
 ): string {
   const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   return renderJson({
-    schemaVersion: "0.11",
+    schemaVersion: artifactSchemaVersions.manifestPruvious,
     generator: { name: GENERATOR_NAME, version: packageVersion, target: "pruvious" },
     sourceSite: { title: project.site.title, ...(siteUrl === undefined ? {} : { url: siteUrl }) },
     destination: {
@@ -967,7 +971,7 @@ export default defineEventHandler(async (event) => {
   }
 
   const report = {
-    schemaVersion: '0.9',
+    schemaVersion: '${artifactSchemaVersions.importReport}',
     generator: { name: '${GENERATOR_NAME}', version: '${packageVersion}', target: 'pruvious' },
     generatedAt: new Date().toISOString(),
     destination: { target: 'pruvious', kind: 'cms', structure: 'pruvious-nuxt' },
