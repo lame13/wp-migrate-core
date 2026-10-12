@@ -1,14 +1,14 @@
 # wp-migrate-core
 
-Plan a WordPress migration, generate an Astro site or a Payload CMS bundle, and check the result before publishing.
+Plan a WordPress migration, generate an Astro site or a Payload or Pruvious CMS bundle, and check the result before publishing.
 
-`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate a **static Astro project** with your content, images, navigation, the archive pages WordPress generated, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache — or a **Payload CMS app** with an admin to edit in, a media library, collections and a generated importer.
+`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate a **static Astro project** with your content, images, navigation, the archive pages WordPress generated, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache — or a **CMS app** with an admin to edit in, a media library, collections and a generated importer: **Payload** for Next.js, or **Pruvious** for Nuxt.
 
 To include images, supply a local copy of `wp-content/uploads` or the URL of a host that already serves them. A migration config lets you save route choices, excluded pages and findings you've reviewed, so you can repeat the migration without patching the output each time.
 
 After a build, `verify` checks for missing or substantially changed content, and then for launch readiness: media that never reached the build, links that lead nowhere, canonical URLs, `robots.txt` and the sitemap. Add a saved SSRWire audit to check responses, metadata and indexing too.
 
-Astro and Payload are the supported destinations. You'll still need to rebuild your theme, forms and plugin behavior, bring over your media, and review the generated output. Where WordPress served a page but this tool cannot, the repair queue says so rather than dropping it.
+Astro, Payload and Pruvious are the supported destinations. You'll still need to rebuild your theme, forms and plugin behavior, bring over your media, and review the generated output. Where WordPress served a page but this tool cannot, the repair queue says so rather than dropping it.
 
 ## Try it with the demo
 
@@ -79,7 +79,7 @@ Conversion writes one content collection per post type in the export, such as `s
 | `migration/manifest.json` | Connect WordPress IDs to generated files and routes. |
 | `public/sitemap.xml` | List the generated routes, using the configured site URL or the URL from the export. |
 
-The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The archive and menu inventories use `"0.8"`. The Astro manifest uses `"0.9"`, the Payload manifest uses `"0.10"` (its destination block names the config file and the admin host), and the verification artefact uses `"0.9"` (the import evidence). These describe each file's data format separately from the npm package version.
+The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The archive and menu inventories use `"0.8"`. The Astro manifest uses `"0.9"`, the Payload and Pruvious manifests use `"0.11"` (their destination block names the config file, the admin host and the collections), and the verification artefact uses `"0.9"` (the import evidence). These describe each file's data format separately from the npm package version.
 
 ## The Payload CMS destination
 
@@ -109,13 +109,39 @@ The bundle contains one collection module per content type plus `media`, `catego
 
 Posts and pages keep their title, slug, route, dates, author, taxonomy and the source publication status. Only WordPress `publish` becomes published in Payload; `draft`, `pending`, `future`, `private` and other unpublished statuses remain drafts, with the original status in `wordpressStatus`. Authors become an `authors` collection rather than Payload users, because `dc:creator` is a WordPress login. The body is native rich text for a documented subset — headings, paragraphs, lists, quotes, code, links, emphasis and delivered images — and everything else (images with no delivered upload, embeds, forms, tables, shortcodes and layout containers) becomes a `contentReview` entry rather than a guess, with `sourceHtml` keeping the original HTML alongside it. An image the export ties to an upload this run delivered becomes a media node in the body, so it lands in the page as well as in the library. Preformatted code becomes code-formatted text with line breaks in the default editor.
 
-Re-imports are safe. The importer finds each record by its stable `wordpressSourceId` (`wp:post:20`), updates it when the source changed, and skips a record that was edited in the CMS, reporting it as `record-modified` instead of overwriting it. Point `verify` at the import report to check the outcome:
+The WordPress menus become a `navigation` collection, so the site's menu is edited in the admin rather than in a deploy. A menu entry nothing in the plan serves keeps a `reason` for a human to resolve, exactly as `migration/menus.json` reports it. A non-image upload the content links to — a PDF, a price list, a zip — travels with the site the same way an image does, and becomes a media record instead of being left behind on the source host.
+
+Re-imports are safe. The importer finds each record by its stable `wordpressSourceId` (`wp:post:20`), updates it when the source changed, and skips a record that was edited in the CMS, reporting it as `record-modified` instead of overwriting it. Its re-run hash covers the delivered file as well as the record's fields, so replacing an image re-uploads it rather than reading as `unchanged`. It writes `migration-import.json` next to the bundle, and a drop file it cannot read is one reported failure instead of a run that stops before writing a report. Point `verify` at the import report to check the outcome:
 
 ```bash
 npx wp-migrate-core verify export.xml --import-report migration-import.json --fail-on blocker
 ```
 
 `npm run test:payload` in this repository is the round trip behind that claim: it installs Payload 3.90.2, imports a generated export into SQLite, re-imports it, edits a record in the CMS to prove the re-import leaves it alone, checks the media node in the body, and builds the generated admin app with Next.js. A migration of a real site remains the next validation gate. When updating a bundle written before 0.10.0, copy the regenerated collections, importer, `package.json` and `next.config.mjs`, rename `payload.config.mjs` to `payload.config.js`, and add the `app/`, `tsconfig.json`, `.env.example` and `.gitignore` files so the admin host has what it needs. For a 0.10.0 bundle, copy the regenerated importer and change its `import` script to `payload run import/import.mjs` so it reads `.env` and waits for completion.
+
+## The Pruvious CMS destination
+
+Pruvious is the second CMS destination, and this time for Nuxt. `--target pruvious` writes a Nuxt app with the `pruvious` module: collections, a dashboard, a media library and a publishing workflow, plus a content and media drop and a generated importer.
+
+```bash
+npx wp-migrate-core convert export.xml --out pruvious-bundle --target pruvious --uploads ../wordpress/wp-content/uploads
+cd pruvious-bundle
+npm install
+cp .env.example .env
+# Set WP_MIGRATE_IMPORT_TOKEN in .env to a random secret before starting.
+npm run dev             # the dashboard is at http://localhost:3000/dashboard
+npm run migrate         # in another terminal, once the app is up
+```
+
+The bundle writes `nuxt.config.ts` (the `pruvious` module), one `collections/<name>.ts` per content type plus `media`, `categories`, `tags`, `authors` and `navigation`, the drop and importer under `import/` and `server/`, the redirect map as Nitro middleware, and the same `migration/` review artifacts the other targets write. Posts and pages keep their title, slug, route, dates, author, taxonomy, the source status and the menu; the body is stored as HTML in Pruvious's editor field with same-site links rewritten, and delivered files are served from `public/wp-content/uploads/` at their original paths.
+
+The importer runs inside the Nuxt app, because Pruvious's collection API is a server API: `npm run migrate` reads the token from `.env` and posts to the protected `/api/migrate` route. The route reads the drop, upserts by `wordpressSourceId`, preserves dashboard edits and writes the same `migration-import.json` the Payload importer does. Set `WP_MIGRATE_URL` for an app running somewhere other than `http://localhost:3000`. Both importers accept a full report file path through `WP_MIGRATE_IMPORT_REPORT`. Verification reads either destination the same way:
+
+```bash
+npx wp-migrate-core verify export.xml --import-report migration-import.json --fail-on blocker
+```
+
+The 0.11.1 review manually checked the generated bundle with Pruvious 3.9.10, Nuxt 3.9.3 and SQLite: imports, repeat runs, source updates, dashboard edit protection, navigation and local media paths. Automated tests execute the generated importer with a collection API stub. A real-site migration and a repeatable Pruvious integration check remain validation gates. The front end is yours to build; delivered files are served from `public/`, and nested navigation entries are stored as JSON in a text field.
 
 ### Content types
 
@@ -389,6 +415,7 @@ The generated site starts with `noindex, nofollow` in its layout and `Disallow: 
 wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro] [--live-urls sitemap.xml]
 wp-migrate-core convert <export.xml> --out <new-site> [--target astro] [--live-urls sitemap.xml]
 wp-migrate-core convert <export.xml> --out <payload-bundle> --target payload --uploads ../uploads
+wp-migrate-core convert <export.xml> --out <pruvious-bundle> --target pruvious --uploads ../uploads
 wp-migrate-core convert <export.xml> --out <new-site> --uploads ../wordpress/wp-content/uploads
 wp-migrate-core convert <export.xml> --out <new-site> --media-base https://cdn.example.com/uploads
 wp-migrate-core convert <export.xml> --out <new-site> --publish-ready
@@ -403,7 +430,7 @@ wp-migrate-core --version
 wp-migrate-core inspect --help
 ```
 
-`report` writes just the HTML report. `verify` compares a built site, a saved RouteLint report, or a CMS import report with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `--config` applies a migration config to any command. `--uploads`, `--media-base` and `--copy-unused-media` apply to `convert`, `demo` and `verify`; verification only reads the files. `--publish-ready` belongs to `convert` and `demo`. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `--target` takes `astro` or `payload`; `next`, `nuxt` and `svelte` are declared, planned targets and currently return an error.
+`report` writes just the HTML report. `verify` compares a built site, a saved RouteLint report, or a CMS import report with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `--config` applies a migration config to any command. `--uploads`, `--media-base` and `--copy-unused-media` apply to `convert`, `demo` and `verify`; verification only reads the files. `--publish-ready` belongs to `convert` and `demo`. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `--target` takes `astro`, `payload` or `pruvious`; `next`, `nuxt` and `svelte` are declared, planned targets and currently return an error.
 
 | Option | What it does |
 | --- | --- |

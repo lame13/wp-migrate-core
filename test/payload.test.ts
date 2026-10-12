@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 
 import { assertTargetEnabled, targetAdapters } from "../src/adapters.js";
 import { parseWxr } from "../src/core.js";
+import { generateAstroProject } from "../src/generate.js";
 import { applyMediaDelivery, planMediaDelivery } from "../src/media.js";
 import { generatePayloadBundle, htmlToPayloadRichText, renderPayloadImporter } from "../src/payload.js";
 import { demoFixturePath } from "./fixture-path.js";
@@ -29,8 +30,10 @@ function extractFunction(source: string, name: string): string {
 test("the destination boundary names each target's kind and refuses the planned ones", () => {
   assert.equal(targetAdapters.astro.kind, "static-site");
   assert.equal(targetAdapters.payload.kind, "cms");
+  assert.equal(targetAdapters.pruvious.kind, "cms");
   assert.doesNotThrow(() => assertTargetEnabled("astro"));
   assert.doesNotThrow(() => assertTargetEnabled("payload"));
+  assert.doesNotThrow(() => assertTargetEnabled("pruvious"));
   for (const target of ["next", "nuxt", "svelte"] as const) {
     assert.throws(() => assertTargetEnabled(target), /planned but not available/);
   }
@@ -225,7 +228,7 @@ test("writes a Payload bundle with collections, a drop and an importer", async (
   await generatePayloadBundle(project, bundle);
 
   const manifest = JSON.parse(await readFile(join(bundle, "migration/manifest.json"), "utf8"));
-  assert.equal(manifest.schemaVersion, "0.10");
+  assert.equal(manifest.schemaVersion, "0.11");
   assert.equal(manifest.generator.target, "payload");
   assert.equal(manifest.destination.kind, "cms");
   assert.equal(manifest.destination.structure, "payload-next");
@@ -240,7 +243,7 @@ test("writes a Payload bundle with collections, a drop and an importer", async (
 
   // One module per content collection, plus the shared ones.
   await Promise.all(
-    ["Pages.mjs", "Posts.mjs", "Media.mjs", "Categories.mjs", "Tags.mjs", "Authors.mjs"].map((file) =>
+    ["Pages.mjs", "Posts.mjs", "Media.mjs", "Categories.mjs", "Tags.mjs", "Authors.mjs", "Navigation.mjs"].map((file) =>
       stat(join(bundle, "collections", file))
     )
   );
@@ -475,4 +478,234 @@ test("convert --target payload writes a bundle through the installed executable"
   });
   assert.notEqual(unavailableDemo.status, 0);
   await assert.rejects(() => stat(join(workspace, "unavailable-demo")), { code: "ENOENT" });
+});
+
+function menuXml(options: {
+  readonly id: number;
+  readonly title: string;
+  readonly order: number;
+  readonly type: string;
+  readonly object?: string;
+  readonly objectId?: number;
+  readonly url?: string;
+  readonly parent?: number;
+}): string {
+  const meta = (key: string, value: string): string =>
+    `<wp:postmeta><wp:meta_key>${key}</wp:meta_key><wp:meta_value>${value}</wp:meta_value></wp:postmeta>`;
+  return [
+    "<item>",
+    `<title>${options.title}</title>`,
+    `<wp:post_id>${options.id}</wp:post_id>`,
+    "<wp:post_type>nav_menu_item</wp:post_type>",
+    "<wp:status>publish</wp:status>",
+    `<wp:menu_order>${options.order}</wp:menu_order>`,
+    '<category domain="nav_menu" nicename="primary"><![CDATA[Primary]]></category>',
+    meta("_menu_item_type", options.type),
+    ...(options.object === undefined ? [] : [meta("_menu_item_object", options.object)]),
+    ...(options.objectId === undefined ? [] : [meta("_menu_item_object_id", String(options.objectId))]),
+    ...(options.url === undefined ? [] : [meta("_menu_item_url", options.url)]),
+    ...(options.parent === undefined ? [] : [meta("_menu_item_menu_item_parent", String(options.parent))]),
+    "</item>"
+  ].join("");
+}
+
+test("the Payload bundle turns the WordPress menu into an editable collection", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-payload-menu-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+
+  const project = parseWxr(
+    `<rss><channel>${contentItem(1, "page")}${menuXml({
+      id: 500,
+      title: "Home",
+      order: 1,
+      type: "post_type",
+      object: "page",
+      objectId: 1
+    })}${menuXml({
+      id: 501,
+      title: "Elsewhere",
+      order: 2,
+      type: "custom",
+      url: "https://elsewhere.test/",
+      parent: 500
+    })}${[502, 503, 504, 505].map((id) => menuXml({ id, title: `Level ${id}`, order: id, type: "custom", url: "https://elsewhere.test/", parent: id - 1 })).join("")}</channel></rss>`
+  );
+  assert.ok(project.menus.trees.length > 0, "the fixture carries a menu");
+
+  const bundle = join(workspace, "bundle");
+  await generatePayloadBundle(project, bundle);
+
+  const module = await readFile(join(bundle, "collections/Navigation.mjs"), "utf8");
+  assert.match(module, /"slug":\s*"navigation"/);
+  assert.match(module, /"wordpressSourceId"/);
+  assert.match(module, /"children"/, "the tree nests rather than flattening");
+  const { default: collection } = await import(pathToFileURL(join(bundle, "collections/Navigation.mjs")).href);
+  let fields = collection.fields.find((field: { name: string }) => field.name === "items").fields;
+  for (let depth = 0; depth < 5; depth += 1) {
+    fields = fields.find((field: { name: string }) => field.name === "children").fields;
+  }
+  assert.ok(fields.some((field: { name: string }) => field.name === "label"), "deep menu entries have fields rather than being dropped");
+
+  const drop = JSON.parse(await readFile(join(bundle, "import/content/navigation.json"), "utf8"));
+  assert.equal(drop.length, project.menus.trees.length);
+  assert.equal(drop[0].collection, "navigation");
+  assert.match(JSON.stringify(drop[0].data), /"label":"Home"/);
+
+  const index = JSON.parse(await readFile(join(bundle, "import/content/index.json"), "utf8"));
+  assert.ok(
+    index.files.some((file: { collection: string }) => file.collection === "navigation"),
+    "the importer loads the menu"
+  );
+  const manifest = JSON.parse(await readFile(join(bundle, "migration/manifest.json"), "utf8"));
+  assert.equal(manifest.destination.admin, "app/(payload)");
+  assert.ok(
+    manifest.collections.some((collection: { slug: string }) => collection.slug === "navigation"),
+    "the manifest lists the navigation collection"
+  );
+});
+
+test("a link to an uploaded file travels with the site and becomes media", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-payload-file-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const uploads = join(workspace, "uploads");
+  await mkdir(join(uploads, "2026/05"), { recursive: true });
+  await writeFile(join(uploads, "2026/05/price-list.pdf"), "PDF placeholder bytes");
+
+  const page = [
+    "<item>",
+    "<title>Pricing</title>",
+    "<link>https://example.test/pricing/</link>",
+    "<wp:post_id>1</wp:post_id>",
+    "<wp:post_type>page</wp:post_type>",
+    "<wp:status>publish</wp:status>",
+    "<wp:post_name>pricing</wp:post_name>",
+    '<content:encoded><![CDATA[<p><a href="https://example.test/wp-content/uploads/2026/05/price-list.pdf">Price list</a></p>]]></content:encoded>',
+    "</item>"
+  ].join("");
+  const attachment = [
+    "<item><title>Price list</title><wp:post_id>401</wp:post_id>",
+    "<wp:post_type>attachment</wp:post_type><wp:status>inherit</wp:status>",
+    "<wp:attachment_url>https://example.test/wp-content/uploads/2026/05/price-list.pdf</wp:attachment_url>",
+    "<wp:postmeta><wp:meta_key>_wp_attached_file</wp:meta_key><wp:meta_value>2026/05/price-list.pdf</wp:meta_value></wp:postmeta>",
+    "</item>"
+  ].join("");
+
+  const parsed = parseWxr(`<rss><channel>${page}${attachment}</channel></rss>`);
+  const reference = parsed.media.references.find((entry) => entry.kind === "linked-file");
+  assert.ok(reference, "a link to an uploaded file is tracked as a media reference");
+  assert.equal(reference.status, "matched");
+  assert.equal(reference.assetId, "media:401");
+
+  const project = applyMediaDelivery(parsed, await planMediaDelivery(parsed, { uploadsDirectory: uploads }));
+  const bundle = join(workspace, "bundle");
+  await generatePayloadBundle(project, bundle);
+
+  await stat(join(bundle, "import/media/public/wp-content/uploads/2026/05/price-list.pdf"));
+  const media = JSON.parse(await readFile(join(bundle, "import/content/media.json"), "utf8"));
+  assert.ok(
+    media.some((job: { wordpressSourceId: string }) => job.wordpressSourceId === "media:401"),
+    "the linked file becomes an importable media record"
+  );
+  await stat(join(bundle, "public/wp-content/uploads/2026/05/price-list.pdf"));
+  const pages = await readFile(join(bundle, "import/content/pages.json"), "utf8");
+  assert.match(pages, /"url": "\/wp-content\/uploads\/2026\/05\/price-list.pdf"/);
+  const astro = join(workspace, "astro");
+  await generateAstroProject(project, astro);
+  const markdown = await readFile(join(astro, "src/content/pages/pricing.md"), "utf8");
+  assert.match(markdown, /href="\/wp-content\/uploads\/2026\/05\/price-list.pdf"/);
+});
+
+test("the importer re-uploads a media record whose delivered file changed", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-payload-mediahash-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const bundleRoot = join(workspace, "bundle");
+  const relative = "import/media/public/wp-content/uploads/2026/05/hero.jpg";
+  await mkdir(join(bundleRoot, "import/media/public/wp-content/uploads/2026/05"), { recursive: true });
+  const filePath = join(bundleRoot, relative);
+  await writeFile(filePath, "first bytes");
+
+  const source = renderPayloadImporter(await loadDemoProject());
+  const names = ["stableStringify", "managedFieldsHash", "resolveReferences", "projectFields", "messageOf", "fileDigest", "upsert"];
+  const upsert = new Function(
+    "createHash",
+    "readFile",
+    "resolve",
+    "bundleRoot",
+    names.map((name) => extractFunction(source, name)).join("\n") + "\nreturn upsert;"
+  )(createHash, readFile, resolve, bundleRoot) as (
+    payload: object,
+    entry: object,
+    job: object,
+    ids: object,
+    counters: Record<string, number>,
+    records: { action: string }[]
+  ) => Promise<void>;
+
+  let saved: Record<string, unknown> | undefined;
+  const payload = {
+    async find() {
+      return { docs: saved === undefined ? [] : [saved] };
+    },
+    async create({ data }: { data: Record<string, unknown> }) {
+      saved = { ...structuredClone(data), id: 7 };
+      return saved;
+    },
+    async update({ data }: { data: Record<string, unknown> }) {
+      saved = { ...saved, ...structuredClone(data) };
+      return saved;
+    }
+  };
+  const job = { wordpressSourceId: "media:301", data: { wordpressSourceId: "media:301" }, file: relative };
+  const run = async (): Promise<string> => {
+    const counters = { created: 0, updated: 0, unchanged: 0, skipped: 0, unresolved: 0 };
+    const records: { action: string }[] = [];
+    await upsert(payload, { collection: "media" }, job, {}, counters, records);
+    return records[0]!.action;
+  };
+
+  assert.equal(await run(), "created");
+  assert.equal(await run(), "unchanged", "the same file and fields are unchanged");
+  await writeFile(filePath, "second, different bytes");
+  assert.equal(await run(), "updated", "a replaced file re-uploads instead of reading as unchanged");
+
+  const importer = renderPayloadImporter(await loadDemoProject());
+  assert.match(importer, /WP_MIGRATE_IMPORT_REPORT/, "the report path is overridable and defaults to the bundle");
+  assert.match(importer, /Cannot read the drop index/, "a missing index still leaves a report");
+});
+
+test("the Payload importer writes failed-drop reports at the bundle or explicit file path", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-payload-report-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const here = join(workspace, "import");
+  await mkdir(join(here, "content"), { recursive: true });
+  const source = renderPayloadImporter(await loadDemoProject());
+  const functions = source.slice(source.indexOf("function stableStringify"), source.indexOf("\nawait main().catch"));
+  const env: Record<string, string> = {};
+  let destroyed = 0;
+  const main = new Function("getPayload", "config", "readFile", "writeFile", "resolve", "here", "bundleRoot", "process", "console", functions + "\nreturn main;")(
+    async () => ({ async destroy() { destroyed += 1; } }), {}, readFile, writeFile, resolve, here, workspace,
+    { env }, { log() {} }
+  ) as () => Promise<void>;
+  await assert.rejects(main, /1 record\(s\) failed/);
+  const report = JSON.parse(await readFile(join(workspace, "migration-import.json"), "utf8"));
+  assert.equal(report.summary.failed, 1);
+  assert.match(report.records[0].reason, /Cannot read the drop index/);
+  env.WP_MIGRATE_IMPORT_REPORT = join(workspace, "custom.json");
+  await writeFile(join(here, "content/index.json"), '{"files":[{"collection":"posts","file":"content/posts.json"}]}');
+  await assert.rejects(main, /1 record\(s\) failed/);
+  assert.match(JSON.parse(await readFile(env.WP_MIGRATE_IMPORT_REPORT, "utf8")).records[0].reason, /Cannot read content\/posts.json/);
+  await writeFile(join(here, "content/index.json"), '{"files":{}}');
+  await assert.rejects(main, /1 record\(s\) failed/);
+  assert.equal(destroyed, 3, "each failure releases the CMS connection");
+});
+
+test("download links do not hide missing alt text on the same image", () => {
+  const url = "https://example.test/wp-content/uploads/photo.jpg";
+  const project = parseWxr(`<rss><channel>
+    <item><title>Photo</title><wp:post_id>1</wp:post_id><wp:post_type>post</wp:post_type><wp:status>publish</wp:status>
+    <content:encoded><![CDATA[<!-- wp:image --><a title="Photo > original" href="${url}"><img src="${url}"></a><!-- /wp:image -->]]></content:encoded></item>
+    <item><wp:post_id>2</wp:post_id><wp:post_type>attachment</wp:post_type><wp:status>inherit</wp:status><wp:attachment_url>${url}</wp:attachment_url></item>
+  </channel></rss>`);
+  assert.equal(project.media.references.find((reference) => reference.kind === "linked-file")?.status, "matched");
+  assert.ok(project.media.references.some((reference) => reference.kind !== "linked-file" && reference.status === "missing-alt-text"));
 });

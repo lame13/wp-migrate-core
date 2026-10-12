@@ -53,6 +53,12 @@ function npm(args, cwd, env = {}) {
 
 const extraItems = `
 <item>
+  <title>Home</title><wp:post_id>500</wp:post_id><wp:post_type>nav_menu_item</wp:post_type><wp:status>publish</wp:status>
+  <category domain="nav_menu" nicename="primary">Primary</category>
+  <wp:postmeta><wp:meta_key>_menu_item_type</wp:meta_key><wp:meta_value>custom</wp:meta_value></wp:postmeta>
+  <wp:postmeta><wp:meta_key>_menu_item_url</wp:meta_key><wp:meta_value>https://brightpath.example/</wp:meta_value></wp:postmeta>
+</item>
+<item>
   <title>Scheduled book</title>
   <link>https://brightpath.example/book/</link>
   <dc:creator><![CDATA[niko]]></dc:creator>
@@ -123,6 +129,8 @@ try {
 
   const media = await payload.find({ collection: "media", limit: 1 });
   assert.ok(media.totalDocs > 0, "media was uploaded");
+  const navigation = await payload.find({ collection: "navigation", limit: 1 });
+  assert.equal(navigation.docs[0].items[0].label, "Home", "the menu is stored in the editable collection");
 
   const post = (await payload.find({ collection: "posts", limit: 1 })).docs[0];
   await payload.update({ collection: "posts", id: post.id, draft: true, data: { title: "CMS draft edit" } });
@@ -191,6 +199,17 @@ try {
   const fourth = await importReport();
   assert.equal(fourth.summary.updated, 0, "the update is not repeated on the next run");
   assert.equal(fourth.summary.skipped, 1);
+
+  console.log("Replacing a delivered file and checking the media re-import ...");
+  const mediaJobs = JSON.parse(await readFile(join(bundle, "import/content/media.json"), "utf8"));
+  const mediaJob = mediaJobs.find((job) => job.wordpressSourceId === "media:301");
+  assert.ok(mediaJob);
+  await writeFile(join(bundle, mediaJob.file), await readFile(join(repository, "fixtures/uploads/2026/05/pipes.jpg")));
+  const changedMedia = await importReport();
+  assert.equal(actionOf(changedMedia, mediaJob.wordpressSourceId), "updated");
+  assert.equal(changedMedia.summary.failed, 0);
+  const stableMedia = await importReport();
+  assert.equal(actionOf(stableMedia, mediaJob.wordpressSourceId), "unchanged");
 
   console.log("Checking the import report against the plan ...");
   const verification = run(

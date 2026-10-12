@@ -14,7 +14,7 @@ export interface TargetDefinition {
 }
 
 /** Every target, in the order reports and the CLI list them. */
-export const SUPPORTED_TARGETS: readonly OutputTarget[] = ["astro", "payload", "next", "nuxt", "svelte"];
+export const SUPPORTED_TARGETS: readonly OutputTarget[] = ["astro", "payload", "pruvious", "next", "nuxt", "svelte"];
 
 export const targetDefinitions: Readonly<Record<OutputTarget, TargetDefinition>> = {
   astro: {
@@ -33,6 +33,14 @@ export const targetDefinitions: Readonly<Record<OutputTarget, TargetDefinition>>
     description:
       "A Payload CMS bundle: collections, a content and media drop, and a generated importer you run inside the destination project. Implemented."
   },
+  pruvious: {
+    target: "pruvious",
+    kind: "cms",
+    enabled: true,
+    label: "Pruvious",
+    description:
+      "A Pruvious CMS bundle for Nuxt: collections, a content and media drop, and a generated importer you run inside the Nuxt app. Implemented."
+  },
   next: {
     target: "next",
     kind: "static-site",
@@ -46,7 +54,7 @@ export const targetDefinitions: Readonly<Record<OutputTarget, TargetDefinition>>
     kind: "static-site",
     enabled: false,
     label: "Nuxt",
-    description: "A bare Nuxt target is planned but not implemented; Pruvious is the planned Nuxt destination."
+    description: "No standalone Nuxt output is included. The Pruvious bundle integrates with a Nuxt app; its front end is yours to build."
   },
   svelte: {
     target: "svelte",

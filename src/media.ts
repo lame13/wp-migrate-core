@@ -22,6 +22,34 @@ import type {
 /** Every upload the source serves from its own media library. */
 const UPLOADS_PREFIX = "/wp-content/uploads/";
 
+/** Point delivered downloads and, optionally, images at the copy this plan serves. */
+export function rewriteDeliveredMedia(html: string, plan: MediaDeliveryPlan | undefined, images = true): string {
+  if (plan === undefined) return html;
+  const entries = new Map(plan.entries.map((entry) => [entry.sourcePath, entry]));
+  const rewrite = (url: string): string => {
+    const entry = entries.get(mediaPath(url) ?? "");
+    const target = entry?.status === "copied"
+      ? entry.outputPath?.split("/").map(encodeURIComponent).join("/")
+      : entry?.status === "linked" ? entry.url : undefined;
+    return target === undefined ? url : target + (url.match(/[?#].*$/)?.[0] ?? "");
+  };
+  return html.replace(/<(?:a|img|source)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi, (tag) => {
+    const anchor = /^<a\b/i.test(tag);
+    if (!anchor && !images) return tag;
+    for (const name of anchor ? ["href"] : ["src", "srcset"]) {
+      const value = readHtmlAttribute(tag, name);
+      if (value === undefined || /^data:/i.test(value)) continue;
+      const replacement = name === "srcset"
+        ? value.split(",").map((candidate) => candidate.trim().replace(/^\S+/, rewrite)).join(", ")
+        : rewrite(value);
+      if (replacement === value) continue;
+      const attribute = new RegExp(`(\\s${name}\\s*=\\s*)(?:"[^"]*"|'[^']*'|[^\\s"'=<>\x60]+)`, "i");
+      tag = tag.replace(attribute, (_match, prefix: string) => `${prefix}"${replacement.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}"`);
+    }
+    return tag;
+  });
+}
+
 interface MediaCandidate {
   readonly sourcePath: string;
   readonly assetId?: string | undefined;

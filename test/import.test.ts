@@ -107,6 +107,9 @@ test("turns what the importer left undone into publishing findings", () => {
       // A content id the plan does not carry: imported, but nothing asked for it.
       { id: "wp:page:999", sourceId: "wp:page:999", collection: "pages", action: "created" as const, unresolved: [] },
       { id: "media:9", sourceId: "media:9", collection: "media", action: "created" as const, unresolved: [] },
+      { id: "wp:author:niko", sourceId: "wp:author:niko", collection: "authors", action: "created" as const, unresolved: [] },
+      // A menu is a supporting record too, so it is expected rather than unknown.
+      { id: "wp:menu:primary", sourceId: "wp:menu:primary", collection: "navigation", action: "created" as const, unresolved: [] },
       { id: "wp:term:category:guides", sourceId: "wp:term:category:guides", collection: "categories", action: "created" as const, unresolved: [] }
     ]
   };
@@ -117,7 +120,8 @@ test("turns what the importer left undone into publishing findings", () => {
     "IMPORT_RECORD_FAILED",
     "IMPORT_RECORD_MISSING",
     "IMPORT_RECORD_SKIPPED",
-    "IMPORT_RECORD_UNKNOWN"
+    "IMPORT_RECORD_UNKNOWN",
+    "IMPORT_SUMMARY_MISMATCH"
   ]);
   assert.equal(findings.find((finding) => finding.code === "IMPORT_RECORD_FAILED")?.severity, "blocker");
   assert.equal(findings.find((finding) => finding.code === "IMPORT_RECORD_MISSING")?.severity, "warning");
@@ -154,7 +158,10 @@ test("unresolved imported relationships fail the warning gate", async (context) 
   const path = join(workspace, "migration-import.json");
   await writeFile(path, report([
     { id: "wp:page:1", sourceId: "wp:page:1", collection: "pages", action: "created", unresolved: ["media:99"] },
-    { id: "wp:post:20", sourceId: "wp:post:20", collection: "posts", action: "unchanged", unresolved: [] }
+    { id: "wp:post:20", sourceId: "wp:post:20", collection: "posts", action: "unchanged", unresolved: [] },
+    // The author and category the post uses are supporting records the plan expects.
+    { id: "wp:author:niko", sourceId: "wp:author:niko", collection: "authors", action: "created", unresolved: [] },
+    { id: "wp:term:category:guides", sourceId: "wp:term:category:guides", collection: "categories", action: "created", unresolved: [] }
   ]));
   const verification = await verifySite(project(), { importReportPath: path });
   assert.deepEqual(verification.launch.map((finding) => finding.code), ["IMPORT_REFERENCE_UNRESOLVED"]);
@@ -195,4 +202,48 @@ test("the CLI accepts --import-report on its own and refuses it elsewhere", asyn
   );
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /only supported by verify/);
+});
+
+test("a supporting record the plan expects but the report omits is a finding", () => {
+  const evidence = {
+    observed: "import-report" as const,
+    source: "migration-import.json",
+    version: "0.11.0",
+    generatedAt: "2026-10-10T00:00:00.000Z",
+    target: "payload",
+    summary: { planned: 1, created: 1, updated: 0, unchanged: 0, skipped: 0, failed: 0, unresolved: 0 },
+    // The post and the category it uses are both missing.
+    records: [
+      { id: "wp:page:1", sourceId: "wp:page:1", collection: "pages", action: "created" as const, unresolved: [] }
+    ]
+  };
+
+  const findings = importLaunchFindings(project(), evidence);
+  assert.ok(
+    findings.some((finding) => finding.id === "import-missing:wp:term:category:guides"),
+    "the category the plan expects is checked even though it is not a content record"
+  );
+  assert.ok(
+    findings.some((finding) => finding.id === "import-missing:wp:post:20"),
+    "the missing content record is still reported"
+  );
+});
+
+test("a report whose summary disagrees with its records is flagged", () => {
+  const evidence = {
+    observed: "import-report" as const,
+    source: "migration-import.json",
+    version: "0.11.0",
+    generatedAt: "2026-10-10T00:00:00.000Z",
+    target: "payload",
+    summary: { planned: 9, created: 9, updated: 0, unchanged: 0, skipped: 0, failed: 0, unresolved: 0 },
+    records: [
+      { id: "wp:page:1", sourceId: "wp:page:1", collection: "pages", action: "created" as const, unresolved: [] }
+    ]
+  };
+
+  const findings = importLaunchFindings(project(), evidence);
+  const mismatch = findings.find((finding) => finding.code === "IMPORT_SUMMARY_MISMATCH");
+  assert.ok(mismatch, "a summary that lists more than the records is caught");
+  assert.equal(mismatch.severity, "warning");
 });

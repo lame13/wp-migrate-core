@@ -18,12 +18,12 @@ import {
 import { htmlToPayloadRichText } from "./payload-richtext.js";
 import type { ContentReviewItem, ImageResolver } from "./payload-richtext.js";
 export { htmlToPayloadRichText } from "./payload-richtext.js";
-import { deliverMedia } from "./media.js";
+import { deliverMedia, rewriteDeliveredMedia } from "./media.js";
 import { redirectRuleFiles, renderVercelRedirects } from "./redirect-rules.js";
 import { escapeHtml, prepareOutputDirectory, renderJson, safeFileStem, writeNewFile } from "./render.js";
 import { targetRecords } from "./targets.js";
 import { packageVersion, payloadAdminDependencies, payloadDependency } from "./version.js";
-import type { ContentRecord, MigrationNode, MigrationProject, WordPressTerm } from "./types.js";
+import type { ContentRecord, MenuItem, MenuTree, MigrationNode, MigrationProject, WordPressTerm } from "./types.js";
 
 /**
  * The Payload destination.
@@ -70,6 +70,12 @@ interface MediaJob {
   readonly file?: string;
 }
 
+interface NavigationJob {
+  readonly wordpressSourceId: string;
+  readonly collection: "navigation";
+  readonly data: Readonly<Record<string, unknown>>;
+}
+
 interface PayloadField {
   readonly name: string;
   readonly type: string;
@@ -80,7 +86,7 @@ interface PayloadCollection {
   readonly slug: string;
   readonly fileName: string;
   readonly label: string;
-  readonly kind: "content" | "media" | "taxonomy" | "author";
+  readonly kind: "content" | "media" | "taxonomy" | "author" | "navigation";
   readonly sourceTypes: readonly string[];
   readonly fields: readonly PayloadField[];
 }
@@ -110,6 +116,7 @@ export async function generatePayloadBundle(
   const mediaJobs = payloadMediaJobs(project);
   const taxonomies = payloadTaxonomies(project);
   const authors = payloadAuthors(project);
+  const navigationJobs = payloadNavigationJobs(project);
   const outputDirectory = await prepareOutputDirectory(outDir);
 
   if (project.media.delivery !== undefined) {
@@ -117,6 +124,10 @@ export async function generatePayloadBundle(
     // importer uploads them from `import/media/public/...`, so the source
     // upload paths stay exactly what the export recorded.
     await deliverMedia(project.media.delivery, resolveMediaRoot(outputDirectory));
+    // Download links keep their original public path as well as entering the CMS library.
+    const linkedPaths = new Set(project.media.references.filter((entry) => entry.kind === "linked-file").map((entry) => entry.path));
+    const outputs = new Set(project.media.delivery.entries.filter((entry) => linkedPaths.has(entry.sourcePath)).map((entry) => entry.outputPath));
+    await deliverMedia({ ...project.media.delivery, copies: project.media.delivery.copies.filter((copy) => outputs.has(copy.outputPath)) }, outputDirectory);
   }
 
   const files = new Map<string, string>([
@@ -144,7 +155,7 @@ export async function generatePayloadBundle(
     files.set(file.path, file.contents);
   }
 
-  for (const drop of payloadDropFiles(contentJobs, mediaJobs, taxonomies, authors, collections)) {
+  for (const drop of payloadDropFiles(contentJobs, mediaJobs, taxonomies, authors, navigationJobs, collections)) {
     files.set(drop.path, drop.contents);
   }
 
@@ -226,8 +237,47 @@ function payloadCollections(project: MigrationProject): readonly PayloadCollecti
         { name: "wordpressSourceId", type: "text", required: true, unique: true, index: true },
         { name: "importHash", type: "text", admin: { readOnly: true } }
       ]
+    },
+    {
+      slug: "navigation",
+      fileName: "Navigation.mjs",
+      label: "Navigation",
+      kind: "navigation",
+      sourceTypes: ["nav_menu_item"],
+      fields: [
+        { name: "title", type: "text", required: true },
+        { name: "slug", type: "text", required: true, index: true },
+        { name: "wordpressSourceId", type: "text", required: true, unique: true, index: true },
+        {
+          name: "items",
+          type: "array",
+          admin: { description: "The menu tree as the export recorded it, editable in place." },
+          fields: navigationItemFields(project.menus.trees.flatMap((tree) => tree.items))
+        },
+        { name: "importHash", type: "text", admin: { readOnly: true } }
+      ]
     }
   ];
+}
+
+/**
+ * One menu entry's fields, nested so the admin shows the tree rather than a
+ * flat list. Generate enough levels to preserve the entire exported tree.
+ */
+function navigationItemFields(items: readonly MenuItem[]): readonly PayloadField[] {
+  const fields: PayloadField[] = [
+    { name: "wordpressId", type: "text" },
+    { name: "label", type: "text", required: true },
+    { name: "kind", type: "text" },
+    { name: "href", type: "text" },
+    { name: "targetRoute", type: "text" },
+    { name: "reason", type: "textarea" }
+  ];
+  const children = items.flatMap((item) => item.children);
+  if (children.length > 0) {
+    fields.push({ name: "children", type: "array", fields: navigationItemFields(children) });
+  }
+  return fields;
 }
 
 /**
@@ -315,7 +365,7 @@ function renderCollectionModule(collection: PayloadCollection): string {
   if (collection.kind === "content" || collection.kind === "author") {
     body.versions = { drafts: true };
   }
-  if (collection.kind === "content") {
+  if (collection.kind === "content" || collection.kind === "navigation") {
     body.admin = { useAsTitle: "title" };
   }
   if (collection.kind === "media") {
@@ -381,7 +431,7 @@ function payloadContentJobs(project: MigrationProject, rewriteLinks: boolean): r
       rewrites.filter((rewrite) => rewrite.sourceId === record.sourceId).map((rewrite) => [rewrite.href, rewrite.rewritten])
     );
     const { body, review } = htmlToPayloadRichText(
-      recordBodyHtml(record),
+      rewriteDeliveredMedia(recordBodyHtml(record), project.media.delivery, false),
       hrefRewrites,
       payloadImageResolver(project, record, delivered)
     );
@@ -567,6 +617,38 @@ function payloadAuthors(project: MigrationProject): readonly { login: string; na
 }
 
 /**
+ * One editable record per WordPress menu. The static target renders the tree
+ * into a component; a CMS destination has to hand the same tree to the admin,
+ * so a menu becomes a collection the site owner can change without a deploy.
+ */
+function payloadNavigationJobs(project: MigrationProject): readonly NavigationJob[] {
+  return project.menus.trees.map((tree) => ({
+    wordpressSourceId: navigationSourceId(tree),
+    collection: "navigation" as const,
+    data: {
+      title: tree.name,
+      slug: tree.slug || tree.id,
+      wordpressSourceId: navigationSourceId(tree),
+      items: tree.items.map(navigationItemData)
+    }
+  }));
+}
+
+function navigationSourceId(tree: MenuTree): string {
+  return `wp:menu:${tree.slug || tree.id}`;
+}
+
+function navigationItemData(item: MenuItem): Readonly<Record<string, unknown>> {
+  const data: Record<string, unknown> = { label: item.label, kind: item.kind };
+  if (item.id !== "") data.wordpressId = item.id;
+  if (item.href !== undefined) data.href = item.href;
+  if (item.targetRoute !== undefined) data.targetRoute = item.targetRoute;
+  if (item.reason !== undefined) data.reason = item.reason;
+  if (item.children.length > 0) data.children = item.children.map(navigationItemData);
+  return data;
+}
+
+/**
  * One job per attachment that has a local file to upload. A `linked` or
  * `remote` file has no bytes the importer can send, so it is left out and any
  * reference to it is reported as unresolved instead of inventing an empty
@@ -610,6 +692,7 @@ function payloadDropFiles(
   mediaJobs: readonly MediaJob[],
   taxonomies: readonly { domain: string; collection: string; terms: readonly WordPressTerm[] }[],
   authors: readonly { login: string; name: string; slug: string }[],
+  navigationJobs: readonly NavigationJob[],
   collections: readonly PayloadCollection[]
 ): readonly DropFile[] {
   const files: DropFile[] = [];
@@ -648,6 +731,10 @@ function payloadDropFiles(
     });
   }
 
+  if (navigationJobs.length > 0) {
+    files.push({ path: "import/content/navigation.json", contents: renderJson(navigationJobs) });
+  }
+
   if (mediaJobs.length > 0) {
     files.push({ path: "import/content/media.json", contents: renderJson(mediaJobs) });
   }
@@ -659,7 +746,10 @@ function payloadDropFiles(
     }
   }
 
-  files.push({ path: "import/content/index.json", contents: renderContentIndex(contentJobs, mediaJobs, taxonomies, authors, collections) });
+  files.push({
+    path: "import/content/index.json",
+    contents: renderContentIndex(contentJobs, mediaJobs, taxonomies, authors, navigationJobs, collections)
+  });
   return files;
 }
 
@@ -673,6 +763,7 @@ function renderContentIndex(
   mediaJobs: readonly MediaJob[],
   taxonomies: readonly { domain: string; collection: string; terms: readonly WordPressTerm[] }[],
   authors: readonly { login: string; name: string; slug: string }[],
+  navigationJobs: readonly NavigationJob[],
   collections: readonly PayloadCollection[]
 ): string {
   const files: { collection: string; file: string; count: number }[] = [];
@@ -685,6 +776,9 @@ function renderContentIndex(
     files.push({ collection, file: `content/${collection}.json`, count: taxonomyCounts.get(collection) ?? 0 });
   }
   if (authors.length > 0) files.push({ collection: "authors", file: "content/authors.json", count: authors.length });
+  if (navigationJobs.length > 0) {
+    files.push({ collection: "navigation", file: "content/navigation.json", count: navigationJobs.length });
+  }
   if (mediaJobs.length > 0) files.push({ collection: "media", file: "content/media.json", count: mediaJobs.length });
 
   for (const collection of collections.filter((entry) => entry.kind === "content")) {
@@ -704,7 +798,7 @@ function renderContentIndex(
  * it in `rawContent`; an Elementor record that stored its layout in widget
  * settings is rendered back to simple HTML from the parsed nodes.
  */
-function recordBodyHtml(record: ContentRecord): string {
+export function recordBodyHtml(record: ContentRecord): string {
   if (record.rawContent.trim() !== "") return record.rawContent;
   return record.nodes.map(elementorNodeHtml).filter((value) => value !== "").join("\n");
 }
@@ -999,7 +1093,7 @@ function renderPayloadManifest(
 ): string {
   const siteUrl = project.site.url === undefined ? undefined : sanitizeSourceUrl(project.site.url);
   return renderJson({
-    schemaVersion: "0.10",
+    schemaVersion: "0.11",
     generator: { name: GENERATOR_NAME, version: packageVersion, target: "payload" },
     sourceSite: { title: project.site.title, ...(siteUrl === undefined ? {} : { url: siteUrl }) },
     destination: {
@@ -1041,7 +1135,10 @@ function renderPayloadManifest(
       kind: collection.kind,
       sourceTypes: collection.sourceTypes,
       fields: [...collection.fields.map((field) => field.name), "importSnapshot"],
-      drop: collection.kind === "content" ? `import/content/${collection.slug}.json` : undefined
+      drop:
+        collection.kind === "content" || collection.kind === "navigation"
+          ? `import/content/${collection.slug}.json`
+          : undefined
     })),
     records: contentJobs.map((job) => ({
       sourceId: job.wordpressSourceId,
@@ -1081,7 +1178,7 @@ database.
 ## Structure
 
 * \`payload.config.js\` — the Payload config, built for Payload ${payloadDependency}.
-* \`collections/\` — one module per collection: ${collections.map((entry) => entry.collection).join(", ") || "none"}, plus \`media\`, \`categories\`, \`tags\` and \`authors\`.
+* \`collections/\` — one module per collection: ${collections.map((entry) => entry.collection).join(", ") || "none"}, plus \`media\`, \`categories\`, \`tags\`, \`authors\` and \`navigation\`.
 * \`app/\` — the Next + Payload admin host, so the bundle opens in a browser instead of only importing.
 * \`tsconfig.json\` — what Payload's own CLI reads to find the config file.
 * \`import/import.mjs\` — the generated importer. Run it with \`npm run import\`.
@@ -1116,6 +1213,7 @@ npx wp-migrate-core verify ../export.xml --import-report migration-import.json -
 
 * Posts and pages from every included post type, with title, slug, route, dates, author, taxonomy and the source publication status mapped explicitly. Only WordPress \`publish\` becomes published in Payload. All other statuses, including \`future\` and \`private\`, remain drafts and keep their original \`wordpressStatus\`.
 * Media from a supplied \`--uploads\` directory, uploaded into the media collection with the alt text the export carried.
+* The WordPress menus as a \`navigation\` collection, so the site's menu is edited in the admin instead of a deploy. Entries nothing in the plan serves keep a \`reason\` for a human to resolve.
 * Images used inside the body. When the export ties an image to an upload this run delivered, it becomes a media node in the rich text instead of a note, so the picture is in the page as well as in the library.
 * Rewritten internal links, and ${redirects === 0 ? "no redirect rules (this plan needs none)" : redirects === 1 ? "1 redirect rule" : `${redirects} redirect rules`} in the Next config and the host rule files.
 * Stable source identifiers (\`wordpressSourceId\`, such as \`wp:post:20\`) so a re-import does not duplicate anything.
@@ -1238,11 +1336,26 @@ function messageOf(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Size and content hash of a delivered file, so a replaced image is noticed. */
+async function fileDigest(filePath) {
+  try {
+    const bytes = await readFile(filePath);
+    return createHash("sha256").update(bytes).digest("hex") + ":" + bytes.length;
+  } catch (error) {
+    return "unreadable:" + messageOf(error);
+  }
+}
+
 async function upsert(payload, entry, job, ids, counters, records) {
   const resolved = resolveReferences(job.data, ids);
   counters.unresolved += resolved.missing.length;
-  const importHash = managedFieldsHash(resolved.data);
   const filePath = job.file === undefined ? undefined : resolve(bundleRoot, job.file);
+  // A media record is only unchanged when its fields *and* its file are. The
+  // bytes are part of the hash so replacing hero.jpg re-uploads, instead of
+  // reporting "unchanged" while the CMS keeps the old image.
+  const importHash = managedFieldsHash(
+    filePath === undefined ? resolved.data : { data: resolved.data, file: await fileDigest(filePath) }
+  );
 
   const found = await payload.find({
     collection: entry.collection,
@@ -1309,15 +1422,59 @@ async function upsert(payload, entry, job, ids, counters, records) {
 }
 
 async function main() {
-  const index = JSON.parse(await readFile(resolve(here, "content/index.json"), "utf8"));
   const payload = await getPayload({ config });
+  const records = [];
+  const counters = { planned: 0, created: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0, unresolved: 0 };
+  const indexFile = resolve(here, "content/index.json");
+  let index;
+  try {
+    index = JSON.parse(await readFile(indexFile, "utf8"));
+    if (!Array.isArray(index?.files)) throw new Error("Expected an array of files");
+  } catch (error) {
+    // No drop index means there is nothing to import, but the run still has to
+    // leave a report so the failure is a finding rather than a silent crash.
+    index = undefined;
+    counters.planned += 1;
+    counters.failed += 1;
+    records.push({
+      id: "import:index",
+      sourceId: "import:index",
+      postType: null,
+      collection: "index",
+      route: null,
+      title: null,
+      action: "failed",
+      reason: "Cannot read the drop index " + indexFile + ": " + messageOf(error),
+      unresolved: []
+    });
+  }
+
   try {
     const ids = {};
-    const records = [];
-    const counters = { planned: 0, created: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0, unresolved: 0 };
 
-    for (const entry of index.files) {
-      const jobs = JSON.parse(await readFile(resolve(here, entry.file), "utf8"));
+    for (const entry of index?.files ?? []) {
+      let jobs;
+      try {
+        jobs = JSON.parse(await readFile(resolve(here, entry.file), "utf8"));
+        if (!Array.isArray(jobs)) throw new Error("Expected an array of records");
+      } catch (error) {
+        // One unreadable drop file is one reported failure, not a run that
+        // stops before writing a report the check can read.
+        counters.planned += 1;
+        counters.failed += 1;
+        records.push({
+          id: "import-file:" + entry.file,
+          sourceId: "import-file:" + entry.file,
+          postType: null,
+          collection: entry.collection,
+          route: null,
+          title: null,
+          action: "failed",
+          reason: "Cannot read " + entry.file + ": " + messageOf(error),
+          unresolved: []
+        });
+        continue;
+      }
       for (const job of jobs) {
         counters.planned += 1;
         try {
@@ -1348,7 +1505,10 @@ async function main() {
       records
     };
 
-    const reportPath = resolve(process.cwd(), "migration-import.json");
+    // The report lands next to the bundle by default, not in whatever
+    // directory the importer was launched from. Set WP_MIGRATE_IMPORT_REPORT
+    // to write it somewhere else.
+    const reportPath = resolve(process.env.WP_MIGRATE_IMPORT_REPORT || resolve(bundleRoot, "migration-import.json"));
     await writeFile(reportPath, JSON.stringify(report, null, 2) + "\\n");
 
     console.log(

@@ -1,5 +1,6 @@
 import { generateAstroProject } from "./generate.js";
 import { generatePayloadBundle } from "./payload.js";
+import { generatePruviousBundle } from "./pruvious.js";
 import { SUPPORTED_TARGETS, isOutputTarget, targetDefinitions } from "./targets.js";
 import type { TargetDefinition } from "./targets.js";
 import type { MigrationProject, OutputTarget } from "./types.js";
@@ -31,7 +32,7 @@ function plannedOnly(
 ): (project: MigrationProject, outputDirectory: string, options?: DestinationGenerateOptions) => Promise<void> {
   return async () => {
     throw new Error(
-      `${targetDefinitions[target].label} is planned but not available in this release. Use --target astro or --target payload.`
+      `${targetDefinitions[target].label} is planned but not available in this release. Use --target astro, --target payload or --target pruvious.`
     );
   };
 }
@@ -39,6 +40,7 @@ function plannedOnly(
 export const targetAdapters: Readonly<Record<OutputTarget, TargetAdapter>> = {
   astro: { ...targetDefinitions.astro, generate: generateAstroProject },
   payload: { ...targetDefinitions.payload, generate: generatePayloadBundle },
+  pruvious: { ...targetDefinitions.pruvious, generate: generatePruviousBundle },
   next: { ...targetDefinitions.next, generate: plannedOnly("next") },
   nuxt: { ...targetDefinitions.nuxt, generate: plannedOnly("nuxt") },
   svelte: { ...targetDefinitions.svelte, generate: plannedOnly("svelte") }
@@ -61,7 +63,7 @@ export function assertTargetEnabled(target: OutputTarget): void {
   const availability = targetAdapters[target];
   if (!availability.enabled) {
     throw new Error(
-      `${availability.label} is planned but not available in this release. Use --target astro or --target payload.`
+      `${availability.label} is planned but not available in this release. Use --target astro, --target payload or --target pruvious.`
     );
   }
 }

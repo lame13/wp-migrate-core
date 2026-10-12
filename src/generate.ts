@@ -1135,7 +1135,13 @@ function renderSourceMedia(value: string, media: MediaRenderer | undefined): str
     );
   }
 
-  return value.replace(/<(?:img|source)\b[^>]*>/gi, (tag) => renderMediaTag(tag, media));
+  return value
+    .replace(/<a\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi, (tag) => {
+      const href = readHtmlAttribute(tag, "href");
+      const target = href === undefined ? undefined : deliveredMediaUrl(href, media);
+      return target === undefined ? tag : replaceHtmlAttribute(tag, "href", target.url + (href?.match(/[?#].*$/)?.[0] ?? ""));
+    })
+    .replace(/<(?:img|source)\b[^>]*>/gi, (tag) => renderMediaTag(tag, media));
 }
 
 function renderMediaTag(tag: string, media: MediaRenderer): string {

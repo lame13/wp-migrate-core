@@ -10,6 +10,7 @@ export * from "./targets.js";
 export * from "./adapters.js";
 export * from "./generate.js";
 export * from "./payload.js";
+export * from "./pruvious.js";
 export type { HtmlImage, ImageResolver, ImageTarget } from "./payload-richtext.js";
 export * from "./report.js";
 export * from "./verify.js";

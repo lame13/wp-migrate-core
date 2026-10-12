@@ -69,7 +69,7 @@ function usage(): string {
 
 Usage:
   wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro]
-  wp-migrate-core convert <export.xml> --out <new-site> [--target astro|payload]
+  wp-migrate-core convert <export.xml> --out <new-site> [--target astro|payload|pruvious]
   wp-migrate-core convert <export.xml> --out <new-site> --uploads <uploads-dir>
   wp-migrate-core convert <export.xml> --out <new-site> --media-base <https://cdn.example.com/uploads>
   wp-migrate-core report <export.xml> [--out migration-report.html]
@@ -120,8 +120,9 @@ Options:
 Targets:
   astro    implemented, static site
   payload  implemented, CMS bundle plus a generated importer
+  pruvious implemented, a Pruvious bundle for Nuxt plus a generated importer
   next     planned, not implemented (the Payload bundle integrates with Next)
-  nuxt     planned, not implemented
+  nuxt     planned, not implemented (the Pruvious bundle integrates with Nuxt)
   svelte   planned, not implemented (non-priority)
 
 This is a deliberately incomplete demonstration. It does not modify WordPress.
@@ -655,14 +656,16 @@ function generateOptions(options: CliOptions): DestinationGenerateOptions {
 function targetDirectoryName(target: OutputTarget): string {
   if (target === "astro") return "astro-site";
   if (target === "payload") return "payload-bundle";
+  if (target === "pruvious") return "pruvious-bundle";
   return `${target}-site`;
 }
 
 /** Where a target puts delivered media, for the summary lines. */
 function mediaRootPath(target: OutputTarget, directory: string): string {
-  return target === "payload"
-    ? resolve(directory, "import", "media", "public", "wp-content", "uploads")
-    : resolve(directory, "public", "wp-content", "uploads");
+  if (target === "payload") {
+    return resolve(directory, "import", "media", "public", "wp-content", "uploads");
+  }
+  return resolve(directory, "public", "wp-content", "uploads");
 }
 
 async function prepareInspectionOutput(directory: string): Promise<void> {

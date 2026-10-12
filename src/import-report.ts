@@ -118,6 +118,21 @@ export function importLaunchFindings(project: MigrationProject, evidence: Import
   const findings: LaunchFinding[] = [];
   const importedById = new Map(evidence.records.map((record) => [record.sourceId, record]));
 
+  // A summary that disagrees with the records it lists is how a truncated or
+  // hand-edited report slips through: the numbers read as a clean import while
+  // the records say otherwise.
+  if (evidence.summary.planned !== evidence.records.length) {
+    findings.push({
+      id: "import-summary-mismatch",
+      severity: "warning",
+      code: "IMPORT_SUMMARY_MISMATCH",
+      source: "import-report",
+      title: "The import report's summary and its records disagree",
+      message: `The report says ${evidence.summary.planned} record(s) were planned but lists ${evidence.records.length}.`,
+      requiredAction: "Re-run the importer so the summary is rebuilt from the records it wrote, then check the report again."
+    });
+  }
+
   for (const record of project.records) {
     if (!importedById.has(record.sourceId)) {
       findings.push({
@@ -131,6 +146,22 @@ export function importLaunchFindings(project: MigrationProject, evidence: Import
         requiredAction: "Re-run the importer, and check the collection and drop file it should have read."
       });
     }
+  }
+
+  // Taxonomies, authors and delivered media are supporting records the plan
+  // expects the importer to write. A missing one is the same silent loss as a
+  // missing post, and it is invisible if only content ids are cross-checked.
+  for (const sourceId of plannedSupportingIds(project)) {
+    if (importedById.has(sourceId)) continue;
+    findings.push({
+      id: `import-missing:${sourceId}`,
+      severity: "warning",
+      code: "IMPORT_RECORD_MISSING",
+      source: "import-report",
+      title: "A planned supporting record is not in the import report",
+      message: `${sourceId} is in the migration plan but the import report says nothing about it.`,
+      requiredAction: "Re-run the importer, and check the drop file that should have carried it."
+    });
   }
 
   for (const record of evidence.records) {
@@ -199,8 +230,42 @@ function isPlanned(project: MigrationProject, sourceId: string): boolean {
   return project.records.some((record) => record.sourceId === sourceId);
 }
 
+/**
+ * The supporting records this plan expects the importer to write: the category
+ * and tag terms the content uses, the authors it names, and any media this run
+ * delivered. Other taxonomies are kept inside each record rather than becoming
+ * their own collection, so they are not expected as separate records.
+ */
+function plannedSupportingIds(project: MigrationProject): readonly string[] {
+  const ids = new Set<string>();
+  for (const record of project.records) {
+    if (record.author !== undefined && record.author.trim() !== "") {
+      ids.add(`wp:author:${record.author.trim()}`);
+    }
+    for (const term of record.terms) {
+      if (term.domain === "category" || term.domain === "post_tag") {
+        ids.add(`wp:term:${term.domain}:${term.nicename}`);
+      }
+    }
+  }
+  for (const entry of project.media.delivery?.entries ?? []) {
+    if (entry.assetId !== undefined && entry.outputPath !== undefined) {
+      ids.add(entry.assetId);
+    }
+  }
+  for (const tree of project.menus.trees) {
+    ids.add(`wp:menu:${tree.slug || tree.id}`);
+  }
+  return [...ids].sort();
+}
+
 function isSupportingRecord(sourceId: string): boolean {
-  return sourceId.startsWith("wp:term:") || sourceId.startsWith("wp:author:") || sourceId.startsWith("media:");
+  return (
+    sourceId.startsWith("wp:term:") ||
+    sourceId.startsWith("wp:author:") ||
+    sourceId.startsWith("wp:menu:") ||
+    sourceId.startsWith("media:")
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

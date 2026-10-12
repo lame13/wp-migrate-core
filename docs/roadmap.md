@@ -8,6 +8,9 @@ the CMS path — destinations have a *kind*, and Payload is the first CMS
 destination behind that boundary. 0.10.0 made that destination something a
 person can actually open: the bundle carries the admin host, images in the
 content are media nodes, and the Payload round trip is a check in the package.
+0.11.0 proved the boundary with a second CMS: Pruvious joined Payload, the
+menu became an editable collection, files that are not images travel too, and
+the importer's re-run promises became true for media as well as text.
 
 ## The CMS destination path
 
@@ -26,7 +29,7 @@ Priority:
 | Target | Why add it | Priority |
 | --- | --- | --- |
 | **Payload** | Next.js plus an integrated CMS. Its official WordPress migration guide already involves custom migration scripts, which this package can standardize. | Shipped in 0.9.0; admin host, body images and a checked round trip in 0.10.0 |
-| **Pruvious** | A Nuxt destination with admin, media, collections and editable Vue blocks. | Next, if users want Nuxt |
+| **Pruvious** | A Nuxt destination with admin, media, collections and editable Vue blocks. | Shipped in 0.11.0 as the second destination — the boundary's second proof |
 | **Ghost** | A straightforward destination for blogs and publications. | Later: Ghost already has a WordPress importer, so the advantage has to be better checking, preservation and repair reporting |
 
 Svelte stays a real but non-priority static target. A bare Next.js or Nuxt
@@ -97,19 +100,37 @@ Next.js. A real-site migration remains the gate below.
   while a CMS edit is protected, checks the media node, runs the import gate,
   and builds the generated admin app. The bundle is pinned to that release.
 
-## Validation gate before 0.11.0
+## Validation gate before 0.12.0
 
-Run one real WordPress → Payload migration end to end — a site with more than
-two content types, a menu, archives and media — and write down what broke.
-Pruvious does not start until that list is empty or explicitly deferred. The
-package now proves the mechanics against a real Payload and SQLite; the gate is
-about a real site's content, not about whether the bundle runs.
+Two things are unproven, and both are the same kind of gate. One real
+WordPress → Payload migration end to end — a site with more than two content
+types, a menu, archives and media — and one real WordPress → Pruvious round
+trip using real-site content. The package proves the Payload mechanics against
+real Payload and SQLite in `npm run test:payload`. The 0.11.1 review manually
+checked Pruvious 3.9.10 with Nuxt 3.9.3 and SQLite, including repeat imports,
+source updates, dashboard edit protection, navigation and local media paths.
+A repeatable Pruvious integration check remains to be added.
 
-## 0.11.0 — Pruvious
+## 0.11.0 — shipped
 
-The same bundle and importer shape against a Nuxt destination, which is where
-the adapter boundary gets its second proof: if the second CMS needs changes in
-`core.ts`, the boundary was drawn in the wrong place.
+The second CMS destination, and the release that made the first one honest.
+
+- **Pruvious.** A Nuxt + Pruvious bundle with the same drop shape, importer
+  report and review artifacts as Payload. The adapter adds no rule to
+  `core.ts`, which is the boundary proving itself: the second CMS was a new
+  module, not a change to the shared model.
+- **Re-runs are honest about media.** The import hash covers the delivered
+  file's bytes, so a replaced image re-uploads.
+- **The importer always leaves a report.** It writes next to the bundle, and a
+  drop file it cannot read is one reported failure, not a run that stops
+  before writing anything. `verify --import-report` sees the supporting
+  media, author and taxonomy records and flags a summary that disagrees with
+  the records it lists.
+- **The menu is editable.** Payload and Pruvious write a `navigation`
+  collection from the export's menu tree.
+- **Files that are not images travel.** A content link to an upload the export
+  carries is delivered like an image and, on the CMS path, imported as a media
+  record.
 
 ## Later — Ghost, then the parked static targets
 
@@ -117,12 +138,13 @@ Ghost's own importer means the pitch there is checking, preservation and
 repair reporting rather than movement, so it is a smaller release. Svelte stays
 a real but non-priority static target.
 
-## Decisions to review before 0.11.0
+## Decisions to review before 0.12.0
 
-1. **Whether the Payload round trip runs in CI.** 0.10.0 pins Payload `3.90.2`
+1. **Whether the CMS round trips run in CI.** 0.10.0 pins Payload `3.90.2`
    across the manifest and the bundle, and `npm run test:payload` runs against
-   SQLite on demand. Decide whether CI installs it (network, disk and minutes)
-   or whether it stays a release-time check.
+   SQLite on demand. Pruvious has a manual round trip and needs the same kind
+   of repeatable check. Decide whether CI installs these (network, disk and
+   minutes) or whether they stay release-time checks.
 2. **Rich text depth.** 0.9.0 converts headings, paragraphs, lists, quotes,
    code, rules and the common inline formatting, and marks the rest. Revisit
    once a real migration shows what matters.

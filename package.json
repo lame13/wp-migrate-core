@@ -1,7 +1,7 @@
 {
   "name": "wp-migrate-core",
-  "version": "0.10.1",
-  "description": "Turn a WordPress WXR export into an Astro site or a Payload CMS app, with media, URL and link inventories, and a repair queue for the parts that still need a human.",
+  "version": "0.11.1",
+  "description": "Turn a WordPress WXR export into an Astro site or a Payload or Pruvious CMS app, with media, URL and link inventories, and a repair queue for the parts that still need a human.",
   "keywords": [
     "wordpress",
     "wordpress-migration",
@@ -9,6 +9,8 @@
     "astro",
     "payload",
     "cms",
+    "pruvious",
+    "nuxt",
     "nextjs",
     "elementor",
     "gutenberg",

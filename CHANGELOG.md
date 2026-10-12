@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-10-12
+
+- Fixes the Pruvious bundle's missing migration command, invalid build command and collision with the built-in `pages` collection. Keeps Nuxt and Pruvious on the same minor version and pins the editor extensions to their compatible core version.
+- Requires `WP_MIGRATE_IMPORT_TOKEN` for Pruvious imports. Re-imports preserve dashboard edits, clear removed relationships and count rejected updates as failures. The command exits unsuccessfully when records fail.
+- Rewrites delivered images and download links to their served paths, preserves Elementor text in Pruvious, and serves Payload downloads from `public/` as well as importing them into the media library. Download references no longer hide image alt-text findings.
+- Prevents Pruvious redirects from redirecting their own destinations. Preserves the full exported menu depth in Payload and checks for missing navigation records during import verification.
+- Treats `WP_MIGRATE_IMPORT_REPORT` as a file path in both importers and reports malformed drop arrays instead of crashing without a report.
+- Corrects case-sensitive Pruvious test paths. Adds importer execution regressions and extends the real Payload round trip to cover navigation and changed media files. Manually verifies Pruvious 3.9.10 with Nuxt 3.9.3 against a temporary SQLite database, including its production build.
+
+## [0.11.0] - 2026-10-12
+
+0.10 made the Payload destination something you can open and edit. This release makes it a destination, not a Payload script: the second CMS arrives, the first one's re-run promises become true for media as well as text, the menu becomes something you edit in the admin, and the files that are not images — PDFs, price lists, downloads — come along instead of being left on the old host.
+
+- **Pruvious is the second CMS destination.** `convert --target pruvious` writes a Nuxt app with the `pruvious` module: one `collections/<name>.ts` per content type plus `media`, `categories`, `tags`, `authors` and `navigation`, a `nuxt.config.ts`, the drop and a generated importer under `import/` and `server/`, the redirect map as Nitro middleware, and the same `migration/` review artifacts the other targets write. The importer runs inside the app through Pruvious's own collection API and writes the same `migration-import.json`, so `verify --import-report` reads either destination the same way. This is the destination boundary's second proof: the new target adds no rule to `core.ts`.
+- **Re-runs are honest about media.** The importer's re-run hash now covers the delivered file's bytes as well as the record's fields, so replacing `hero.jpg` re-uploads it instead of reporting `unchanged` while the CMS keeps the old image. A record's fields are still the only thing that decides a CMS edit is protected.
+- **The importer always leaves a report.** `migration-import.json` is written next to the bundle rather than in whatever directory the importer was launched from (`WP_MIGRATE_IMPORT_REPORT` overrides it), and a drop file that cannot be read is one reported failure instead of a run that stops before writing anything. The Pruvious importer behaves the same way.
+- **`verify --import-report` sees the supporting records.** Missing media, author and taxonomy records the plan expects are now findings, not silence, and a report whose `summary.planned` disagrees with the records it lists is flagged as `IMPORT_SUMMARY_MISMATCH`.
+- **The WordPress menu becomes an editable collection.** The Payload and Pruvious bundles write a `navigation` collection built from the export's menu tree. Payload uses nested array fields; Pruvious stores child entries as JSON in a text field. Unresolved entries keep the reason a human needs. The static target still renders `Nav.astro`.
+- **Files that are not images travel too.** A content link to an upload the export carries — a PDF, a price list, a zip — is now tracked as a `linked-file` media reference, delivered with the site the way an image is, and, on the CMS path, imported as a media record. It no longer becomes a link that 404s after migration.
+- **The Payload manifest moves to schema `0.11`** for the `navigation` collection in its `collections` block; the Pruvious manifest is `0.11` from the start. The Astro manifest stays `0.9`, and the import report and verification artefact stay `0.9`, because neither changed shape.
+- **What this release does not yet claim.** The Pruvious bundle is generated and unit-tested, but it has **not** been run end to end against a live Pruvious install — that round trip is the next validation gate, exactly as the Payload bundle's was before 0.9.1. The Payload bundle is still verified by `npm run test:payload`, which now also covers the re-run media hash and the navigation collection.
+
 ## [0.10.1] - 2026-10-10
 
 - Runs the generated importer through Payload's CLI so it reads `.env` consistently with the admin app, including the database URL and secret.

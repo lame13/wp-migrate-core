@@ -3,7 +3,7 @@
  * `next`, `nuxt` and `svelte` are declared so the manifest, the report and the
  * CLI can say a target is planned rather than pretend it does not exist.
  */
-export type OutputTarget = "astro" | "payload" | "next" | "nuxt" | "svelte";
+export type OutputTarget = "astro" | "payload" | "pruvious" | "next" | "nuxt" | "svelte";
 
 /**
  * What kind of destination a target is. A static-site target writes pages; a
@@ -169,7 +169,13 @@ export type MediaReferenceKind =
   | "elementor-image"
   | "elementor-background"
   | "html-image"
-  | "featured-image";
+  | "featured-image"
+  /**
+   * A non-image upload a content record links to, such as a PDF inside an
+   * `<a href>`. It is tracked so the file is delivered with the site rather
+   * than left on the source host, and so its download link keeps working.
+   */
+  | "linked-file";
 
 /**
  * `matched` means the export carries a matching attachment item.
@@ -1034,7 +1040,8 @@ export type LaunchFindingCode =
   | "IMPORT_RECORD_FAILED"
   | "IMPORT_RECORD_SKIPPED"
   | "IMPORT_REFERENCE_UNRESOLVED"
-  | "IMPORT_RECORD_UNKNOWN";
+  | "IMPORT_RECORD_UNKNOWN"
+  | "IMPORT_SUMMARY_MISMATCH";
 
 /** Every check the launch gate can take, and whether this run took it. */
 export type VerificationCheckId =

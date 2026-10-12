@@ -74,6 +74,7 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
       applyMediaDelivery,
       mediaDeliveryRecord,
       generatePayloadBundle,
+      generatePruviousBundle,
       htmlToPayloadRichText,
       readImportEvidence,
       importLaunchFindings
@@ -91,6 +92,7 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
     assert.equal(typeof applyMediaDelivery, "function");
     assert.equal(typeof mediaDeliveryRecord, "function");
     assert.equal(typeof generatePayloadBundle, "function");
+    assert.equal(typeof generatePruviousBundle, "function");
     assert.equal(typeof htmlToPayloadRichText, "function");
     assert.equal(typeof readImportEvidence, "function");
     assert.equal(typeof importLaunchFindings, "function");
@@ -285,10 +287,11 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
       generator: { name: "wp-migrate-core", version: metadata.version, target: "payload" },
       generatedAt: "2026-10-07T00:00:00.000Z",
       destination: { target: "payload", kind: "cms", structure: "payload-next" },
-      summary: { planned: 2 },
+      summary: { planned: 3 },
       records: [
         { id: "wp:page:1", sourceId: "wp:page:1", collection: "pages", action: "created", unresolved: [] },
-        { id: "wp:portfolio:20", sourceId: "wp:portfolio:20", collection: "portfolios", action: "created", unresolved: [] }
+        { id: "wp:portfolio:20", sourceId: "wp:portfolio:20", collection: "portfolios", action: "created", unresolved: [] },
+        { id: "wp:menu:primary", sourceId: "wp:menu:primary", collection: "navigation", action: "created", unresolved: [] }
       ]
     })
   );
@@ -303,7 +306,16 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
   assert.deepEqual(imported.launch.findings, []);
   const importFile = JSON.parse(await readFile(join(consumer, "cms-verification.json"), "utf8"));
   assert.equal(importFile.schemaVersion, "0.9");
-  assert.equal(importFile.imports.summary.created, 2);
+  assert.equal(importFile.imports.summary.created, 3);
+
+  runNpm(
+    ["exec", "--offline", "--", "wp-migrate-core", "convert", "cpt.xml", "--out", "pruvious-bundle", "--target", "pruvious"],
+    consumer
+  );
+  const pruviousManifest = JSON.parse(await readFile(join(consumer, "pruvious-bundle/migration/manifest.json"), "utf8"));
+  assert.equal(pruviousManifest.generator.target, "pruvious");
+  await readFile(join(consumer, "pruvious-bundle/import/migrate.mjs"));
+  await readFile(join(consumer, "pruvious-bundle/collections/portfolios.ts"));
 
   context.diagnostic(`Verified wp-migrate-core@${metadata.version}: installed executable, ESM exports, types, content verification, bundled demo, and handoff version.`);
 });

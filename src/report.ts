@@ -352,7 +352,8 @@ const mediaKindLabels: Readonly<Record<MediaReferenceKind, string>> = {
   "elementor-image": "Elementor image",
   "elementor-background": "Elementor background",
   "html-image": "HTML image",
-  "featured-image": "Featured image"
+  "featured-image": "Featured image",
+  "linked-file": "Linked file"
 };
 
 const deliveryStatusLabels: Readonly<Record<MediaDeliveryStatus, string>> = {

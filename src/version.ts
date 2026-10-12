@@ -38,3 +38,27 @@ export const payloadAdminDependencies: Readonly<Record<string, string>> = {
   react: "^19.2.1",
   "react-dom": "^19.2.1"
 };
+
+/**
+ * The Pruvious release the generated Nuxt bundle is written against. Pruvious
+ * tracks the Nuxt minor it integrates with, so both are pinned to the same
+ * range: a bundle that floats them apart can install an incompatible pair.
+ */
+export const pruviousDependency = "~3.9.0";
+
+/**
+ * The Nuxt range the generated Pruvious bundle is written against, kept in
+ * step with `pruviousDependency`.
+ */
+export const pruviousNuxtDependency = "~3.9.0";
+
+/** Pruvious 3.9 imports these directly; keep StarterKit's extensions on its core version. */
+export const pruviousEditorDependencies: Readonly<Record<string, string>> = Object.fromEntries(
+  [
+    "core", "extension-blockquote", "extension-bold", "extension-bullet-list", "extension-code",
+    "extension-code-block", "extension-document", "extension-dropcursor", "extension-gapcursor",
+    "extension-hard-break", "extension-heading", "extension-history", "extension-horizontal-rule",
+    "extension-italic", "extension-list-item", "extension-ordered-list", "extension-paragraph",
+    "extension-strike", "extension-text"
+  ].map((name) => [`@tiptap/${name}`, "2.1.13"])
+);

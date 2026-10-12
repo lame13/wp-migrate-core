@@ -1531,10 +1531,11 @@ function collectMediaReferences(record: ContentRecord, index: MediaAssetIndex): 
     }
 
     const asset = resolveMediaAsset(index, url, candidate.id);
-    const key = asset?.id ?? mediaKey(url) ?? (candidate.id === undefined ? undefined : `id:${candidate.id}`);
-    if (key === undefined) {
+    const assetKey = asset?.id ?? mediaKey(url) ?? (candidate.id === undefined ? undefined : `id:${candidate.id}`);
+    if (assetKey === undefined) {
       return;
     }
+    const key = candidate.kind === "linked-file" ? `linked-file:${assetKey}` : assetKey;
 
     const existing = candidates.get(key);
     // The same asset is often described twice in one record: an attachment ID
@@ -1547,6 +1548,18 @@ function collectMediaReferences(record: ContentRecord, index: MediaAssetIndex): 
       altText: existing?.altText ?? candidate.altText,
       nodeId: existing?.nodeId ?? candidate.nodeId
     });
+  };
+
+  // A non-image upload the content links to — a PDF, a price list, a zip — is
+  // a file the site must keep serving, so it is tracked like an image. Only a
+  // link the export carries an attachment for is recorded: a link to an upload
+  // this export cannot vouch for stays a plain link rather than a false claim
+  // that a file will be delivered.
+  const addFileLink = (href: string, nodeId?: string): void => {
+    if (resolveMediaAsset(index, href, undefined) === undefined) {
+      return;
+    }
+    add({ kind: "linked-file", url: href, nodeId });
   };
 
   const visit = (node: MigrationNode): void => {
@@ -1567,9 +1580,15 @@ function collectMediaReferences(record: ContentRecord, index: MediaAssetIndex): 
           nodeId: node.id
         });
       }
+      for (const href of scanHtmlFileLinks(html)) {
+        addFileLink(href, node.id);
+      }
     }
   };
 
+  for (const href of scanHtmlFileLinks(record.rawContent)) {
+    addFileLink(href);
+  }
   for (const node of record.nodes) {
     visit(node);
   }
@@ -1583,8 +1602,18 @@ function collectMediaReferences(record: ContentRecord, index: MediaAssetIndex): 
   for (const candidate of candidates.values()) {
     const asset = resolveMediaAsset(index, candidate.url, candidate.id);
     const altText = firstFilled(candidate.altText, asset?.altText);
+    // A linked file is not an image, so it never needs alt text: it is matched
+    // when the export carries it, and out of the export otherwise.
     const status: MediaReferenceStatus =
-      asset === undefined ? "not-in-export" : altText === undefined ? "missing-alt-text" : "matched";
+      candidate.kind === "linked-file"
+        ? asset === undefined
+          ? "not-in-export"
+          : "matched"
+        : asset === undefined
+          ? "not-in-export"
+          : altText === undefined
+            ? "missing-alt-text"
+            : "matched";
 
     references.push({
       id: `${record.sourceId}:media:${references.length + 1}`,
@@ -1702,6 +1731,32 @@ function scanHtmlImages(html: string): Array<{ readonly url: string; readonly al
   }
 
   return images;
+}
+
+/**
+ * Anchor targets that point at a file under the uploads directory. The check
+ * is deliberately narrow — a link is only a candidate when its path sits in
+ * `/wp-content/uploads/` — so navigation and page links are never mistaken
+ * for deliverable files.
+ */
+function scanHtmlFileLinks(html: string): readonly string[] {
+  const links: string[] = [];
+  const pattern = /<a\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(html)) !== null) {
+    const href = readHtmlAttribute(match[0], "href");
+    if (href === undefined || isIgnoredMediaUrl(href)) {
+      continue;
+    }
+    const path = mediaPath(href);
+    if (path === undefined || !path.toLowerCase().startsWith("/wp-content/uploads/")) {
+      continue;
+    }
+    links.push(href);
+  }
+
+  return links;
 }
 
 export function readHtmlAttribute(tag: string, name: string): string | undefined {
