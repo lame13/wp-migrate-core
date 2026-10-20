@@ -42,11 +42,10 @@ import type { OutputTarget } from "./types.js";
 /**
  * What this package promises about its surface. `stable` means the exported
  * names are covered by semantic versioning; the generators' file formats are
- * versioned separately by `artifactContracts`. This release is `pre-release`:
- * the surface is already frozen and test-enforced, and 1.0.0 is what turns the
- * freeze into a published promise.
+ * versioned separately by `artifactContracts`. This release is `stable`: the
+ * surface frozen in 0.12.0 is now the published 1.0 promise.
  */
-export const apiStability = "pre-release" as const;
+export const apiStability = "stable" as const;
 
 /** The contract revision this release implements: the 1.0 surface, frozen early. */
 export const apiContractVersion = "1.0" as const;
@@ -70,7 +69,10 @@ export type ArtifactId =
   | "pruviousDrop"
   | "migrationConfig"
   | "importReport"
-  | "verification";
+  | "verification"
+  | "aiRun"
+  | "aiSuggestions"
+  | "decisions";
 
 /**
  * One artifact's contract: where it lives, which `schemaVersion` it carries,
@@ -227,6 +229,27 @@ export const artifactContracts: readonly ArtifactContract[] = [
     schemaVersion: "0.9",
     destinations: [],
     summary: "The launch gate: content, media, links, canonical, robots, sitemap, delivery and import."
+  },
+  {
+    id: "aiRun",
+    file: "migration/ai/<job>/run.json",
+    schemaVersion: "0.1",
+    destinations: [],
+    summary: "One assist run: endpoint host, model, prompt version, token usage, cache and rejected items."
+  },
+  {
+    id: "aiSuggestions",
+    file: "migration/ai/<job>/suggestions.json",
+    schemaVersion: "0.1",
+    destinations: [],
+    summary: "The reviewable suggestions one assist job produced, with confidence and provenance."
+  },
+  {
+    id: "decisions",
+    file: "wp-migrate-core.decisions.json",
+    schemaVersion: "0.1",
+    destinations: [],
+    summary: "Accepted alt text, routes, mappings and content patches that convert and verify apply."
   }
 ];
 

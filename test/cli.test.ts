@@ -103,7 +103,7 @@ test("help and version work without reading an export or creating output", async
   const helpCases = [[], ["help"], ["--help"], ["-h"]];
   const versionCases = [["--version"], ["-v"]];
 
-  for (const command of ["inspect", "convert", "report", "demo"]) {
+  for (const command of ["inspect", "convert", "report", "demo", "assist"]) {
     helpCases.push([command, "--help"], [command, "-h"], [command, "missing.xml", "--help"]);
     versionCases.push([command, "--version"], [command, "-v"]);
   }
@@ -150,6 +150,28 @@ test("argument errors take precedence over reading an input file", async (contex
     assert.doesNotMatch(result.stderr, /ENOENT/);
   }
 
+  assert.deepEqual(await readdir(workspace), []);
+});
+
+test("assist flags are scoped to the command that uses them", async (context) => {
+  const workspace = await mkdtemp(join(tmpdir(), "wp-migrate-core-cli-assist-flags-"));
+  context.after(() => rm(workspace, { recursive: true, force: true }));
+  const cases = [
+    { args: ["assist"], error: "assist needs a plan directory" },
+    { args: ["assist", "plan", "--job", "repair"], error: "pass --export" },
+    { args: ["assist", "plan", "--job", "triage", "--accept", "alt-text"], error: "--accept belongs to assist apply" },
+    { args: ["assist", "plan", "--job", "triage", "--config", "x.json"], error: "not the migration --config" },
+    { args: ["assist", "apply", "suggestions.json", "--job", "triage"], error: "belong to an assist run" },
+    { args: ["convert", demoFixturePath, "--out", "site", "--job", "triage"], error: "only supported by assist" },
+    { args: ["demo", "--decisions", "decisions.json"], error: "only supported by inspect" }
+  ];
+
+  for (const { args, error } of cases) {
+    const result = runCli(args, workspace);
+    assert.equal(result.error, undefined, JSON.stringify(args));
+    assert.equal(result.status, 1, JSON.stringify(args));
+    assert.ok(result.stderr.includes(error), result.stderr);
+  }
   assert.deepEqual(await readdir(workspace), []);
 });
 

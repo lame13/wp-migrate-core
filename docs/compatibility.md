@@ -1,10 +1,9 @@
-# What 1.0 will promise
+# What 1.0 promises
 
-This release is not 1.0 yet, so it does not claim 1.0's stability. It does
-something more useful than claiming it: it writes the promise down, makes it
-executable, and then says plainly which parts of the tool are inside it.
-`apiStability` reports `pre-release` until `apiStability` says `stable`, which
-is the release that turns these rules into a published guarantee.
+This is 1.0.0. `apiStability` reports `stable`: the exported names, the migration
+config format, the artifact contracts and the destination registry below are
+the published guarantee. The assist layer has its own config and artifact
+versions, documented in [ai.md](ai.md), and does not move the migration config.
 
 ## In the contract
 
@@ -15,7 +14,7 @@ is the release that turns these rules into a published guarantee.
 | **The migration config** | Every setting, its type and its meaning. The parser refuses an unknown setting rather than ignoring it, and `migrationConfigSchemaVersion` names the format. | `test/contracts.test.ts` checks the generated JSON Schema against the parser's own key lists. |
 | **Artifact files** | Each generated file carries its own `schemaVersion`, listed in [artifacts.md](artifacts.md). The shape only changes when that number changes. | The same test generates a handoff for every static destination and checks what was written. |
 | **Destinations** | `targetDefinitions`, `targetAdapters` and `targetRecords` describe every destination — its kind, its label, whether this release can write it, and where its preview server answers. | `src/targets.ts` is the only registry the CLI, the manifest, the report and the checks read. |
-| **The no-network rule** | Migration commands read local files. They do not fetch a URL, do not touch a database, and do not modify WordPress. The generated importer is the only thing that talks to a database, and it is yours to run. | The CLI refuses a URL where it wants a file, and the tests exercise the commands with local files only. |
+| **The no-network rule** | Migration commands read local files. They do not fetch a URL, do not touch a database, and do not modify WordPress. `assist` is an explicit exception: it talks only to the endpoint in `wp-migrate-core.ai.json`, only when invoked, and writes suggestions for review. The generated importer is the only thing that talks to a database, and it is yours to run. | The CLI refuses a URL where it wants a file, the tests exercise migration commands with local files only, and assist tests use a localhost mock endpoint. |
 
 ## Outside the contract
 
@@ -34,6 +33,10 @@ Being explicit about this matters as much as the list above:
 - **`--json` field-by-field stability beyond the documented fields.** The
   documents are for machines, and they may gain fields. A field that is removed
   or changes meaning follows the same deprecation rule.
+- **Prompt text, model choice and suggestion quality.** The assist config and
+  suggestion artifacts carry their own `0.1` schema versions, but prompts and
+  rankings may improve in a minor release. Accepted decisions are the stable
+  input to the migration commands; a decision file that parses keeps applying.
 
 ## The deprecation rule
 

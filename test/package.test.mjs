@@ -100,6 +100,9 @@ test("the npm tarball installs and runs outside the checkout", async (context) =
 
   const help = runNpm(["exec", "--offline", "--", "wp-migrate-core", "--help"], consumer);
   assert.match(help, /wp-migrate-core verify <export\.xml> --html-dir/);
+  assert.match(help, /wp-migrate-core assist <plan-dir>/);
+  const aiSchema = runNpm(["exec", "--offline", "--", "wp-migrate-core", "schema", "--ai"], consumer);
+  assert.match(aiSchema, /wp-migrate-core AI assist config/);
 
   const verificationText = "This migrated page contains enough original words to verify that its content arrived in the built site successfully.";
   await writeFile(join(consumer, "verify.xml"), `<rss><channel><link>https://example.invalid/</link><item>

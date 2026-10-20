@@ -86,7 +86,7 @@ test("every artifact a handoff writes carries the version the registry declares"
     }
   }
 
-  // The three artifacts no destination writes, checked where they are produced.
+  // The artifacts no destination writes, checked where they are produced.
   assert.equal(artifactSchemaVersions.migrationConfig, migrationConfigSchemaVersion);
   assert.equal(artifactSchemaVersions.importReport, importReportSchemaVersion);
   const payloadImporter = await readFile(join(directories.get("payload") as string, "import/import.mjs"), "utf8");
@@ -160,7 +160,7 @@ test("the artifact registry and its documentation describe the same files", asyn
   assert.match(compatibility, /api\.md/);
   assert.match(compatibility, /artifacts\.md/);
   assert.equal(apiContractVersion, "1.0");
-  assert.equal(apiStability, "pre-release", "1.0.0 is the release that flips this to stable");
+  assert.equal(apiStability, "stable", "1.0.0 is the release that flips this to stable");
 });
 
 test("the published config schema accepts exactly what the parser accepts", () => {

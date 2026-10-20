@@ -1207,8 +1207,7 @@ function augmentImage(
   let described = tag;
   if (
     !/\s+alt(?:\s*=|[\s/>])/i.test(described) &&
-    asset.altText !== undefined &&
-    asset.altText.trim() !== ""
+    asset.altText !== undefined
   ) {
     described = addHtmlAttribute(described, "alt", asset.altText);
   }
@@ -1226,7 +1225,7 @@ function augmentImage(
 function imageAttributes(entry: MediaDeliveryEntry | undefined, media: MediaRenderer): string {
   const asset = entry?.assetId === undefined ? undefined : media.assets.get(entry.assetId);
   const attributes: string[] = [];
-  if (asset?.altText !== undefined && asset.altText.trim() !== "") {
+  if (asset?.altText !== undefined) {
     attributes.push(` alt="${escapeHtmlAttribute(asset.altText)}"`);
   }
   if (asset?.width !== undefined) {
@@ -1258,7 +1257,7 @@ function replaceUnsupportedShortcodes(value: string): string {
     .replace(/\[\/[a-z][a-z0-9_-]*\]/gi, "");
 }
 
-function hasUnsafeRawMarkup(value: string): boolean {
+export function hasUnsafeRawMarkup(value: string): boolean {
   const decoded = decodeHtmlEntitiesForSafety(value);
 
   return (

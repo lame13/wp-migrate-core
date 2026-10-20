@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-20
+
+The repair queue gets an optional, bring-your-own-key AI path — and the
+contract turns stable. The migration engine is unchanged in its central claim:
+it reads local files, writes local files, and every change is traceable to the
+export or an accepted decision.
+
+- **`assist` is a separate, opt-in command.** It reads the plan artifacts and writes `run.json`, `suggestions.json`, `review.html` and, for triage, `brief.md`. It never edits generated output. `assist apply` writes `wp-migrate-core.decisions.json`; `inspect`, `convert`, `report` and `verify` read it with `--decisions`. The migration commands still make no network requests.
+- **Triage reads the finding queue, not the export.** It groups findings, writes a ranked work order and a client-readable brief, and sends no post bodies. This is the first job because it proves the provider, redaction, budgets and artifacts with the smallest possible payload.
+- **Alt text is deduplicated per asset and reviewed.** Only an absent `alt` is filled; an existing `alt=""` is left alone. One image referenced from twenty pages gets one suggestion. Text context comes first, so the job does not require a vision-capable endpoint.
+- **Shortcode and widget mapping is type-level.** Unsupported shortcodes, Elementor widgets and dynamic Gutenberg blocks get one proposed strategy: static fallback, component, removal or deliberate block. Static fallbacks and removals can be applied by `convert`; component names remain developer work.
+- **Route matching uses embeddings, with a hard constraint.** It may only choose a route the plan already has, and only above the configured score. A weak match produces no suggestion rather than an invented URL.
+- **Content repair is last and parser-gated.** It requires `--export`, fixes malformed block markup, and rejects any patch that introduces a new finding code or removes too much page text. `convert --decisions` runs the same validation before applying a hand-edited patch.
+- **The key stays in the environment.** `wp-migrate-core.ai.json` names an environment variable through `apiKeyEnv`; literal `Authorization` headers and remote plain-http endpoints are refused. The provider is a native-fetch OpenAI-compatible client with JSON-schema handling, capability fallbacks, retries, timeouts, request/token limits and a local response cache. `schema --ai` prints the config schema.
+- **The 1.0 promise is now published.** `apiStability` is `stable`. The migration config stays at `0.7`; AI settings and artifacts have their own `0.1` schema versions, so the frozen migration format did not move.
+- **New tests cover the seam.** A mock provider exercises config validation, bearer/key handling, triage, alt-text deduplication, shortcode application, route constraints and parser-gated repair. A localhost mock endpoint runs the CLI end to end through `assist`, `assist apply` and `convert --decisions`.
+
 ## [0.12.0] - 2026-10-12
 
 Four destinations. The boundary between "the export" and "what the export becomes" is now a public one: a third static renderer arrives, the remaining parked targets say what they are waiting for, and the promises this project makes — its exported names, its file formats, its destinations — are written down and checked by the test suite rather than by the changelog.

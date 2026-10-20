@@ -9,4 +9,5 @@ migration-report.html
 .env.*
 !.env.example
 .DS_Store
+.wp-migrate-core/
 npm-debug.log*

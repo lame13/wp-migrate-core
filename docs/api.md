@@ -253,7 +253,7 @@ how the three implemented ones differ.
 | `renderReport` | The standalone HTML report. |
 | `writeReport` | Write it, optionally refusing to replace an existing file. |
 | `WriteReportOptions` | `noClobber`. |
-| `apiStability` | `pre-release` until 1.0.0 declares the surface stable. |
+| `apiStability` | `stable` from 1.0.0: the exported surface is covered by semantic versioning. |
 | `apiContractVersion` | The contract revision this release implements. |
 | `artifactContracts` | Every generated file, its `schemaVersion`, and which destinations write it. |
 | `artifactSchemaVersions` | The same, keyed by artifact id. |

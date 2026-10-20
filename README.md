@@ -10,7 +10,9 @@ After a build, `verify` checks for missing or substantially changed content, and
 
 Astro, Next.js, Payload and Pruvious are the supported destinations; Nuxt and Svelte are declared and refused with a reason. You'll still need to rebuild your theme, forms and plugin behavior, bring over your media, and review the generated output. Where WordPress served a page but this tool cannot, the repair queue says so rather than dropping it.
 
-The reference documentation is in [`docs/`](docs/): the [API reference](docs/api.md), the [artifact catalog](docs/artifacts.md) with every file's own schema version, the [compatibility contract](docs/compatibility.md) that says what is stable, the [destination guide](docs/destinations.md) and the [fixture corpus](docs/corpus.md).
+The reference documentation is in [`docs/`](docs/): the [API reference](docs/api.md), the [artifact catalog](docs/artifacts.md) with every file's own schema version, the [AI assist guide](docs/ai.md), the [compatibility contract](docs/compatibility.md) that says what is stable, the [destination guide](docs/destinations.md) and the [fixture corpus](docs/corpus.md).
+
+The repair queue is also the starting point for an optional **AI assist** layer: bring an OpenAI-compatible endpoint and your own key, and turn the findings into a prioritized work order, alt-text drafts, shortcode mappings and constrained route suggestions. The model proposes; `assist apply` records what you accept; the deterministic migration commands apply it. See [AI assist](docs/ai.md).
 
 ## Try it with the demo
 
@@ -82,6 +84,59 @@ Conversion writes one content collection per post type in the export, such as `s
 | `public/sitemap.xml` | List the generated routes, using the configured site URL or the URL from the export. |
 
 The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The archive and menu inventories use `"0.8"`. The Astro manifest uses `"0.9"`, the Next.js manifest and its `content/routes.json` use `"0.12"`, the Payload and Pruvious manifests use `"0.11"` (their destination block names the config file, the admin host and the collections), and the verification artefact uses `"0.9"` (the import evidence). These describe each file's data format separately from the npm package version, and [docs/artifacts.md](docs/artifacts.md) is the full catalog.
+
+## AI assist: bring your own key
+
+`assist` reads the plan artifacts and writes suggestions for review. It is the
+only command that talks to the network, and only when you invoke it. The key is
+read from the environment variable named in `wp-migrate-core.ai.json`; it is
+never written to a config, an artifact or a generated site.
+
+```json
+{
+  "schemaVersion": "0.1",
+  "provider": {
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "your-chat-model",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "embeddingsModel": "your-embedding-model"
+  }
+}
+```
+
+```bash
+export OPENAI_API_KEY="..."
+npx wp-migrate-core inspect export.xml --out migration-plan
+npx wp-migrate-core assist migration-plan --job triage
+npx wp-migrate-core assist migration-plan --job alt-text
+npx wp-migrate-core assist apply migration-plan/ai/alt-text/suggestions.json
+npx wp-migrate-core convert export.xml --out new-site \
+  --uploads ../wordpress/wp-content/uploads \
+  --decisions wp-migrate-core.decisions.json
+```
+
+The jobs are:
+
+| Job | What it proposes |
+| --- | --- |
+| `triage` | A ranked work order and a client-readable `brief.md` from the finding queue. It does not read post bodies. |
+| `alt-text` | One alt-text decision per asset, deduplicated by asset id and only where alt text is absent. |
+| `shortcodes` | A static fallback, component name, removal or deliberate block for unsupported shortcodes, Elementor widgets and dynamic Gutenberg blocks. |
+| `routes` | A target chosen only from routes the plan already has, using embeddings and a score threshold. |
+| `repair` | A content patch for malformed block markup, accepted only if it passes the parser with no new findings. |
+
+`assist apply` accepts alt text, routes and shortcode mappings by default.
+Content repair requires `--accept repair`. `--decisions` also works with
+`inspect`, `report` and `verify`, so a preview and a launch check can use the
+same accepted decisions.
+
+Bring-your-own-key also means bring-your-own-endpoint: OpenRouter, Groq,
+Together, vLLM, Ollama, LM Studio and other compatible servers work through
+`baseUrl`, `model` and optional `headers`. Triage sends finding metadata, not
+post bodies. Alt text sends asset titles, dimensions and the pages that
+reference them. Repair is the only job that sends page content, and it says so
+in `--dry-run`. The full configuration, limits, artifacts and guardrails are in
+[docs/ai.md](docs/ai.md).
 
 ## The Next.js destination
 
@@ -459,13 +514,16 @@ wp-migrate-core verify <export.xml> --routelint-report routelint.json
 wp-migrate-core verify <export.xml> --html-dir dist --ssrwire-report ssrwire-preview.json
 wp-migrate-core verify <export.xml> --html-dir dist --ssrwire-report ssrwire-preview.json --ssrwire-baseline ssrwire-source.json
 wp-migrate-core verify <export.xml> --import-report migration-import.json
+wp-migrate-core assist <plan-dir> --job triage|alt-text|shortcodes|routes [--ai-config ai.json]
+wp-migrate-core assist <plan-dir> --job repair --export export.xml [--ai-config ai.json]
+wp-migrate-core assist apply <suggestions.json> [--accept alt-text,routes,shortcodes,repair]
 wp-migrate-core demo [--out wp-migrate-core-demo] [--live-urls sitemap.xml]
-wp-migrate-core schema [--out wp-migrate-core.config.schema.json]
+wp-migrate-core schema [--ai] [--out wp-migrate-core.config.schema.json]
 wp-migrate-core --version
 wp-migrate-core inspect --help
 ```
 
-`report` writes just the HTML report. `verify` compares a built site, a saved RouteLint report, or a CMS import report with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `schema` prints the JSON Schema for the migration config, which editors can use for completion and CI can use to check a config before a run. `--config` applies a migration config to any command. `--uploads`, `--media-base` and `--copy-unused-media` apply to `convert`, `demo` and `verify`; verification only reads the files. `--publish-ready` belongs to `convert` and `demo`. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `--target` takes `astro`, `next`, `payload` or `pruvious`; `nuxt` and `svelte` are declared, planned targets and currently return an error that names the reasons.
+`report` writes just the HTML report. `verify` compares a built site, a saved RouteLint report, or a CMS import report with the export, and adds delivery evidence when you give it an SSRWire audit. `demo` runs inspection and conversion using the bundled fixture, including its small uploads directory. `schema` prints the JSON Schema for the migration config, which editors can use for completion and CI can use to check a config before a run; `schema --ai` prints the assist schema. `--config` applies a migration config to any migration command. `assist` reads its own `--ai-config`; `assist apply` writes a decisions file that `--decisions` gives to `inspect`, `convert`, `report` or `verify`. `--uploads`, `--media-base` and `--copy-unused-media` apply to `convert`, `demo` and `verify`; verification only reads the files. `--publish-ready` belongs to `convert` and `demo`. `--help` / `-h` works after any command; `--version` / `-v` prints the installed version. `--target` takes `astro`, `next`, `payload` or `pruvious`; `nuxt` and `svelte` are declared, planned targets and currently return an error that names the reasons.
 
 | Option | What it does |
 | --- | --- |
@@ -482,6 +540,13 @@ wp-migrate-core inspect --help
 | `--ssrwire-report <file>` | Adds delivery evidence from a saved SSRWire JSON audit: response status, metadata and crawler delivery per planned route. |
 | `--ssrwire-baseline <file>` | Compares that audit with one taken before the migration. The two reports pair up on their target ids. |
 | `--import-report <file>` | Reads the `migration-import.json` a generated CMS importer wrote and checks the imported records against the plan. It can stand alone, or join a build check. |
+| `--decisions <file>` | Applies accepted AI decisions to `inspect`, `convert`, `report` or `verify`. Config routes win over a suggestion when both decide the same key. |
+| `--job <name>` | Runs one assist job: `triage`, `alt-text`, `shortcodes`, `routes` or `repair`. |
+| `--ai-config <file>` | Reads the endpoint, model, limits and privacy settings for `assist`. The key is named by `provider.apiKeyEnv`, never stored in this file. |
+| `--export <file>` | Gives `--job repair` the export it needs to read page bodies. |
+| `--accept <list>` | `assist apply` only: comma-separated `alt-text`, `routes`, `shortcodes` and `repair`. The default excludes `repair`. |
+| `--dry-run` | `assist` only: prints the destination, privacy mode and input counts without a request or output file. |
+| `--force` | `assist` only: replaces an existing AI artifact or decisions file. |
 | `--json` | Prints one JSON result instead of the terminal summary, with scan settings, counts for every inventory, sanitized issues, output paths, and a `failed` flag. Full inventories are in the output files. |
 | `--fail-on none\|warning\|blocker` | Exits unsuccessfully for findings at or above the chosen severity, after writing the output. Defaults to `none`. |
 
@@ -518,7 +583,7 @@ SSRWire audits capture one point in time using crawler user-agent strings. They 
 
 ## Your data stays local
 
-The migration commands read your export, migration config, saved sitemaps, uploads directory, build output and reports, then write local files. They make no network requests and don't change WordPress or your hosting configuration: a media base URL is written into the generated markup, never fetched. Installing dependencies uses npm, and running the generated SSRWire scripts makes requests to the sites listed in their check files.
+The migration commands read your export, migration config, saved sitemaps, uploads directory, build output and reports, then write local files. They make no network requests and don't change WordPress or your hosting configuration: a media base URL is written into the generated markup, never fetched. The optional `assist` command is the exception: it talks only to the endpoint named in `wp-migrate-core.ai.json`, only when you run it. Triage sends finding metadata, not post bodies; `assist --dry-run` shows the job inputs and destination before a request. Installing dependencies uses npm, and running the generated SSRWire scripts makes requests to the sites listed in their check files.
 
 Exports and generated files can contain private content, names, URLs and post metadata. Review them before committing, sharing or deploying them. Plan, report and inventory URLs omit credentials and query strings; link fields retain fragments. Generated content can still contain source markup and link query strings, so these files are not anonymized. Media delivery omits local directory paths, but preserves the files themselves, including any embedded metadata.
 

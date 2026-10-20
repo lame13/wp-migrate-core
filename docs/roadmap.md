@@ -16,6 +16,12 @@ Next.js arrived, the exported surface and every artifact version became a
 frozen, test-enforced contract, the corpus arrived, and the last repeatable
 integration check — Pruvious against a real Nuxt app — closed.
 
+1.0.0 adds the optional assist layer without moving the migration contract:
+the repair queue becomes a triage brief, alt-text drafts, shortcode mappings,
+constrained route suggestions and parser-checked content repairs. The key is
+the user's, the endpoint is theirs, and accepted decisions are a local file the
+deterministic commands read.
+
 ## The CMS destination path
 
 CMS exports solve a migration problem a static handoff does not: people
@@ -169,6 +175,31 @@ proves they are worth making.
 - **Findings stopped naming a renderer**: "cannot be executed by Astro" became
   "cannot be executed by the generated site".
 
+## 1.0.0 — shipped
+
+The contract release is also the release that gives the repair queue a
+reviewable AI path.
+
+- **`assist` is separate on purpose.** It reads plan artifacts, proposes
+  decisions, and writes `run.json`, `suggestions.json`, `review.html` and — for
+  triage — `brief.md`. It never edits generated output directly. `assist apply`
+  writes `wp-migrate-core.decisions.json`; `convert`, `verify`, `inspect` and
+  `report` apply it through `--decisions`.
+- **Five jobs, narrow scopes.** Triage reads findings, not post bodies. Alt
+  text deduplicates by asset id and only fills absent alt text. Shortcodes and
+  widgets map by type. Route matching uses embeddings but may only pick routes
+  the plan already has. Repair is last, needs `--export`, and a patch is
+  rejected if it introduces any new finding code.
+- **Bring-your-own-key is real.** The AI config names an environment variable;
+  a literal `Authorization` header is refused, remote plain `http` is refused,
+  and the key never reaches an artifact. The provider is a small native-fetch
+  OpenAI-compatible client with retries, timeouts, capability flags, token and
+  request limits, and a local response cache.
+- **1.0.0 is stable.** `apiStability` flipped from `pre-release` to `stable`,
+  and the assist commands and artifacts carry their own `0.1` schema versions.
+  The migration config stays at `0.7`, because the AI settings live in a
+  separate file rather than moving a frozen format.
+
 ## The CI decision
 
 **The round trips do not run on every pull request.** They run on a weekly
@@ -227,7 +258,8 @@ reporting rather than movement.
 ## What stays true
 
 - **No network** in migration commands. The bundle is files; the importer is
-  the user's program talking to their database.
+  the user's program talking to their database. `assist` is the explicit,
+  opt-in exception: it talks only to the endpoint the user configures.
 - **Reviewable before it runs.** The bundle can be read, diffed and edited
   before anything touches a CMS.
 - **No invented content.** Every generated record is traceable to the export, a

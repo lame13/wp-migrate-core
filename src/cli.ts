@@ -1,8 +1,22 @@
 #!/usr/bin/env node
 
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  applyDecisionsToProject,
+  decisionCount,
+  decisionsFromSuggestions,
+  loadDecisions,
+  loadSuggestionsDocument,
+  mergeDecisionRoutes,
+  type AcceptedDecision
+} from "./ai/apply.js";
+import { renderDecisionsDocument } from "./ai/artifacts.js";
+import { aiConfigJsonSchema, aiConfigFileName, loadAiConfig } from "./ai/config.js";
+import { runAssist } from "./ai/run.js";
+import { AI_JOBS } from "./ai/config.js";
+import type { AiJob } from "./ai/types.js";
 import { assertTargetEnabled, generateForTarget, targetAvailability } from "./adapters.js";
 import type { DestinationGenerateOptions } from "./adapters.js";
 import { defaultMigrationConfigFileName, loadMigrationConfig } from "./config.js";
@@ -38,6 +52,7 @@ import type {
 
 interface ParsedOptions {
   readonly command: string;
+  readonly assistMode: "run" | "apply";
   readonly help: boolean;
   readonly version: boolean;
   readonly input?: string;
@@ -57,6 +72,14 @@ interface ParsedOptions {
   readonly copyUnusedMedia?: boolean;
   readonly publishReady?: boolean;
   readonly json: boolean;
+  readonly aiSchema: boolean;
+  readonly job?: AiJob;
+  readonly aiConfigPath?: string;
+  readonly decisionsPath?: string;
+  readonly exportPath?: string;
+  readonly accept: readonly AcceptedDecision[];
+  readonly dryRun: boolean;
+  readonly force: boolean;
   /** Absent when the caller did not ask for a gate, so config can set one. */
   readonly failOn?: FailureThreshold;
 }
@@ -71,6 +94,7 @@ function usage(): string {
 Usage:
   wp-migrate-core inspect <export.xml> [--out migration-plan] [--target astro]
   wp-migrate-core convert <export.xml> --out <new-site> [--target astro|next|payload|pruvious]
+  wp-migrate-core convert <export.xml> --out <new-site> --decisions <decisions.json>
   wp-migrate-core convert <export.xml> --out <new-site> --uploads <uploads-dir>
   wp-migrate-core convert <export.xml> --out <new-site> --media-base <https://cdn.example.com/uploads>
   wp-migrate-core report <export.xml> [--out migration-report.html]
@@ -79,8 +103,11 @@ Usage:
   wp-migrate-core verify <export.xml> --import-report migration-import.json
   wp-migrate-core verify <export.xml> --html-dir <built-site> --ssrwire-report <audit.json>
   wp-migrate-core verify <export.xml> --html-dir <built-site> --ssrwire-report <audit.json> --ssrwire-baseline <audit.json>
+  wp-migrate-core assist <plan-dir> --job <triage|alt-text|shortcodes|routes|repair> [--out <ai-dir>] [--ai-config <file>]
+  wp-migrate-core assist <plan-dir> --job repair --export <export.xml> [--ai-config <file>]
+  wp-migrate-core assist apply <suggestions.json> [--out <decisions.json>] [--accept alt-text,routes,shortcodes,repair]
   wp-migrate-core demo [--out wp-migrate-core-demo]
-  wp-migrate-core schema [--out wp-migrate-core.config.schema.json]
+  wp-migrate-core schema [--ai] [--out wp-migrate-core.config.schema.json]
 
 Options:
   --help, -h            show help, including after a command
@@ -118,6 +145,15 @@ Options:
                         (verify). It can stand alone, or join a build check.
   --json                print one JSON document instead of the summary
   --fail-on <severity>  fail on warning or blocker; none disables the gate (default)
+  --decisions <file>    apply accepted decisions before inspect, convert, report or verify
+  --job <name>          assist job: triage, alt-text, shortcodes, routes or repair
+  --ai-config <file>    the AI config; the key is named by environment variable,
+                        never stored in this file (default: ${aiConfigFileName})
+  --export <file>       the WordPress export repair reads for page bodies
+  --accept <list>       assist apply: comma-separated alt-text, routes, shortcodes
+                        and repair; default alt-text,routes,shortcodes
+  --dry-run             assist: show the destination and inputs; no request or file
+  --force               assist: replace an existing AI artifact or decisions file
 
 Targets:
   astro    implemented, static site
@@ -134,7 +170,18 @@ and a required action rather than an invented page.
 
 schema prints the JSON Schema for ${defaultMigrationConfigFileName}, generated
 from the settings this release accepts. Editors can use it for completion and
-CI can use it to check a config before a run.
+CI can use it to check a config before a run. Add --ai to print the schema for
+${aiConfigFileName} instead.
+
+assist is the one command that talks to the network, and only when you invoke
+it. It reads the plan artifacts, sends the smallest useful payload to the
+OpenAI-compatible endpoint named in the AI config, and writes suggestions for
+review. Triage reads the finding queue, not post bodies. The migration commands
+inspect, convert, report and verify remain local and make no network requests.
+Accept suggestions with \`assist apply\`; pass the resulting decisions file to
+convert or verify with --decisions. The key is read from the environment
+variable named by \`provider.apiKeyEnv\`, or from WPMC_AI_API_KEY; it is never
+written to an artifact.
 
 --live-urls reads a local file. Save the sitemap yourself; this tool makes no
 network requests.
@@ -154,8 +201,9 @@ badly, and any delivery or metadata regression against a baseline audit.`;
 
 function parseArguments(argv: readonly string[]): ParsedOptions {
   const command = argv[0] ?? "help";
+  const assistMode = command === "assist" && argv[1] === "apply" ? "apply" : "run";
   if (
-    !["inspect", "convert", "report", "verify", "demo", "schema", "help", "--help", "-h", "--version", "-v"].includes(
+    !["inspect", "convert", "report", "verify", "demo", "schema", "assist", "help", "--help", "-h", "--version", "-v"].includes(
       command
     )
   ) {
@@ -181,9 +229,17 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
   let copyUnusedMedia = false;
   let publishReady = false;
   let json = false;
+  let aiSchema = false;
+  let job: AiJob | undefined;
+  let aiConfigPath: string | undefined;
+  let decisionsPath: string | undefined;
+  let exportPath: string | undefined;
+  const accept: AcceptedDecision[] = [];
+  let dryRun = false;
+  let force = false;
   let failOn: FailureThreshold | undefined;
 
-  for (let index = 1; index < argv.length; index += 1) {
+  for (let index = assistMode === "apply" ? 2 : 1; index < argv.length; index += 1) {
     const value = argv[index];
     if (value === "--help" || value === "-h") {
       help = true;
@@ -238,6 +294,45 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
       index += 1;
     } else if (value === "--json") {
       json = true;
+    } else if (value === "--ai") {
+      aiSchema = true;
+    } else if (value === "--job") {
+      const candidate = optionValue(value, argv[index + 1]);
+      if (!AI_JOBS.includes(candidate as AiJob)) {
+        throw new Error(`Unknown assist job: ${candidate}. Use ${AI_JOBS.join(", ")}.`);
+      }
+      job = candidate as AiJob;
+      index += 1;
+    } else if (value === "--ai-config") {
+      aiConfigPath = optionValue(value, argv[index + 1]);
+      index += 1;
+    } else if (value === "--decisions") {
+      decisionsPath = optionValue(value, argv[index + 1]);
+      index += 1;
+    } else if (value === "--export") {
+      exportPath = optionValue(value, argv[index + 1]);
+      index += 1;
+    } else if (value === "--accept") {
+      const candidate = optionValue(value, argv[index + 1]);
+      for (const entry of candidate.split(",")) {
+        const trimmed = entry.trim();
+        if (
+          trimmed !== "alt-text" &&
+          trimmed !== "routes" &&
+          trimmed !== "shortcodes" &&
+          trimmed !== "repair"
+        ) {
+          throw new Error(
+            `Unknown --accept value: ${trimmed}. Use alt-text, routes, shortcodes or repair.`
+          );
+        }
+        if (!accept.includes(trimmed)) accept.push(trimmed);
+      }
+      index += 1;
+    } else if (value === "--dry-run") {
+      dryRun = true;
+    } else if (value === "--force") {
+      force = true;
     } else if (value === "--out") {
       output = optionValue(value, argv[index + 1]);
       index += 1;
@@ -300,10 +395,61 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
         "--ssrwire-baseline compares two audits. Pass --ssrwire-report for the site you just checked."
       );
     }
+    if (command === "assist") {
+      if (aiSchema) throw new Error("--ai belongs to schema.");
+      if (input === undefined) {
+        throw new Error(
+          assistMode === "apply"
+            ? "assist apply needs a suggestions.json file."
+            : "assist needs a plan directory from inspect or convert."
+        );
+      }
+      if (configPath !== undefined) {
+        throw new Error("assist reads its own settings with --ai-config, not the migration --config.");
+      }
+      if (assistMode === "apply") {
+        if (job !== undefined || aiConfigPath !== undefined || exportPath !== undefined || dryRun) {
+          throw new Error("--job, --ai-config, --export and --dry-run belong to an assist run, not assist apply.");
+        }
+      } else {
+        if (job === undefined) {
+          throw new Error(`assist needs --job ${AI_JOBS.join("|")}.`);
+        }
+        if (accept.length > 0) {
+          throw new Error("--accept belongs to assist apply.");
+        }
+        if (exportPath !== undefined && job !== "repair") {
+          throw new Error("--export is only used by --job repair.");
+        }
+        if (job === "repair" && exportPath === undefined) {
+          throw new Error("--job repair reads page bodies; pass --export <export.xml>.");
+        }
+      }
+    } else {
+      if (job !== undefined || aiConfigPath !== undefined || exportPath !== undefined || dryRun || force) {
+        throw new Error("--job, --ai-config, --export, --dry-run and --force are only supported by assist.");
+      }
+      if (accept.length > 0) {
+        throw new Error("--accept is only supported by assist apply.");
+      }
+      if (
+        decisionsPath !== undefined &&
+        command !== "convert" &&
+        command !== "verify" &&
+        command !== "inspect" &&
+        command !== "report"
+      ) {
+        throw new Error("--decisions is only supported by inspect, convert, report and verify.");
+      }
+      if (aiSchema && command !== "schema") {
+        throw new Error("--ai is only supported by schema.");
+      }
+    }
   }
 
   return {
     command,
+    assistMode,
     help,
     version,
     ...(input === undefined ? {} : { input }),
@@ -323,6 +469,14 @@ function parseArguments(argv: readonly string[]): ParsedOptions {
     ...(copyUnusedMedia ? { copyUnusedMedia } : {}),
     ...(publishReady ? { publishReady } : {}),
     json,
+    aiSchema,
+    ...(job === undefined ? {} : { job }),
+    ...(aiConfigPath === undefined ? {} : { aiConfigPath }),
+    ...(decisionsPath === undefined ? {} : { decisionsPath }),
+    ...(exportPath === undefined ? {} : { exportPath }),
+    accept,
+    dryRun,
+    force,
     ...(failOn === undefined ? {} : { failOn })
   };
 }
@@ -1216,6 +1370,93 @@ async function inspect(
   };
 }
 
+async function resolveAiConfigPath(
+  options: ParsedOptions,
+  planDirectory: string
+): Promise<string> {
+  if (options.aiConfigPath !== undefined) return resolve(options.aiConfigPath);
+  const besidePlan = join(planDirectory, aiConfigFileName);
+  if (await pathExists(besidePlan)) return besidePlan;
+  const inWorkingDirectory = resolve(aiConfigFileName);
+  if (await pathExists(inWorkingDirectory)) return inWorkingDirectory;
+  throw new Error(
+    `assist needs an AI config. Pass --ai-config <file>, or put ${aiConfigFileName} beside the plan or in the working directory.`
+  );
+}
+
+async function runAssistCommand(parsed: ParsedOptions): Promise<void> {
+  const planDirectory = resolve(parsed.input as string);
+  const configPath = await resolveAiConfigPath(parsed, planDirectory);
+  const loaded = await loadAiConfig(configPath);
+  const outputDirectory = resolve(parsed.output ?? join(planDirectory, "ai", parsed.job as AiJob));
+  const result = await runAssist({
+    planDirectory,
+    outputDirectory,
+    job: parsed.job as AiJob,
+    config: loaded.config,
+    ...(parsed.exportPath === undefined ? {} : { exportPath: parsed.exportPath }),
+    ...(parsed.dryRun ? { dryRun: true } : {}),
+    ...(parsed.force ? { force: true } : {})
+  });
+
+  if (parsed.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (result.dryRun) {
+    console.log(result.preview);
+    return;
+  }
+  console.log(`\nAI ${result.job} suggestions: ${result.suggestions}`);
+  console.log(`Review: ${result.review}`);
+  console.log(`Run record: ${result.run}`);
+  if (result.brief !== undefined) console.log(`Brief: ${result.brief}`);
+  console.log(
+    `Usage: ${result.usage.requests} request${result.usage.requests === 1 ? "" : "s"}, ` +
+      `${result.usage.inputTokens} input tokens, ${result.usage.outputTokens} output tokens` +
+      `${result.cacheHits === 0 ? "" : `, ${result.cacheHits} cache hit${result.cacheHits === 1 ? "" : "s"}`}.`
+  );
+  if (result.rejected > 0) {
+    console.log(`${result.rejected} suggestion${result.rejected === 1 ? " was" : "s were"} rejected by validation; see run.json.`);
+  }
+  console.log(
+    `\nNothing has changed yet. Accept what you agree with:\n  wp-migrate-core assist apply ${result.suggestions}`
+  );
+}
+
+async function applyAssistSuggestions(parsed: ParsedOptions): Promise<void> {
+  const suggestionsPath = resolve(parsed.input as string);
+  const document = await loadSuggestionsDocument(suggestionsPath);
+  const accepted = new Set<AcceptedDecision>(
+    parsed.accept.length > 0
+      ? parsed.accept
+      : (["alt-text", "routes", "shortcodes"] as const)
+  );
+  const decisions = decisionsFromSuggestions(document, accepted);
+  const count = decisionCount(decisions);
+  if (count === 0) {
+    throw new Error(
+      "The accepted suggestions contain no decisions to apply. Check --accept, or review the rejected items in run.json."
+    );
+  }
+  const output = resolve(parsed.output ?? "wp-migrate-core.decisions.json");
+  const contents = renderDecisionsDocument(decisions);
+  if (parsed.force) {
+    await writeFile(output, contents, { encoding: "utf8", mode: 0o600 });
+  } else {
+    await writeNewFile(output, contents);
+  }
+  if (parsed.json) {
+    console.log(JSON.stringify({ decisions: output, count }, null, 2));
+    return;
+  }
+  console.log(`\nDecisions: ${output}`);
+  console.log(
+    `${count} accepted decision${count === 1 ? "" : "s"}. Rebuild with:\n` +
+      `  wp-migrate-core convert <export.xml> --out <new-site> --decisions ${output}`
+  );
+}
+
 async function run(): Promise<void> {
   const parsed = parseArguments(process.argv.slice(2));
 
@@ -1233,7 +1474,7 @@ async function run(): Promise<void> {
     // The schema is generated from the parser's own key lists, so it describes
     // exactly the settings this release accepts. Printing it writes nothing;
     // --out writes the file and refuses to replace one that exists.
-    const schema = `${JSON.stringify(migrationConfigJsonSchema, null, 2)}\n`;
+    const schema = `${JSON.stringify(parsed.aiSchema ? aiConfigJsonSchema : migrationConfigJsonSchema, null, 2)}\n`;
     if (parsed.output === undefined) {
       process.stdout.write(schema);
       return;
@@ -1245,6 +1486,15 @@ async function run(): Promise<void> {
     return;
   }
 
+  if (parsed.command === "assist") {
+    if (parsed.assistMode === "apply") {
+      await applyAssistSuggestions(parsed);
+    } else {
+      await runAssistCommand(parsed);
+    }
+    return;
+  }
+
   const demoFixture =
     parsed.command === "demo"
       ? fileURLToPath(new URL("../../fixtures/demo-wordpress.xml", import.meta.url))
@@ -1252,7 +1502,11 @@ async function run(): Promise<void> {
   const inputPath = parsed.input ?? demoFixture;
   const loaded = await loadRunConfig(parsed, inputPath);
   const options = resolveOptions(parsed, loaded);
-  const config = loaded?.config;
+  const decisions =
+    parsed.decisionsPath === undefined
+      ? undefined
+      : (await loadDecisions(parsed.decisionsPath)).decisions;
+  const config = mergeDecisionRoutes(loaded?.config, decisions);
 
   if (options.command === "demo") {
     assertTargetEnabled(options.target);
@@ -1307,11 +1561,13 @@ async function run(): Promise<void> {
   }
 
   const project = await loadProject(options.input, options, config);
+  const decidedProject =
+    decisions === undefined ? project : applyDecisionsToProject(project, decisions);
 
   if (options.command === "inspect") {
     assertTargetEnabled(options.target);
-    const outputs = await inspect(project, options.output ?? "migration-plan");
-    finishCommand(project, options, {
+    const outputs = await inspect(decidedProject, options.output ?? "migration-plan");
+    finishCommand(decidedProject, options, {
       command: "inspect",
       outputs,
       humanLines: [`\nPlan: ${outputs.plan}`, `Report: ${outputs.report}`]
@@ -1321,8 +1577,8 @@ async function run(): Promise<void> {
 
   if (options.command === "report") {
     const output = resolve(options.output ?? "migration-report.html");
-    await writeReport(project, output, { noClobber: true });
-    finishCommand(project, options, {
+    await writeReport(decidedProject, output, { noClobber: true });
+    finishCommand(decidedProject, options, {
       command: "report",
       outputs: { report: output },
       humanLines: [`\nReport: ${output}`]
@@ -1335,17 +1591,19 @@ async function run(): Promise<void> {
     if (!options.output) throw new Error("convert requires --out <new-site>.");
     const output = resolve(options.output);
     const delivered = await deliverProjectMedia(project, options, config);
-    const ruleFiles = redirectRuleFiles(delivered);
-    await generateForTarget(options.target, delivered, output, generateOptions(options));
-    await writeReport(delivered, resolve(output, "migration", "report.html"));
-    finishCommand(delivered, options, {
+    const finalProject =
+      decisions === undefined ? delivered : applyDecisionsToProject(delivered, decisions);
+    const ruleFiles = redirectRuleFiles(finalProject);
+    await generateForTarget(options.target, finalProject, output, generateOptions(options));
+    await writeReport(finalProject, resolve(output, "migration", "report.html"));
+    finishCommand(finalProject, options, {
       command: "convert",
       outputs: {
         site: output,
         manifest: resolve(output, "migration", "manifest.json"),
         issues: resolve(output, "migration", "issues.json"),
         media: resolve(output, "migration", "media.json"),
-        ...((delivered.media.delivery?.copies.length ?? 0) === 0
+        ...((finalProject.media.delivery?.copies.length ?? 0) === 0
           ? {}
           : { mediaCopies: mediaRootPath(options.target, output) }),
         redirects: resolve(output, "migration", "redirects.json"),
@@ -1359,7 +1617,7 @@ async function run(): Promise<void> {
           targetAvailability[options.target].kind === "cms" ? "bundle" : "project"
         }: ${output}`,
         `Media inventory: ${resolve(output, "migration", "media.json")}`,
-        ...((delivered.media.delivery?.copies.length ?? 0) === 0
+        ...((finalProject.media.delivery?.copies.length ?? 0) === 0
           ? []
           : [`Media copies: ${mediaRootPath(options.target, output)}`]),
         `URL and redirect map: ${resolve(output, "migration", "redirects.json")}`,
@@ -1373,7 +1631,9 @@ async function run(): Promise<void> {
 
   if (options.command === "verify") {
     const delivered = await deliverProjectMedia(project, options, config);
-    const verification = await verifySite(delivered, {
+    const finalProject =
+      decisions === undefined ? delivered : applyDecisionsToProject(delivered, decisions);
+    const verification = await verifySite(finalProject, {
       ...(options.htmlDirectory === undefined ? {} : { htmlDirectory: options.htmlDirectory }),
       ...(options.routelintReport === undefined ? {} : { routelintReportPath: options.routelintReport }),
       ...(options.ssrwireReport === undefined ? {} : { ssrwireReportPath: options.ssrwireReport }),

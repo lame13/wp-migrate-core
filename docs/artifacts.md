@@ -27,6 +27,9 @@ what was written matches this page.
 | `migrationConfig` | `wp-migrate-core.config.json` | `0.7` | you — read by every command | The decisions the export cannot make: routes, exclusions, reviewed findings, post types, archives and media. |
 | `importReport` | `migration-import.json` | `0.9` | the generated importer | What the import did: created, updated, unchanged, skipped, failed, and every unresolved reference. |
 | `verification` | `migration-verification.json` | `0.9` | `verify` | The launch gate: content, media, links, canonical, robots, sitemap, delivery and import evidence. |
+| `aiRun` | `migration/ai/<job>/run.json` | `0.1` | `assist` | One AI assist run: endpoint host, model, prompt version, token usage, cache and rejected items. |
+| `aiSuggestions` | `migration/ai/<job>/suggestions.json` | `0.1` | `assist` | The reviewable suggestions one assist job produced, with confidence and provenance. |
+| `decisions` | `wp-migrate-core.decisions.json` | `0.1` | `assist apply` — read by `inspect`, `convert`, `report` and `verify` | Accepted alt text, routes, mappings and content patches that the deterministic pipeline applies. |
 
 ## The three numbering lines
 
@@ -40,6 +43,12 @@ what was written matches this page.
 3. **The config version.** `migrationConfigSchemaVersion`, currently `0.7`,
    which the parser refuses to read past. `wp-migrate-core schema` prints the
    JSON Schema for exactly the settings that version accepts.
+
+The optional AI assist layer adds its own independent number:
+`aiConfigSchemaVersion`, currently `0.1`, plus the `0.1` suggestion, run and
+decision files above. It lives in `wp-migrate-core.ai.json`, not in the
+migration config, so adding an assist setting never moves the frozen `0.7`
+format. `wp-migrate-core schema --ai` prints that schema.
 
 ## Reading a file safely
 
