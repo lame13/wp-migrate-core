@@ -43,7 +43,7 @@ Priority:
 | **Pruvious** | A Nuxt destination with admin, media, collections and editable Vue blocks. | Shipped in 0.11.0 as the second destination — the boundary's second proof |
 | **Ghost** | A straightforward destination for blogs and publications. | Later: Ghost already has a WordPress importer, so the advantage has to be better checking, preservation and repair reporting |
 
-Nuxt in 0.13.0 and Svelte in 0.14.0 are the parked static targets; they stay
+Nuxt and Svelte are the parked static targets; they stay
 declared in the registry so a caller can see them and get a reason. A bare
 Next.js renderer was parked behind the CMS work for two releases because
 Payload and Pruvious already deliver a Next and a Nuxt site — 0.12.0 settled
@@ -154,7 +154,7 @@ re-run:
 The release that made the promises executable, and added the destination that
 proves they are worth making.
 
-- **Next.js is the third destination**, written against the boundary instead of
+- **Next.js is the fourth destination**, written against the boundary instead of
   inside it. It shares Astro's page model — the same record preparation, body
   renderer, media renderer, menu, sitemap, feed writer and artifacts — and
   `test/next.test.ts` asserts the two handoffs render byte-identical HTML for
@@ -220,14 +220,14 @@ If a change touches a destination's generated project — `src/next.ts`,
 run the round trip for that destination before merging. A release runs all
 three.
 
-## Next — Nuxt in 0.13.0, Svelte in 0.14.0
+## Next — Nuxt, then Svelte
 
 The two declared-but-disabled targets are planned, in this order:
 
-- **0.13.0, Nuxt.** The Pruvious bundle already integrates with a Nuxt app, so
+- **Nuxt.** The Pruvious bundle already integrates with a Nuxt app, so
   the renderer has a reference implementation to borrow a shape from: content
   as JSON, a route index, and the same `verify --html-dir` story as Next.
-- **0.14.0, Svelte.** A SvelteKit target, last because it is the least likely to
+- **Svelte.** A SvelteKit target, last because it is the least likely to
   be someone's destination and, of the four static options, the one whose
   project structure moves most between releases.
 
@@ -239,7 +239,7 @@ target a script cannot discover.
 its own importer, so the pitch there is checking, preservation and repair
 reporting rather than movement.
 
-## Decisions to review before 0.13.0
+## Decisions to review before the next destination
 
 1. **Rich text depth.** 0.9.0 converts headings, paragraphs, lists, quotes,
    code, rules and the common inline formatting, and marks the rest. Revisit

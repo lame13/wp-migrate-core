@@ -166,7 +166,20 @@ export function createOpenAICompatibleProvider(
       if (!Array.isArray(data) || data.length !== inputs.length) {
         throw new Error("The embeddings endpoint returned a different number of vectors than inputs.");
       }
-      const vectors = data.map((entry, index) => {
+      // Compatible servers may return vectors out of order. When indexes are
+      // supplied, use them to keep each vector paired with its input.
+      const indexed = data.some((entry) => isRecord(entry) && entry.index !== undefined);
+      const ordered: unknown[] = new Array(inputs.length);
+      const seen = new Set<number>();
+      for (const [offset, entry] of data.entries()) {
+        const index = indexed && isRecord(entry) ? entry.index : offset;
+        if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= inputs.length || seen.has(index)) {
+          throw new Error("The embeddings endpoint returned invalid or duplicate input indexes.");
+        }
+        seen.add(index);
+        ordered[index] = entry;
+      }
+      const vectors = ordered.map((entry, index) => {
         if (!isRecord(entry) || !Array.isArray(entry.embedding)) {
           throw new Error(`The embeddings endpoint returned no vector for input ${index + 1}.`);
         }
@@ -179,6 +192,9 @@ export function createOpenAICompatibleProvider(
         }
         return vector as number[];
       });
+      if (vectors.some((vector) => vector.length !== vectors[0]?.length)) {
+        throw new Error("The embeddings endpoint returned vectors with different dimensions.");
+      }
       return vectors;
     }
   };

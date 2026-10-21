@@ -1,7 +1,7 @@
 {
   "name": "wp-migrate-core",
-  "version": "1.0.0",
-  "description": "Turn a WordPress WXR export into an Astro site or a Payload or Pruvious CMS app, with media, URL and link inventories, and a repair queue for the parts that still need a human.",
+  "version": "1.0.1",
+  "description": "AI-assisted WordPress migration to Astro, Next.js, Payload or Pruvious: automate repair triage, draft alt text and review route and shortcode suggestions before applying them.",
   "keywords": [
     "wordpress",
     "wordpress-migration",
@@ -15,7 +15,10 @@
     "elementor",
     "gutenberg",
     "cli",
-    "typescript"
+    "typescript",
+    "ai",
+    "ai-automation",
+    "migration-automation"
   ],
   "type": "module",
   "main": "./dist/src/index.js",

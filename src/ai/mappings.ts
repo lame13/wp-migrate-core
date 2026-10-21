@@ -4,6 +4,7 @@ import type { AiCache } from "./cache.js";
 import type { PlanBundle } from "./inputs.js";
 import { expectArray, expectEnum, expectObject, expectString, plainText } from "./json.js";
 import type { AiProvider } from "./provider.js";
+import { redactText } from "./redact.js";
 import type { AiConfig, MappingSuggestion } from "./types.js";
 
 export const mappingsPromptVersion = "mappings/1";
@@ -64,13 +65,13 @@ export async function runMappings(options: MappingOptions): Promise<readonly Map
     key: group.key,
     code: group.code,
     count: group.issues.length,
-    titles: unique(group.issues.map((issue) => plainText(issue.title, 180))).slice(0, 3),
+    titles: unique(group.issues.map((issue) => redactText(plainText(issue.title, 180), options.config.privacy.redact))).slice(0, 3),
     routes: unique(
       group.issues
         .map((issue) => issue.route)
         .filter((route): route is string => route !== undefined)
-    ).slice(0, 3),
-    actions: unique(group.issues.map((issue) => plainText(issue.requiredAction, 240))).slice(0, 2)
+    ).slice(0, 3).map((route) => redactText(route, options.config.privacy.redact)),
+    actions: unique(group.issues.map((issue) => redactText(plainText(issue.requiredAction, 240), options.config.privacy.redact))).slice(0, 2)
   }));
 
   const result = await askJson({

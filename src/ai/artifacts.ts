@@ -81,7 +81,7 @@ ${questions || "- None."}
 
 ## What this brief does not decide
 
-The model did not read post bodies for this triage. It worked from the finding queue and the plan counts. Severity, waivers, routes and launch gates stay deterministic and human-controlled. Review the suggestions, accept the ones you agree with with \`wp-migrate-core assist apply\`, and rebuild before treating the migration as complete.
+The model did not read post bodies for this triage. It worked from the finding queue and the plan counts. Severity, waivers, routes and launch gates stay deterministic and human-controlled. Use this work order to plan the migration. Run the alt-text, shortcodes, routes or repair job to produce reviewable decisions, then rebuild with the accepted decisions before treating the migration as complete.
 `;
 }
 
@@ -121,9 +121,11 @@ export function renderReview(document: AiSuggestionsDocument): string {
   <h1>${escapeHtml(title)}</h1>
   <p class="lede">${escapeHtml(document.summary)}</p>
   <p class="muted">${escapeHtml(document.provider.model)} at ${escapeHtml(document.provider.endpoint)} · prompt ${escapeHtml(document.promptVersion)} · generated ${escapeHtml(document.createdAt)}</p>
-  <div class="notice">Review the suggestions, then run <code>wp-migrate-core assist apply suggestions.json</code> from this directory. Nothing here changes the generated site until a decision is accepted.</div>
+  <div class="notice">${document.job === "triage"
+    ? "Use this work order to plan the migration. Run the alt-text, shortcodes, routes or repair job to produce decisions you can apply."
+    : `Review <code>suggestions.json</code>, keep the items you accept, then run <code>wp-migrate-core assist apply suggestions.json${document.job === "repair" ? " --accept repair" : ""}</code> from this directory. Rebuild with <code>--decisions</code> to apply them to the generated site.`}</div>
   ${document.triage === undefined ? "" : renderTriageReview(document.triage)}
-  ${document.items.length === 0 ? `<div class="panel"><p>No suggestions were produced.</p></div>` : renderItemTable(document.items)}
+  ${document.items.length === 0 ? (document.triage === undefined ? `<div class="panel"><p>No suggestions were produced.</p></div>` : "") : renderItemTable(document.items)}
   <h2>Reproduce this run</h2>
   <p>The AI config names an environment variable for the key; the key itself is never written to this directory. <code>run.json</code> records the endpoint, model, prompt version, token usage and any rejected items.</p>
 </main>

@@ -3,6 +3,7 @@ import type { AiCache } from "./cache.js";
 import type { MenuItemRecord, PlanBundle } from "./inputs.js";
 import { plainText } from "./json.js";
 import type { AiProvider } from "./provider.js";
+import { redactText } from "./redact.js";
 import type { AiConfig, RouteSuggestion } from "./types.js";
 
 export const routesPromptVersion = "routes/1";
@@ -44,14 +45,18 @@ export async function runRoutes(options: RoutesOptions): Promise<readonly RouteS
   const sources = collectSources(options.bundle).slice(0, options.maxItems);
   if (candidates.length === 0 || sources.length === 0) return [];
 
-  const sourceTexts = sources.map((source) => routeWords(`${source.label} ${source.source}`));
+  const sourceTexts = sources.map((source) => routeWords(redactText(`${source.label} ${source.source}`, options.config.privacy.redact)));
   const candidateTexts = candidates.map((candidate) =>
-    routeWords(`${candidate.title} ${candidate.route} ${candidate.kind}`)
+    routeWords(redactText(`${candidate.title} ${candidate.route} ${candidate.kind}`, options.config.privacy.redact))
   );
   const vectors = await embedWithCache(options.provider, options.cache, [
     ...sourceTexts,
     ...candidateTexts
   ], options.budget);
+  const dimensions = vectors[0]?.length;
+  if (!dimensions || vectors.some((vector) => vector.length !== dimensions || vector.some((value) => !Number.isFinite(value)))) {
+    throw new Error("Route matching needs finite embedding vectors with the same dimensions.");
+  }
   const sourceVectors = vectors.slice(0, sources.length);
   const candidateVectors = vectors.slice(sources.length);
 
@@ -167,7 +172,7 @@ function routeWords(value: string): string {
 }
 
 function cosine(left: readonly number[], right: readonly number[]): number {
-  const length = Math.min(left.length, right.length);
+  const length = left.length;
   let dot = 0;
   let leftNorm = 0;
   let rightNorm = 0;

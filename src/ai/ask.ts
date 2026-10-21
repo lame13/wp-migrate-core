@@ -88,6 +88,7 @@ export interface AskJsonResult<T> {
 export async function askJson<T>(options: AskJsonOptions<T>): Promise<AskJsonResult<T>> {
   const cacheKey = options.cache.key("chat", {
     prompt: options.promptVersion,
+    endpoint: options.provider.info.endpoint,
     model: options.provider.info.model,
     schema: options.schemaName,
     system: options.system,
@@ -150,7 +151,7 @@ export async function embedWithCache(
 
   for (let index = 0; index < inputs.length; index += 1) {
     const text = inputs[index] as string;
-    const key = cache.key("embed", { model: provider.info.embeddingsModel, text });
+    const key = cache.key("embed", { endpoint: provider.info.endpoint, model: provider.info.embeddingsModel, text });
     const cached = await cache.get<readonly number[]>(key);
     if (cached === undefined) {
       missing.push({ index, text, key });

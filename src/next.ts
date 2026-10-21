@@ -42,7 +42,7 @@ import type { MigrationProject } from "./types.js";
 /**
  * The Next.js destination.
  *
- * The third static renderer, and the first destination written against the
+ * The second static renderer, and the first destination written against the
  * public boundary rather than inside `src/generate.ts`: it shares the page
  * model, the body renderer, the media renderer, the navigation, the sitemap,
  * the feed writer and every migration artifact with the Astro handoff, and it

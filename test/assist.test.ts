@@ -323,7 +323,7 @@ test("content repair must survive the parser before it can become a decision", a
   };
   const suggestions = await runRepair({
     records: [record],
-    config: config(),
+    config: { ...config(), privacy: { ...config().privacy, send: "content" } },
     provider,
     cache: new AiCache(join(tmpdir(), "unused"), false),
     budget: new AiBudget(config().limits),

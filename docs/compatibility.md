@@ -1,6 +1,6 @@
 # What 1.0 promises
 
-This is 1.0.0. `apiStability` reports `stable`: the exported names, the migration
+This is the 1.0 stable line. `apiStability` reports `stable`: the exported names, the migration
 config format, the artifact contracts and the destination registry below are
 the published guarantee. The assist layer has its own config and artifact
 versions, documented in [ai.md](ai.md), and does not move the migration config.

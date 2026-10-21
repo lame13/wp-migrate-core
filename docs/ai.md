@@ -141,12 +141,17 @@ credentials, query strings or fragments.
 - Shortcode mapping sends finding titles, routes and required actions, not the
   full page.
 - Route matching sends route paths and titles to the embeddings endpoint.
-- Repair is the only job that sends a page body, and only the candidate body
-  (up to the prompt limit) with `--export`. Use `--dry-run` to see the job's
+- Repair is the only job that sends a page body. It requires `--export` and
+  `privacy.send: "content"`; the default `metadata` and `excerpts` modes refuse
+  the job. Pages over 12,000 characters are rejected instead of truncated.
+  If redaction would alter the body, the page is also rejected so an accepted
+  patch cannot replace real content with redaction placeholders. Review the
+  redaction settings for that page or repair it manually. Use `--dry-run` to see the job's
   input counts, destination, model and privacy mode before a request.
 - Email addresses, phone numbers and URL query strings are redacted by default.
   Keep `privacy.send` at `metadata` unless a job genuinely needs more.
-- The cache stores model responses locally under `cache.directory`; set
+- The cache separates responses by endpoint, model and input and stores them
+  locally under `cache.directory`; set
   `cache.enabled: false` if those responses must not be retained.
 - A model response is never trusted as HTML. Suggestions are parsed with the
   job's own validator. Repair patches must pass the WordPress parser and the

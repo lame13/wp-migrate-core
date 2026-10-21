@@ -324,6 +324,7 @@ test("repair runs only with an export and its accepted patch survives convert", 
     JSON.stringify({
       schemaVersion: "0.1",
       provider: { baseUrl: mock.baseUrl, model: "mock-model", apiKeyEnv: "TEST_AI_KEY" },
+      privacy: { send: "content" },
       cache: { enabled: false }
     })
   );

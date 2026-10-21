@@ -14,6 +14,7 @@ import {
 import type { AiProvider } from "./provider.js";
 import type { AiConfig, TriageResult } from "./types.js";
 import type { PlanBundle } from "./inputs.js";
+import { redactValue } from "./redact.js";
 
 export const triagePromptVersion = "triage/1";
 
@@ -57,7 +58,7 @@ export interface TriageOptions {
 }
 
 export async function runTriage(options: TriageOptions): Promise<TriageResult> {
-  const payload = buildTriagePayload(options.bundle);
+  const payload = redactValue(buildTriagePayload(options.bundle), options.config.privacy.redact);
   const availableCodes = new Set(options.bundle.issues.map((issue) => issue.code));
   const result = await askJson({
     provider: options.provider,

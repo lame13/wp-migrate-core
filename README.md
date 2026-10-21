@@ -1,18 +1,86 @@
 # wp-migrate-core
 
-Plan a WordPress migration, generate an Astro site or a Payload or Pruvious CMS bundle, and check the result before publishing.
+**AI-assisted WordPress migrations to Astro, Next.js, Payload and Pruvious.**
 
-`wp-migrate-core` reads a WordPress XML export (WXR) and helps you see what needs to move: content, images, URLs and links. Add a saved sitemap to find pages the export missed. It can then generate a **static site** — **Astro**, or a static-export **Next.js** app — with your content, images, navigation, the archive pages WordPress generated, a repair queue and redirect rules for Netlify, Vercel, nginx and Apache — or a **CMS app** with an admin to edit in, a media library, collections and a generated importer: **Payload** for Next.js, or **Pruvious** for Nuxt.
+Turn a WordPress XML export into a migration plan and a generated site or CMS app. Use your own AI endpoint and key to prioritize the repair queue, draft missing image descriptions, propose shortcode replacements and match old URLs to existing routes. Review the suggestions, accept decisions, then regenerate from the same export.
 
-To include images, supply a local copy of `wp-content/uploads` or the URL of a host that already serves them. A migration config lets you save route choices, excluded pages and findings you've reviewed, so you can repeat the migration without patching the output each time.
+- **Automate the repetitive work:** triage, alt-text drafts, shortcode and widget mappings, route suggestions and constrained markup repair.
+- **Keep decisions reviewable:** local HTML reviews, a client-readable brief and a reusable decisions file. AI runs only when you invoke `assist`; the migration engine works locally.
+- **Check the handoff:** content, media, navigation, URL coverage, host redirect rules and a verification command for the built site.
 
-After a build, `verify` checks for missing or substantially changed content, and then for launch readiness: media that never reached the build, links that lead nowhere, canonical URLs, `robots.txt` and the sitemap. Add a saved SSRWire audit to check responses, metadata and indexing too.
+![AI assist triage review showing a prioritized migration work order with findings, effort, owners and recommended actions.](https://raw.githubusercontent.com/lame13/wp-migrate-core/v1.0.1/docs/screenshots/ai-triage.png)
 
-Astro, Next.js, Payload and Pruvious are the supported destinations; Nuxt and Svelte are declared and refused with a reason. You'll still need to rebuild your theme, forms and plugin behavior, bring over your media, and review the generated output. Where WordPress served a page but this tool cannot, the repair queue says so rather than dropping it.
+*Actual review page for the fictional Bright Path Plumbing demo, using deterministic mock AI responses. Your provider generates the proposals for your export.*
 
-The reference documentation is in [`docs/`](docs/): the [API reference](docs/api.md), the [artifact catalog](docs/artifacts.md) with every file's own schema version, the [AI assist guide](docs/ai.md), the [compatibility contract](docs/compatibility.md) that says what is stable, the [destination guide](docs/destinations.md) and the [fixture corpus](docs/corpus.md).
+Generate a static **Astro** or **Next.js** site, or an editable **Payload** or **Pruvious** CMS app. Supply a local uploads directory or a media host to bring over images. Themes, forms and plugin behavior still need implementation and review.
 
-The repair queue is also the starting point for an optional **AI assist** layer: bring an OpenAI-compatible endpoint and your own key, and turn the findings into a prioritized work order, alt-text drafts, shortcode mappings and constrained route suggestions. The model proposes; `assist apply` records what you accept; the deterministic migration commands apply it. See [AI assist](docs/ai.md).
+## Automate the repair queue with AI
+
+**Automate triage, alt-text drafting, shortcode mapping, route matching and markup repair.** `assist` reads the plan artifacts and writes suggestions for review. It is the
+only command that talks to the network, and only when you invoke it. The key is
+read from the environment variable named in `wp-migrate-core.ai.json`; it is
+never written to a config, an artifact or a generated site.
+
+Install with **Node.js 22.12 or later**:
+
+```bash
+npm install --save-dev wp-migrate-core
+```
+
+Save this as `wp-migrate-core.ai.json` in your working directory, with your endpoint and model names:
+
+```json
+{
+  "schemaVersion": "0.1",
+  "provider": {
+    "baseUrl": "https://api.openai.com/v1",
+    "model": "your-chat-model",
+    "apiKeyEnv": "OPENAI_API_KEY",
+    "embeddingsModel": "your-embedding-model"
+  }
+}
+```
+
+```bash
+export OPENAI_API_KEY="..."
+npx wp-migrate-core inspect export.xml --out migration-plan
+npx wp-migrate-core assist migration-plan --job triage
+npx wp-migrate-core assist migration-plan --job alt-text
+
+# Open migration-plan/ai/alt-text/review.html.
+# Keep only the items you accept in suggestions.json, then apply them.
+npx wp-migrate-core assist apply migration-plan/ai/alt-text/suggestions.json
+npx wp-migrate-core convert export.xml --out new-site \
+  --uploads ../wordpress/wp-content/uploads \
+  --decisions wp-migrate-core.decisions.json
+```
+
+Open `migration-plan/ai/triage/review.html` for the prioritized work order and `brief.md` for a client-readable brief. Alt-text drafts are deduplicated by image, even when many pages use it. Review the wording against the actual image before accepting it.
+
+![AI assist alt-text review showing an image description draft, confidence and its reasoning.](https://raw.githubusercontent.com/lame13/wp-migrate-core/v1.0.1/docs/screenshots/ai-alt-text.png)
+
+*Actual review page from the bundled demo, using deterministic mock AI responses. Drafts use text context; this job does not inspect image pixels.*
+
+The jobs are:
+
+| Job | What it proposes |
+| --- | --- |
+| `triage` | A ranked work order and a client-readable `brief.md` from the finding queue. It does not read post bodies. |
+| `alt-text` | One alt-text decision per asset, deduplicated by asset id and only where alt text is absent. |
+| `shortcodes` | A static fallback, component name, removal or deliberate block for unsupported shortcodes, Elementor widgets and dynamic Gutenberg blocks. |
+| `routes` | A target chosen only from routes the plan already has, using embeddings and a score threshold. |
+| `repair` | A content patch for malformed block markup, accepted only if it passes the parser with no new findings. |
+
+`assist apply` accepts alt text, routes and shortcode mappings by default.
+Content repair requires `privacy.send: "content"` in the AI config and `--accept repair` when applying a reviewed patch. `--decisions` also works with
+`inspect`, `report` and `verify`, so a preview and a launch check can use the
+same accepted decisions.
+
+Bring-your-own-key also means bring-your-own-endpoint: configure an OpenAI-compatible chat server through `baseUrl`, `model` and optional `headers`. Route matching also needs an embeddings endpoint. Triage sends finding metadata, not
+post bodies. Alt text sends asset titles, dimensions and the pages that
+reference them. Repair is the only job that sends page content, and it says so
+in `--dry-run`. The full configuration, limits, artifacts and guardrails are in
+[docs/ai.md](docs/ai.md).
 
 ## Try it with the demo
 
@@ -29,9 +97,7 @@ The demo includes placeholder images. You'll find the copied files in `astro-sit
 
 It also carries a category and an author, so `astro-site/src/content/listings/` holds the archive pages WordPress would have served and `migration/archives.json` says how each route was decided. Add `--publish-ready` to the demo command to see the indexable version of the same handoff.
 
-![Version 0.4.0 migration report for the fictional Bright Path Plumbing site, showing blockers and the source summary.](https://raw.githubusercontent.com/lame13/wp-migrate-core/v0.4.0/docs/screenshots/demo-report.png)
-
-[View the live URL coverage screenshot.](https://raw.githubusercontent.com/lame13/wp-migrate-core/v0.4.0/docs/screenshots/url-coverage.png)
+![Version 1.0.1 migration report for Bright Path Plumbing, showing findings and the repair queue that AI assist reads.](https://raw.githubusercontent.com/lame13/wp-migrate-core/v1.0.1/docs/screenshots/demo-report.png)
 
 ## Use your own export
 
@@ -84,59 +150,6 @@ Conversion writes one content collection per post type in the export, such as `s
 | `public/sitemap.xml` | List the generated routes, using the configured site URL or the URL from the export. |
 
 The redirect map uses `schemaVersion: "0.2"`, the link inventory uses `"0.3"`, and the coverage check uses `"0.4"`. The media inventory uses `"0.7"`. The archive and menu inventories use `"0.8"`. The Astro manifest uses `"0.9"`, the Next.js manifest and its `content/routes.json` use `"0.12"`, the Payload and Pruvious manifests use `"0.11"` (their destination block names the config file, the admin host and the collections), and the verification artefact uses `"0.9"` (the import evidence). These describe each file's data format separately from the npm package version, and [docs/artifacts.md](docs/artifacts.md) is the full catalog.
-
-## AI assist: bring your own key
-
-`assist` reads the plan artifacts and writes suggestions for review. It is the
-only command that talks to the network, and only when you invoke it. The key is
-read from the environment variable named in `wp-migrate-core.ai.json`; it is
-never written to a config, an artifact or a generated site.
-
-```json
-{
-  "schemaVersion": "0.1",
-  "provider": {
-    "baseUrl": "https://api.openai.com/v1",
-    "model": "your-chat-model",
-    "apiKeyEnv": "OPENAI_API_KEY",
-    "embeddingsModel": "your-embedding-model"
-  }
-}
-```
-
-```bash
-export OPENAI_API_KEY="..."
-npx wp-migrate-core inspect export.xml --out migration-plan
-npx wp-migrate-core assist migration-plan --job triage
-npx wp-migrate-core assist migration-plan --job alt-text
-npx wp-migrate-core assist apply migration-plan/ai/alt-text/suggestions.json
-npx wp-migrate-core convert export.xml --out new-site \
-  --uploads ../wordpress/wp-content/uploads \
-  --decisions wp-migrate-core.decisions.json
-```
-
-The jobs are:
-
-| Job | What it proposes |
-| --- | --- |
-| `triage` | A ranked work order and a client-readable `brief.md` from the finding queue. It does not read post bodies. |
-| `alt-text` | One alt-text decision per asset, deduplicated by asset id and only where alt text is absent. |
-| `shortcodes` | A static fallback, component name, removal or deliberate block for unsupported shortcodes, Elementor widgets and dynamic Gutenberg blocks. |
-| `routes` | A target chosen only from routes the plan already has, using embeddings and a score threshold. |
-| `repair` | A content patch for malformed block markup, accepted only if it passes the parser with no new findings. |
-
-`assist apply` accepts alt text, routes and shortcode mappings by default.
-Content repair requires `--accept repair`. `--decisions` also works with
-`inspect`, `report` and `verify`, so a preview and a launch check can use the
-same accepted decisions.
-
-Bring-your-own-key also means bring-your-own-endpoint: OpenRouter, Groq,
-Together, vLLM, Ollama, LM Studio and other compatible servers work through
-`baseUrl`, `model` and optional `headers`. Triage sends finding metadata, not
-post bodies. Alt text sends asset titles, dimensions and the pages that
-reference them. Repair is the only job that sends page content, and it says so
-in `--dry-run`. The full configuration, limits, artifacts and guardrails are in
-[docs/ai.md](docs/ai.md).
 
 ## The Next.js destination
 
@@ -349,7 +362,7 @@ Command-line options override the corresponding config settings. Unknown setting
 
 ### URLs and redirects
 
-The map covers page and post permalinks in the export, including items excluded from the scan or skipped because of invalid IDs. It does not discover live-site URLs, attachment pages, custom post types, or archive routes.
+The map covers exported content permalinks, custom post types, generated archive routes and supported attachment-page redirects, including records excluded from the scan or skipped because of invalid IDs. Supply saved sitemaps with `--live-urls` to check URLs outside the export.
 
 For example, an exported `/guides/stop-a-leaking-tap` becomes `/guides/stop-a-leaking-tap/`, so the map includes that redirect. Apply reviewed rules on your hosting platform yourself.
 
@@ -672,6 +685,10 @@ The same config decides what the scan brings across: `postTypes.include` and `po
 `verifySite()` requires either `htmlDirectory` or `routelintReportPath`; the SSRWire report and baseline are optional additions. Its `launch` list contains the publishing findings. Use `readDeliveryEvidence()` and `deliveryLaunchFindings()` when you only need the audit results. For custom integrations, `deliveryCheckTargets()` maps routes to audit targets, and `launchFindings({ indexing, delivery })` combines audit results with indexing evidence from `indexingFromSignals()`.
 
 ## Development
+
+Reference documentation: [API](docs/api.md), [artifacts](docs/artifacts.md),
+[AI assist](docs/ai.md), [compatibility](docs/compatibility.md),
+[destinations](docs/destinations.md) and [fixture corpus](docs/corpus.md).
 
 From a checkout:
 

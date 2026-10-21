@@ -309,6 +309,7 @@ function preview(
       model,
       endpoint: config.provider.baseUrl,
       send: config.privacy.send,
+      requiredSend: job === "repair" ? "content" : "metadata",
       redact: config.privacy.redact,
       inputs: inputs[job],
       note:

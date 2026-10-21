@@ -16,6 +16,12 @@ export function redactValue(value: unknown, rules: readonly string[]): unknown {
 
 export function redactText(value: string, rules: readonly string[]): string {
   let result = value;
+  if (rules.includes("url-query")) {
+    result = result.replace(
+      /((?:\bhttps?:\/\/|\/)[^\s"'<>?#]*)[?#][^\s"'<>]*/gi,
+      "$1"
+    );
+  }
   if (rules.includes("email")) {
     result = result.replace(
       /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
@@ -27,11 +33,6 @@ export function redactText(value: string, rules: readonly string[]): string {
       /(?:\+?\d[\d ().-]{6,}\d)/g,
       (match) => (match.replace(/\D/g, "").length >= 7 ? "[phone]" : match)
     );
-  }
-  if (rules.includes("url-query")) {
-    result = result
-      .replace(/(\bhttps?:\/\/[^\s"'<>?#]+)\?[^\s"'<>]*/gi, "$1")
-      .replace(/(\bhttps?:\/\/[^\s"'<>?#]+)#[^\s"'<>]*/gi, "$1");
   }
   return result;
 }

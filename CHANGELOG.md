@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-21
+
+- Applies configured redaction to AI metadata and route-matching requests. Repair now requires `privacy.send: "content"`, refuses pages that would be redacted or truncated, and checks for excessive text loss when applying hand-edited patches.
+- Separates cached chat responses and embeddings by endpoint. Reads embedding response indexes and rejects inconsistent vector dimensions instead of matching the wrong routes.
+- Preserves existing image descriptions and decorative alt text when applying decisions. Keeps unresolved Elementor component mappings in the repair queue.
+- Corrects the AI review page’s triage and repair instructions. Highlights the automation workflow in the npm README with new screenshots of the generated reports.
+
 ## [1.0.0] - 2026-10-20
 
 The repair queue gets an optional, bring-your-own-key AI path — and the
@@ -19,11 +26,11 @@ export or an accepted decision.
 - **The 1.0 promise is now published.** `apiStability` is `stable`. The migration config stays at `0.7`; AI settings and artifacts have their own `0.1` schema versions, so the frozen migration format did not move.
 - **New tests cover the seam.** A mock provider exercises config validation, bearer/key handling, triage, alt-text deduplication, shortcode application, route constraints and parser-gated repair. A localhost mock endpoint runs the CLI end to end through `assist`, `assist apply` and `convert --decisions`.
 
-## [0.12.0] - 2026-10-12
+## [0.12.0] - 2026-10-14
 
-Four destinations. The boundary between "the export" and "what the export becomes" is now a public one: a third static renderer arrives, the remaining parked targets say what they are waiting for, and the promises this project makes — its exported names, its file formats, its destinations — are written down and checked by the test suite rather than by the changelog.
+Four destinations. The boundary between "the export" and "what the export becomes" is now a public one: a second static renderer arrives, the remaining parked targets say what they are waiting for, and the promises this project makes — its exported names, its file formats, its destinations — are written down and checked by the test suite rather than by the changelog.
 
-- **Next.js is the third destination.** `convert --target next` writes a static-export Next app: the App Router, one JSON file per page plus `content/routes.json`, a catch-all route that prerenders every planned route, the menu as a component, `robots.txt` and a sitemap, and the same `migration/` artifacts every other destination writes. Because it is a static export, `next build` writes `out/` — which is exactly what `verify --html-dir out` reads, so the third destination is checked by the same launch gate as the first. A static export cannot serve a redirect, and the handoff says so: the redirect map is published as host rules in `migration/redirect-rules/`.
+- **Next.js is the fourth destination.** `convert --target next` writes a static-export Next app: the App Router, one JSON file per page plus `content/routes.json`, a catch-all route that prerenders every planned route, the menu as a component, `robots.txt` and a sitemap, and the same `migration/` artifacts every other destination writes. Because it is a static export, `next build` writes `out/` — which is exactly what `verify --html-dir out` reads, so the new destination is checked by the same launch gate as the first. A static export cannot serve a redirect, and the handoff says so: the redirect map is published as host rules in `migration/redirect-rules/`.
 - **The Next handoff shares the Astro renderer's page model, not a copy of it.** The record/listing preparation, the body renderer, the media renderer, the internal link rewriting, the menu, the sitemap, the feed writer and every artifact are the same code for both. `test/next.test.ts` asserts the two handoffs render byte-identical HTML for the same record. Adding the destination put no rule into `src/core.ts`.
 - **`npm run test:next` is a real round trip.** It installs Next 16 and React 19 into a temporary workspace, type-checks the generated app, runs `next build`, checks that every planned route reached `out/`, that a custom post type and the menu travelled, that delivered media is served from the build, that a publish-ready handoff comes out with no launch blocker, and that a redirect the plan published for the host is not faked by the app.
 - **`npm run test:pruvious` closes the last validation gate.** It installs Nuxt and Pruvious, boots the generated app, and imports through the app's own protected route — then imports again and requires every record to come back `unchanged`, which is a claim about the database that only a real second run can make.

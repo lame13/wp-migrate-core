@@ -262,7 +262,7 @@ export function applyDecisionsToProject(
   const base = applyDecisionRoutesToProject(project, decisions);
 
   const assets = base.media.assets.map((asset) =>
-    changedAssets.has(asset.id) && altText[asset.id] !== undefined
+    changedAssets.has(asset.id) && altText[asset.id] !== undefined && !asset.altText?.trim()
       ? { ...asset, altText: altText[asset.id] as string }
       : asset
   );
@@ -270,7 +270,7 @@ export function applyDecisionsToProject(
   const references = base.media.references.map((reference) => {
     const key = reference.assetId ?? reference.id;
     const value = altText[key];
-    if (value === undefined) return reference;
+    if (value === undefined || reference.status !== "missing-alt-text") return reference;
     changedReferences += reference.status === "missing-alt-text" ? 1 : 0;
     return {
       ...reference,
@@ -470,7 +470,8 @@ function applyRecordDecisions(
     validateRepairHtml(
       patch.html,
       new Set([...originalCodes, ...codes]),
-      codes
+      codes,
+      record.rawContent
     );
     rawContent = patch.html;
     issues = issues.filter((issue) => !patch.issueCodes.includes(issue.code));
@@ -509,7 +510,8 @@ function applyRecordDecisions(
       const widget = /Elementor widget ([A-Za-z0-9_/-]+)/i.exec(issue.title)?.[1];
       const element = /Unknown Elementor element type ([A-Za-z0-9_/-]+)/i.exec(issue.title)?.[1];
       const key = widget === undefined ? (element === undefined ? undefined : `elementor-element:${element}`) : `elementor-widget:${widget}`;
-      return key === undefined || !Object.prototype.hasOwnProperty.call(shortcodes, key);
+      const action = key === undefined ? undefined : shortcodes[key]?.action;
+      return action !== "static-fallback" && action !== "remove";
     });
     changed = true;
   }
